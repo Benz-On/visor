@@ -1,6 +1,6 @@
 [package]
 name = "visor"
-version = "0.4.0-alpha.1"
+version = "0.4.0-alpha.2"
 description = "VISOR premium local system monitor"
 authors = ["Benz Engineering"]
 edition = "2021"
@@ -26,4 +26,3 @@ codegen-units = 1
 lto = true
 opt-level = "s"
 panic = "abort"
-strip = true

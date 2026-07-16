@@ -1,6 +1,6 @@
 # VISOR
 
-Current version: **0.4.0-alpha.1**
+Current version: **0.4.0-alpha.2**
 
 VISOR is a premium, local-first Windows system monitor for demanding
 workstations, AI workloads, games, and creative tools. It combines a calm,
@@ -79,6 +79,26 @@ npm.cmd run desktop:build:debug
 ```
 
 The executable is written to `src-tauri/target/debug/visor.exe`.
+
+## Build Windows release artifacts
+
+The audited Windows pipeline produces both supported delivery modes:
+
+```powershell
+npm.cmd run release:windows
+```
+
+Outputs are written to the ignored `artifacts/` directory:
+
+- `VISOR-<version>-windows-x64-portable.exe`
+- `VISOR-<version>-windows-x64-setup.exe`
+- `release-manifest.json`
+- `SHA256SUMS.txt`
+
+The installer carries the Microsoft WebView2 bootstrapper. The portable build
+uses the WebView2 runtime already distributed with supported Windows 10/11
+systems. Alpha and beta artifacts are currently unsigned and Windows will show
+the corresponding publisher warning until production code signing is enabled.
 
 ## Validate
 

@@ -1,7 +1,7 @@
 {
   "name": "visor-system-monitor",
   "private": true,
-  "version": "0.4.0-alpha.1",
+  "version": "0.4.0-alpha.2",
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
@@ -9,6 +9,7 @@
     "desktop": "tauri dev",
     "desktop:build": "tauri build",
     "desktop:build:debug": "tauri build --debug --no-bundle",
+    "release:windows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1",
     "test:agent": "node --test tests/*.test.mjs",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
