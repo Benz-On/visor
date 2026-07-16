@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { processes as demoProcesses } from '../data';
 import type { LiveMetrics, MetricKey, SystemSnapshot } from '../types';
 import { useTelemetry } from './useTelemetry';
@@ -7,6 +8,8 @@ const AGENT_URL = 'http://127.0.0.1:1421';
 const historyKeys: Array<MetricKey | 'network' | 'disk'> = ['cpu', 'gpu', 'ram', 'vram', 'network', 'disk'];
 
 type ConnectionState = 'connecting' | 'live' | 'demo' | 'error';
+
+const isTauri = () => '__TAURI_INTERNALS__' in window;
 
 export function useVisorData(paused: boolean) {
   const [snapshot, setSnapshot] = useState<SystemSnapshot | null>(null);
@@ -18,9 +21,12 @@ export function useVisorData(paused: boolean) {
 
   const fetchSnapshot = useCallback(async (signal?: AbortSignal) => {
     try {
-      const response = await fetch(`${AGENT_URL}/api/snapshot`, { cache: 'no-store', signal });
-      if (!response.ok) throw new Error(`Agent returned ${response.status}`);
-      const next = await response.json() as SystemSnapshot;
+      const next = isTauri()
+        ? await invoke<SystemSnapshot>('get_system_snapshot')
+        : await fetch(`${AGENT_URL}/api/snapshot`, { cache: 'no-store', signal }).then(async (response) => {
+          if (!response.ok) throw new Error(`Agent returned ${response.status}`);
+          return response.json() as Promise<SystemSnapshot>;
+        });
       setSnapshot(next);
       setConnection('live');
       connectedRef.current = true;
@@ -57,6 +63,32 @@ export function useVisorData(paused: boolean) {
 
   const performAction = useCallback(async (path: string, body: Record<string, unknown>) => {
     setActionError(null);
+    if (isTauri()) {
+      let result: { ok?: boolean; error?: string };
+      if (path.endsWith('/kill')) {
+        result = await invoke('kill_process', {
+          pid: Number(path.split('/')[3]),
+          confirmation: String(body.confirmation),
+          tree: body.tree !== false,
+          force: body.force === true,
+        });
+      } else if (path.endsWith('/priority')) {
+        result = await invoke('set_process_priority', {
+          pid: Number(path.split('/')[3]),
+          priority: body.priority,
+        });
+      } else if (path.startsWith('/api/alerts/')) {
+        const alertId = path.split('/').pop();
+        result = await invoke('set_alert_rule', {
+          id: alertId,
+          enabled: Boolean(body.enabled),
+        });
+      } else {
+        throw new Error('Unsupported native VISOR action.');
+      }
+      await fetchSnapshot();
+      return result;
+    }
     const response = await fetch(`${AGENT_URL}${path}`, {
       method: 'POST',
       headers: {

@@ -1,0 +1,234 @@
+mod alerts;
+mod collector;
+mod energy;
+mod local_ai;
+
+use collector::Collector;
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::process::Command;
+use std::sync::{Arc, Mutex, RwLock};
+use std::thread;
+use std::time::Duration;
+use tauri::State;
+
+#[derive(Clone)]
+struct RuntimeState {
+    latest: Arc<RwLock<Option<Value>>>,
+    alert_settings: Arc<Mutex<HashMap<String, bool>>>,
+}
+
+#[tauri::command]
+fn get_system_snapshot(state: State<'_, RuntimeState>) -> Result<Value, String> {
+    state
+        .latest
+        .read()
+        .map_err(|_| "VISOR telemetry state is unavailable.".to_string())?
+        .clone()
+        .ok_or_else(|| "VISOR native telemetry is starting.".to_string())
+}
+
+#[tauri::command]
+fn kill_process(
+    state: State<'_, RuntimeState>,
+    pid: u32,
+    confirmation: String,
+    tree: bool,
+    force: bool,
+) -> Result<Value, String> {
+    if confirmation != pid.to_string() {
+        return Err("PID confirmation does not match.".to_string());
+    }
+    let target = find_target(&state, pid)?;
+    if target
+        .get("protected")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+    {
+        return Err("VISOR protects this critical Windows process.".to_string());
+    }
+    #[cfg(windows)]
+    {
+        let mut args = vec!["/PID".to_string(), pid.to_string()];
+        if tree {
+            args.push("/T".to_string());
+        }
+        if force {
+            args.push("/F".to_string());
+        }
+        let output = hidden_command("taskkill.exe")
+            .args(args)
+            .output()
+            .map_err(|error| error.to_string())?;
+        if !output.status.success() {
+            let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(if message.is_empty() {
+                "Windows refused to terminate the process. Try running VISOR as administrator."
+                    .to_string()
+            } else {
+                message
+            });
+        }
+        Ok(json!({ "ok": true, "action": "kill", "pid": pid, "name": target.get("name") }))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (tree, force, target);
+        Err("Process termination is not available on this platform build.".to_string())
+    }
+}
+
+#[tauri::command]
+fn set_process_priority(
+    state: State<'_, RuntimeState>,
+    pid: u32,
+    priority: String,
+) -> Result<Value, String> {
+    let target = find_target(&state, pid)?;
+    if target
+        .get("protected")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+    {
+        return Err("VISOR protects this critical Windows process.".to_string());
+    }
+    let windows_class = match priority.as_str() {
+        "low" => "Idle",
+        "belowNormal" => "BelowNormal",
+        "normal" => "Normal",
+        "aboveNormal" => "AboveNormal",
+        "high" => "High",
+        _ => return Err("Unsupported priority class.".to_string()),
+    };
+    #[cfg(windows)]
+    {
+        let script = "& { param([int]$TargetPid,[string]$Class) $p = Get-Process -Id $TargetPid -ErrorAction Stop; $p.PriorityClass = $Class }";
+        let output = hidden_command("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+                "-TargetPid",
+                &pid.to_string(),
+                "-Class",
+                windows_class,
+            ])
+            .output()
+            .map_err(|error| error.to_string())?;
+        if !output.status.success() {
+            let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(if message.is_empty() {
+                "Windows refused the priority change. Try running VISOR as administrator."
+                    .to_string()
+            } else {
+                message
+            });
+        }
+        Ok(
+            json!({ "ok": true, "action": "priority", "pid": pid, "name": target.get("name"), "priority": priority }),
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (windows_class, target);
+        Err("Priority control is not available on this platform build.".to_string())
+    }
+}
+
+#[tauri::command]
+fn set_alert_rule(
+    state: State<'_, RuntimeState>,
+    id: String,
+    enabled: bool,
+) -> Result<Value, String> {
+    let known = [
+        "cpu-sustained",
+        "gpu-sustained",
+        "cpu-thermal",
+        "gpu-thermal",
+        "ssd-thermal",
+        "vram-pressure",
+    ];
+    if !known.contains(&id.as_str()) {
+        return Err("Unknown alert rule.".to_string());
+    }
+    state
+        .alert_settings
+        .lock()
+        .map_err(|_| "VISOR alert settings are unavailable.".to_string())?
+        .insert(id.clone(), enabled);
+    Ok(json!({ "ok": true, "action": "alert-rule", "id": id, "enabled": enabled }))
+}
+
+fn find_target(state: &RuntimeState, pid: u32) -> Result<Value, String> {
+    let guard = state
+        .latest
+        .read()
+        .map_err(|_| "VISOR telemetry state is unavailable.".to_string())?;
+    let snapshot = guard
+        .as_ref()
+        .ok_or_else(|| "VISOR telemetry is starting.".to_string())?;
+    snapshot
+        .get("processes")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item.get("id").and_then(Value::as_u64) == Some(pid as u64))
+                .cloned()
+        })
+        .ok_or_else(|| "The process is no longer running.".to_string())
+}
+
+fn start_collector(state: RuntimeState) {
+    thread::Builder::new()
+        .name("visor-collector".to_string())
+        .spawn(move || {
+            let mut collector = Collector::new();
+            loop {
+                if let Ok(settings) = state.alert_settings.lock() {
+                    for (id, enabled) in settings.iter() {
+                        collector.set_alert_rule(id, *enabled);
+                    }
+                }
+                let snapshot = collector.collect();
+                if let Ok(mut latest) = state.latest.write() {
+                    *latest = Some(snapshot);
+                }
+                thread::sleep(Duration::from_millis(1100));
+            }
+        })
+        .expect("failed to start VISOR collector");
+}
+
+fn hidden_command(program: &str) -> Command {
+    let mut command = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    command
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    let state = RuntimeState {
+        latest: Arc::new(RwLock::new(None)),
+        alert_settings: Arc::new(Mutex::new(HashMap::new())),
+    };
+    start_collector(state.clone());
+    tauri::Builder::default()
+        .manage(state)
+        .invoke_handler(tauri::generate_handler![
+            get_system_snapshot,
+            kill_process,
+            set_process_priority,
+            set_alert_rule
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running VISOR");
+}

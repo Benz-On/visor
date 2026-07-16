@@ -217,7 +217,7 @@ export interface AgentInfo {
 
 export interface SystemSnapshot {
   timestamp: string;
-  source: 'windows-agent';
+  source: 'windows-agent' | 'tauri-native';
   pollMs: number;
   hardware: HardwareInfo;
   metrics: Omit<LiveMetrics, 'history'>;

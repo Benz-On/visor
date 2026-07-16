@@ -1,6 +1,6 @@
 # VISOR
 
-Current version: **0.3.0**
+Current version: **0.4.0-alpha.1**
 
 VISOR is a premium, local-first Windows system monitor for demanding
 workstations, AI workloads, games, and creative tools. It combines a calm,
@@ -27,6 +27,8 @@ performs explicitly confirmed process actions.
 - 1.1 second live refresh, pause/resume, and command palette
 - Responsive desktop, compact, and mobile layouts
 - Local-only API bound to `127.0.0.1`; no telemetry leaves the device
+- Native Tauri desktop runtime with an embedded Rust collector and no Node.js
+  requirement for the compiled application
 
 When the local agent is unavailable, VISOR makes the fallback demo state
 explicit instead of presenting simulated values as real telemetry.
@@ -56,12 +58,35 @@ npm.cmd run dev
 
 Open [http://localhost:1420](http://localhost:1420).
 
+## Run the native desktop alpha
+
+Requirements: Windows 10/11, Rust stable with the MSVC target, Visual Studio
+2022 Build Tools with the C++ workload, Node.js 20 or newer, and WebView2.
+
+```powershell
+npm.cmd install
+npm.cmd run desktop
+```
+
+The desktop runtime invokes the embedded Rust collector directly. The legacy
+loopback agent remains available for browser development, but it is not needed
+by the compiled desktop executable.
+
+Build a native executable without an installer:
+
+```powershell
+npm.cmd run desktop:build:debug
+```
+
+The executable is written to `src-tauri/target/debug/visor.exe`.
+
 ## Validate
 
 ```powershell
 npm.cmd run lint
 npm.cmd run build
 npm.cmd run test:agent
+cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
 The production web bundle is written to `dist/`.
@@ -116,10 +141,10 @@ Cost and carbon projections use configurable assumptions. Defaults are
 - Critical Windows processes, PID 0-4, and the agent itself cannot be terminated.
 - Command arguments are passed directly to Windows tools without shell interpolation.
 
-## Native collector roadmap
+## Native collector architecture
 
-The next milestone moves the agent into a signed Tauri 2 / Rust collector while
-keeping the same product surfaces. Collection will remain layered so VISOR stays
+The Tauri 2 desktop build now embeds a Rust collector while keeping the browser
+agent as a development fallback. Collection remains layered so VISOR stays
 useful when a vendor-specific API is unavailable:
 
 1. PDH and Windows performance counters for CPU, memory, disk, and network.
