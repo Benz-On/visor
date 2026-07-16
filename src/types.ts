@@ -1,5 +1,7 @@
 export type MetricTone = 'cyan' | 'violet' | 'mint' | 'amber' | 'rose';
 
+export type ThemeId = 'studio' | 'porcelain' | 'cyber' | 'retro';
+
 export type MetricKey = 'cpu' | 'gpu' | 'ram' | 'vram';
 
 export interface LiveMetrics {
@@ -9,6 +11,9 @@ export interface LiveMetrics {
   vram: number;
   cpuTemp: number;
   gpuTemp: number;
+  ssdTemp?: number;
+  storageTemperatures?: StorageTemperature[];
+  sensorSources?: { cpu: string | null; gpu: string | null; storage: string[] };
   cpuPower: number;
   gpuPower: number;
   download: number;
@@ -52,6 +57,104 @@ export interface ProcessInfo {
   handles?: number;
   threads?: number;
   gpuEngines?: Record<string, number>;
+  aiApplication?: string;
+  aiRuntime?: string;
+  aiRole?: string;
+}
+
+export interface StorageTemperature {
+  name: string;
+  deviceId: string | null;
+  temperature: number;
+  temperatureMax: number;
+  wear: number | null;
+  source: string;
+}
+
+export interface LocalAiProcess {
+  pid: number;
+  name: string;
+  role: string;
+  cpu: number;
+  gpu: number;
+  vramGb: number;
+  energyWatts: number;
+}
+
+export interface LocalModelInfo {
+  id: string;
+  application: string;
+  runtime: string;
+  model: string;
+  status: 'active' | 'loaded' | 'detected';
+  source: string;
+  confidence: number;
+  family: string;
+  parameters: string;
+  quantization: string;
+  format: string;
+  contextLength: number;
+  allocatedBytes: number;
+  allocatedVramBytes: number;
+  allocatedRamBytes: number;
+  allocatedVramGb: number;
+  expiresAt: string | null;
+  process: LocalAiProcess | null;
+  applicationEnergyWatts: number | null;
+  applicationCpu: number;
+  applicationGpu: number;
+}
+
+export interface LocalAiApplication {
+  id: string;
+  application: string;
+  runtime: string;
+  processes: LocalAiProcess[];
+  cpu: number;
+  gpu: number;
+  memoryGb: number;
+  vramGb: number;
+  energyWatts: number;
+  active: boolean;
+}
+
+export interface LocalAiSnapshot {
+  scannedAt: string | null;
+  adapters: Array<{ id: string; name: string; status: 'online' | 'offline'; endpoint: string }>;
+  models: LocalModelInfo[];
+  applications: LocalAiApplication[];
+  activeModelCount: number;
+  loadedModelCount: number;
+}
+
+export interface AlertRule {
+  id: string;
+  title: string;
+  metric: string;
+  threshold: number;
+  durationMs: number;
+  unit: string;
+  suppressDuringGaming: boolean;
+  enabled: boolean;
+  severity: 'warning' | 'critical';
+}
+
+export interface AlertState extends AlertRule {
+  value: number;
+  sensorAvailable: boolean;
+  suppressed: boolean;
+  elapsedMs: number;
+  progress: number;
+  active: boolean;
+  since: string | null;
+}
+
+export interface AlertsSnapshot {
+  active: AlertState[];
+  watch: AlertState[];
+  recent: Array<{ id: string; ruleId: string; title: string; peak: number; unit: string; startedAt: string; resolvedAt: string; gamingSuppressed: boolean }>;
+  gaming: { active: boolean; processName: string | null; pid: number | null; suppressedRuleIds: string[] };
+  rules: AlertRule[];
 }
 
 export interface EnergyEstimate {
@@ -97,7 +200,7 @@ export interface HardwareInfo {
     powerLimit: number;
   };
   memory: { totalBytes: number; modules: Array<{ sizeBytes: number; type: string; clockMhz: number }> };
-  storage: Array<{ name: string; type: string; sizeBytes: number; smartStatus: string }>;
+  storage: Array<{ name: string; type: string; sizeBytes: number; smartStatus: string; temperature?: number; temperatureSource?: string | null }>;
   displays: Array<{ model: string; main: boolean; resolution: string; refreshRate: number }>;
 }
 
@@ -108,6 +211,7 @@ export interface AgentInfo {
   uptimeSeconds: number;
   sampleDurationMs: number;
   gpuAttributionAvailable: boolean;
+  sensorAttributionAvailable: boolean;
   lastError: string | null;
 }
 
@@ -120,5 +224,7 @@ export interface SystemSnapshot {
   energy: EnergyEstimate;
   processes: ProcessInfo[];
   processCounts: { all: number; running: number; blocked: number; sleeping: number };
+  localAI: LocalAiSnapshot;
+  alerts: AlertsSnapshot;
   agent: AgentInfo;
 }

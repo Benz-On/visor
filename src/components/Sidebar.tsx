@@ -20,23 +20,29 @@ interface SidebarProps {
   onNavigate: (view: ViewId) => void;
   onCollapse: () => void;
   connection: 'connecting' | 'live' | 'demo' | 'error';
+  activeModelCount: number;
+  activeAlertCount: number;
 }
 
 const primaryItems = [
   { id: 'overview' as const, label: 'Overview', icon: LayoutDashboard },
   { id: 'processes' as const, label: 'Processes', icon: Cpu },
   { id: 'performance' as const, label: 'Performance', icon: ChartNoAxesCombined },
-  { id: 'ai' as const, label: 'AI workloads', icon: Bot, badge: '1' },
+  { id: 'ai' as const, label: 'AI workloads', icon: Bot },
   { id: 'energy' as const, label: 'Energy lens', icon: Leaf, badge: 'LIVE' },
 ];
 
 const secondaryItems = [
   { id: 'history' as const, label: 'History', icon: History },
-  { id: 'alerts' as const, label: 'Alerts', icon: Bell, badge: '2' },
+  { id: 'alerts' as const, label: 'Alerts', icon: Bell },
 ];
 
-export function Sidebar({ active, collapsed, onNavigate, onCollapse, connection }: SidebarProps) {
-  const renderItem = ({ id, label, icon: Icon, badge }: (typeof primaryItems)[number] | (typeof secondaryItems)[number]) => (
+export function Sidebar({ active, collapsed, onNavigate, onCollapse, connection, activeModelCount, activeAlertCount }: SidebarProps) {
+  const renderItem = (item: (typeof primaryItems)[number] | (typeof secondaryItems)[number]) => {
+    const { id, label, icon: Icon } = item;
+    const staticBadge = 'badge' in item ? item.badge : undefined;
+    const badge = id === 'ai' ? (activeModelCount > 0 ? String(activeModelCount) : undefined) : id === 'alerts' ? (activeAlertCount > 0 ? String(activeAlertCount) : undefined) : staticBadge;
+    return (
     <button
       key={id}
       className={`nav-item ${active === id ? 'nav-item-active' : ''}`}
@@ -47,7 +53,8 @@ export function Sidebar({ active, collapsed, onNavigate, onCollapse, connection 
       <span>{label}</span>
       {badge && <em>{badge}</em>}
     </button>
-  );
+    );
+  };
 
   return (
     <aside className={`sidebar ${collapsed ? 'sidebar-collapsed' : ''}`}>

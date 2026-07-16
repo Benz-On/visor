@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   Activity,
   Bell,
@@ -9,20 +9,20 @@ import {
   Clock3,
   Command,
   Cpu,
-  Download,
   Gauge,
+  Gamepad2,
   HardDrive,
   Info,
   Leaf,
   Maximize2,
   MemoryStick,
-  Moon,
   Network,
+  Palette,
   Pause,
   Play,
-  Plus,
   Search,
   ShieldCheck,
+  ShieldAlert,
   Sparkles,
   Sun,
   Thermometer,
@@ -33,12 +33,20 @@ import { Donut, LineChart } from './components/Charts';
 import { ProcessTable } from './components/ProcessTable';
 import { Sidebar, type ViewId } from './components/Sidebar';
 import { useVisorData } from './hooks/useVisorData';
-import type { AgentInfo, EnergyEstimate, HardwareInfo, MetricKey, MetricTone, ProcessInfo } from './types';
+import type { AgentInfo, AlertsSnapshot, EnergyEstimate, HardwareInfo, LocalAiSnapshot, MetricKey, MetricTone, ProcessInfo, ThemeId } from './types';
+
+const themeOrder: ThemeId[] = ['studio', 'porcelain', 'cyber', 'retro'];
+const themeNames: Record<ThemeId, string> = {
+  studio: 'Studio',
+  porcelain: 'Porcelain',
+  cyber: 'Cyberdeck',
+  retro: 'Retro terminal',
+};
 
 const viewTitles: Record<ViewId, { eyebrow: string; title: string; description: string }> = {
   overview: {
     eyebrow: 'SYSTEM OVERVIEW',
-    title: 'Good morning, Alex.',
+    title: 'Your system, clearly understood.',
     description: 'Live hardware, processes and energy in one calm view.',
   },
   processes: {
@@ -54,7 +62,7 @@ const viewTitles: Record<ViewId, { eyebrow: string; title: string; description: 
   ai: {
     eyebrow: 'AI WORKLOADS',
     title: 'Local intelligence, understood.',
-    description: 'Model activity, memory footprint and inference speed.',
+    description: 'Exact application, runtime, model identity and live resource footprint.',
   },
   energy: {
     eyebrow: 'ENERGY LENS',
@@ -82,7 +90,10 @@ function App() {
   const [activeView, setActiveView] = useState<ViewId>('overview');
   const [collapsed, setCollapsed] = useState(false);
   const [paused, setPaused] = useState(false);
-  const [theme, setTheme] = useState<'dark' | 'light'>('dark');
+  const [theme, setTheme] = useState<ThemeId>(() => {
+    const saved = window.localStorage.getItem('visor-theme');
+    return themeOrder.includes(saved as ThemeId) ? saved as ThemeId : 'studio';
+  });
   const [commandOpen, setCommandOpen] = useState(false);
   const visor = useVisorData(paused);
   const metrics = visor.metrics;
@@ -99,17 +110,23 @@ function App() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
+  useEffect(() => {
+    window.localStorage.setItem('visor-theme', theme);
+  }, [theme]);
+
   const title = viewTitles[activeView];
   const thermalAlert = metrics.cpuTemp >= 90 || metrics.gpuTemp >= 86;
+  const activeAlertCount = visor.snapshot?.alerts?.active.length || 0;
   const healthLabel = visor.connection === 'demo'
     ? 'Demo mode'
     : visor.connection === 'error'
       ? 'Reconnecting'
       : visor.connection === 'connecting'
         ? 'Connecting'
-        : thermalAlert
+        : activeAlertCount > 0 || thermalAlert
           ? 'Attention'
           : 'Telemetry active';
+  const cycleTheme = () => setTheme((current) => themeOrder[(themeOrder.indexOf(current) + 1) % themeOrder.length]);
 
   return (
     <div className="app-shell" data-theme={theme}>
@@ -119,6 +136,8 @@ function App() {
         onNavigate={setActiveView}
         onCollapse={() => setCollapsed((value) => !value)}
         connection={visor.connection}
+        activeModelCount={visor.snapshot?.localAI?.loadedModelCount || 0}
+        activeAlertCount={activeAlertCount}
       />
 
       <main className="main-content">
@@ -136,12 +155,8 @@ function App() {
             <button className="icon-button" onClick={() => setPaused((value) => !value)} aria-label={paused ? 'Resume monitoring' : 'Pause monitoring'}>
               {paused ? <Play size={17} /> : <Pause size={17} />}
             </button>
-            <button
-              className="icon-button"
-              onClick={() => setTheme((value) => (value === 'dark' ? 'light' : 'dark'))}
-              aria-label="Toggle theme"
-            >
-              {theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}
+            <button className="icon-button theme-cycle" onClick={cycleTheme} aria-label={`Change theme. Current: ${themeNames[theme]}`} title={`Theme: ${themeNames[theme]}`}>
+              <Palette size={17} />
             </button>
             <button className="icon-button notification-button" aria-label="Notifications">
               <Bell size={17} />
@@ -170,14 +185,14 @@ function App() {
             )}
           </section>
 
-          {activeView === 'overview' && <Overview metrics={metrics} energy={visor.snapshot?.energy} hardware={visor.snapshot?.hardware} processes={visor.processes} live={visor.connection === 'live'} onKill={visor.killProcess} onPriority={visor.setProcessPriority} />}
+          {activeView === 'overview' && <Overview metrics={metrics} energy={visor.snapshot?.energy} hardware={visor.snapshot?.hardware} localAI={visor.snapshot?.localAI} processes={visor.processes} live={visor.connection === 'live'} onKill={visor.killProcess} onPriority={visor.setProcessPriority} />}
           {activeView === 'processes' && <ProcessExplorer metrics={metrics} processes={visor.processes} counts={visor.snapshot?.processCounts} live={visor.connection === 'live'} onKill={visor.killProcess} onPriority={visor.setProcessPriority} />}
           {activeView === 'performance' && <Performance metrics={metrics} />}
-          {activeView === 'ai' && <AIWorkloads metrics={metrics} />}
+          {activeView === 'ai' && <AIWorkloads metrics={metrics} localAI={visor.snapshot?.localAI} />}
           {activeView === 'energy' && <EnergyView energy={visor.snapshot?.energy} processes={visor.processes} agent={visor.snapshot?.agent} />}
-          {activeView === 'history' && <HistoryView metrics={metrics} />}
-          {activeView === 'alerts' && <AlertsView />}
-          {activeView === 'settings' && <SettingsView theme={theme} setTheme={setTheme} />}
+          {activeView === 'history' && <HistoryView metrics={metrics} energy={visor.snapshot?.energy} agent={visor.snapshot?.agent} />}
+          {activeView === 'alerts' && <AlertsView alerts={visor.snapshot?.alerts} live={visor.connection === 'live'} onToggle={visor.setAlertRule} />}
+          {activeView === 'settings' && <SettingsView theme={theme} setTheme={setTheme} metrics={metrics} agent={visor.snapshot?.agent} />}
         </div>
       </main>
 
@@ -200,12 +215,13 @@ interface ProcessActions {
 interface OverviewProps extends MetricsProps, ProcessActions {
   energy?: EnergyEstimate;
   hardware?: HardwareInfo;
+  localAI?: LocalAiSnapshot;
 }
 
 const bytesToGb = (bytes = 0) => bytes / 1024 ** 3;
 const sensorValue = (value: number, suffix: string) => value > 0 ? `${Math.round(value)}${suffix}` : 'Unavailable';
 
-function Overview({ metrics, energy, hardware, processes, live, onKill, onPriority }: OverviewProps) {
+function Overview({ metrics, energy, hardware, localAI, processes, live, onKill, onPriority }: OverviewProps) {
   const memoryUsed = bytesToGb(metrics.memory?.usedBytes);
   const memoryTotal = bytesToGb(metrics.memory?.totalBytes || hardware?.memory.totalBytes);
   const vramUsed = bytesToGb(metrics.gpuMemory?.usedBytes);
@@ -277,7 +293,7 @@ function Overview({ metrics, energy, hardware, processes, live, onKill, onPriori
       <ProcessTable processes={processes} live={live} onKillProcess={onKill} onSetPriority={onPriority} />
 
       <section className="insight-row">
-        <AIInsight processes={processes} />
+        <AIInsight processes={processes} localAI={localAI} />
         <EfficiencyCard metrics={metrics} energy={energy} />
         <ThermalCard metrics={metrics} />
       </section>
@@ -337,20 +353,23 @@ function CompactMetric({ label, value, detail, tone, history, icon }: CompactMet
   );
 }
 
-function AIInsight({ processes }: { processes: ProcessInfo[] }) {
+function AIInsight({ processes, localAI }: { processes: ProcessInfo[]; localAI?: LocalAiSnapshot }) {
   const workload = processes.find((process) => process.kind === 'AI');
+  const model = localAI?.models.find((item) => item.status === 'active') || localAI?.models[0];
+  const application = localAI?.applications.find((item) => item.application === model?.application) || localAI?.applications[0];
+  const modelDetected = Boolean(model || application || workload);
   return (
     <article className="panel insight-card ai-insight">
       <div className="insight-card-head">
         <div className="insight-icon violet-bg"><Bot size={19} /></div>
-        <div><span>AI WORKLOAD</span><strong>{workload ? 'Detected locally' : 'No active model'}</strong></div>
-        {workload && <span className="status-badge"><i /> RUNNING</span>}
+        <div><span>LOCAL AI</span><strong>{model ? `${model.application} · ${model.runtime}` : application ? `${application.application} detected` : 'No active model'}</strong></div>
+        {modelDetected && <span className="status-badge"><i /> {model?.status === 'active' ? 'ACTIVE' : 'LOADED'}</span>}
       </div>
-      <div className="model-name"><Sparkles size={16} /><strong>{workload?.name || 'Waiting for an AI runtime'}</strong><span>{workload ? `PID ${workload.id}` : 'LOCAL'}</span></div>
+      <div className="model-name"><Sparkles size={16} /><strong>{model?.model || 'Waiting for a runtime API'}</strong><span>{model ? `${model.confidence}% exact` : workload ? `PID ${workload.id}` : 'LOCAL'}</span></div>
       <div className="model-stats">
-        <div><span>Attributed power</span><strong>~{(workload?.energyWatts || 0).toFixed(1)} <small>W</small></strong></div>
-        <div><span>GPU load</span><strong>{(workload?.gpu || 0).toFixed(1)}%</strong></div>
-        <div><span>VRAM</span><strong>{(workload?.vram || 0).toFixed(1)} <small>GB</small></strong></div>
+        <div><span>Application power</span><strong>~{(model?.applicationEnergyWatts ?? application?.energyWatts ?? workload?.energyWatts ?? 0).toFixed(1)} <small>W</small></strong></div>
+        <div><span>GPU activity</span><strong>{(model?.applicationGpu ?? application?.gpu ?? workload?.gpu ?? 0).toFixed(1)}%</strong></div>
+        <div><span>Model VRAM</span><strong>{(model?.allocatedVramGb ?? application?.vramGb ?? workload?.vram ?? 0).toFixed(1)} <small>GB</small></strong></div>
       </div>
     </article>
   );
@@ -382,6 +401,11 @@ function ThermalCard({ metrics }: MetricsProps) {
       : hottestTemperature >= 80
         ? 'Running warm'
         : 'Within range';
+  const thermalReadings = [
+    { label: 'CPU', value: metrics.cpuTemp, source: metrics.sensorSources?.cpu },
+    { label: 'GPU', value: metrics.gpuTemp, source: metrics.sensorSources?.gpu },
+    { label: 'SSD', value: metrics.ssdTemp || 0, source: metrics.storageTemperatures?.[0]?.name },
+  ];
   return (
     <article className="panel insight-card thermal-card">
       <div className="insight-card-head">
@@ -389,9 +413,7 @@ function ThermalCard({ metrics }: MetricsProps) {
         <div><span>THERMALS</span><strong>{thermalStatus}</strong></div>
       </div>
       <div className="thermal-readings">
-        <div><span>CPU</span><strong>{metrics.cpuTemp > 0 ? `${Math.round(metrics.cpuTemp)}°` : '—'}</strong><i style={{ width: `${metrics.cpuTemp}%` }} /></div>
-        <div><span>GPU</span><strong>{metrics.gpuTemp > 0 ? `${Math.round(metrics.gpuTemp)}°` : '—'}</strong><i style={{ width: `${metrics.gpuTemp}%` }} /></div>
-        <div><span>NVMe</span><strong>—</strong><i style={{ width: '0%' }} /></div>
+        {thermalReadings.map((reading) => <div className={`thermal-sensor ${reading.value <= 0 ? 'sensor-unavailable' : reading.value >= 86 ? 'sensor-hot' : ''}`} key={reading.label}><span>{reading.label}<small>{reading.source || 'Sensor unavailable'}</small></span><strong>{reading.value > 0 ? `${Math.round(reading.value)}°C` : '—'}</strong><i><b style={{ width: `${Math.min(100, reading.value)}%` }} /></i></div>)}
       </div>
     </article>
   );
@@ -439,26 +461,46 @@ function Performance({ metrics }: MetricsProps) {
   );
 }
 
-function AIWorkloads({ metrics }: MetricsProps) {
+function AIWorkloads({ metrics, localAI }: MetricsProps & { localAI?: LocalAiSnapshot }) {
+  const model = localAI?.models.find((item) => item.status === 'active') || localAI?.models[0];
+  const application = localAI?.applications.find((item) => item.application === model?.application) || localAI?.applications[0];
+  const runtimeProcess = model?.process || application?.processes.find((item) => item.role === 'model-runner' || item.role === 'runtime') || application?.processes[0];
+  const allocatedRamGb = bytesToGb(model?.allocatedRamBytes);
+  const modelVramGb = model?.allocatedVramGb || application?.vramGb || 0;
+  const totalVramGb = bytesToGb(metrics.gpuMemory?.totalBytes);
+  const appEnergy = model?.applicationEnergyWatts ?? application?.energyWatts ?? 0;
+  const exactModel = Boolean(model);
   return (
     <div className="ai-page-grid">
       <section className="panel ai-model-card">
         <div className="ai-model-hero">
           <div className="model-orb"><Bot size={28} /><span /></div>
-          <div><p className="eyebrow">OLLAMA · ACTIVE NOW</p><h2>Llama 3.3 70B</h2><span>Q4_K_M · 42.5 GB · CUDA</span></div>
-          <span className="status-badge"><i /> INFERENCE</span>
+          <div><p className="eyebrow">{model ? `${model.application.toUpperCase()} · ${model.status.toUpperCase()}` : 'LOCAL RUNTIME DETECTION'}</p><h2>{model?.model || application?.application || 'No local model loaded'}</h2><span>{model ? [model.parameters, model.quantization, model.format?.toUpperCase()].filter(Boolean).join(' · ') : 'VISOR is watching local runtime APIs and process trees.'}</span></div>
+          <span className={`status-badge ${exactModel ? '' : 'status-neutral'}`}><i /> {model ? `${model.confidence}% EXACT` : application ? 'PROCESS ONLY' : 'IDLE'}</span>
+        </div>
+        <div className="model-provenance" aria-label="Model attribution chain">
+          <div><span>APPLICATION</span><strong>{model?.application || application?.application || '—'}</strong></div><em>→</em>
+          <div><span>RUNTIME</span><strong>{model?.runtime || application?.runtime || '—'}</strong></div><em>→</em>
+          <div><span>MODEL</span><strong>{model?.model || 'Not reported'}</strong></div>
         </div>
         <div className="ai-primary-stats">
-          <div><span>Inference speed</span><strong>42.8</strong><small>tokens / sec</small></div>
-          <div><span>Context used</span><strong>18.4</strong><small>k / 128k</small></div>
-          <div><span>Time to first token</span><strong>184</strong><small>milliseconds</small></div>
+          <div><span>Model VRAM allocation</span><strong>{modelVramGb.toFixed(2)}</strong><small>GB reported by {model?.application || 'process counters'}</small></div>
+          <div><span>Model RAM allocation</span><strong>{allocatedRamGb.toFixed(2)}</strong><small>GB outside VRAM</small></div>
+          <div><span>Application power now</span><strong>{appEnergy.toFixed(1)}</strong><small>watts · modeled attribution</small></div>
         </div>
-        <div className="inference-chart-head"><div><strong>Inference activity</strong><span>Tokens generated over the last minute</span></div><button className="ghost-button">Last minute <ChevronDown size={14} /></button></div>
-        <div className="inference-chart"><LineChart values={metrics.history.gpu.map((value) => value * 0.86)} tone="violet" height={180} /></div>
+        <div className="model-spec-grid">
+          <div><span>Family</span><strong>{model?.family || 'Not reported'}</strong></div>
+          <div><span>Parameters</span><strong>{model?.parameters || 'Not reported'}</strong></div>
+          <div><span>Quantization</span><strong>{model?.quantization || 'Not reported'}</strong></div>
+          <div><span>Context capacity</span><strong>{model?.contextLength ? `${model.contextLength.toLocaleString()} tokens` : 'Not reported'}</strong></div>
+        </div>
+        <div className="inference-chart-head"><div><strong>System GPU activity</strong><span>Live context while this runtime is present — not claimed as token throughput.</span></div><span className="source-chip">{model?.source || 'Windows process counters'}</span></div>
+        <div className="inference-chart"><LineChart values={metrics.history.gpu} tone="violet" height={180} /></div>
       </section>
       <aside className="ai-side-column">
-        <article className="panel allocation-card"><p className="eyebrow">RESOURCE ALLOCATION</p><h3>Model footprint</h3><ResourceBar label="GPU" value={42} detail="42%" tone="violet" /><ResourceBar label="VRAM" value={59} detail="14.2 / 24 GB" tone="amber" /><ResourceBar label="RAM" value={27} detail="8.5 / 32 GB" tone="mint" /><ResourceBar label="CPU" value={18} detail="18%" tone="cyan" /></article>
-        <article className="panel runtime-card"><p className="eyebrow">RUNTIME DETAILS</p><dl><div><dt>Process</dt><dd>ollama.exe</dd></div><div><dt>PID</dt><dd>14280</dd></div><div><dt>Backend</dt><dd>CUDA 13.0</dd></div><div><dt>GPU layers</dt><dd>81 / 81</dd></div><div><dt>Uptime</dt><dd>01:42:18</dd></div></dl></article>
+        <article className="panel allocation-card"><p className="eyebrow">APPLICATION FOOTPRINT</p><h3>{application?.application || 'No active application'}</h3><ResourceBar label="GPU" value={application?.gpu || 0} detail={`${(application?.gpu || 0).toFixed(1)}%`} tone="violet" /><ResourceBar label="VRAM" value={totalVramGb ? modelVramGb / totalVramGb * 100 : 0} detail={`${modelVramGb.toFixed(2)} / ${totalVramGb.toFixed(1)} GB`} tone="amber" /><ResourceBar label="RAM" value={metrics.memory?.totalBytes ? (application?.memoryGb || 0) / bytesToGb(metrics.memory.totalBytes) * 100 : 0} detail={`${(application?.memoryGb || 0).toFixed(2)} GB`} tone="mint" /><ResourceBar label="CPU" value={application?.cpu || 0} detail={`${(application?.cpu || 0).toFixed(1)}%`} tone="cyan" /></article>
+        <article className="panel runtime-card"><p className="eyebrow">RUNTIME DETAILS</p><dl><div><dt>Application</dt><dd>{model?.application || application?.application || '—'}</dd></div><div><dt>Runtime</dt><dd>{model?.runtime || application?.runtime || '—'}</dd></div><div><dt>Consumer process</dt><dd>{runtimeProcess?.name || 'Not exposed'}</dd></div><div><dt>PID</dt><dd>{runtimeProcess?.pid || 'Not exposed'}</dd></div><div><dt>API evidence</dt><dd>{model?.source || 'Process tree only'}</dd></div></dl></article>
+        <article className="panel runtime-card adapter-card"><p className="eyebrow">LOCAL ADAPTERS</p><div className="adapter-list">{(localAI?.adapters || []).map((adapter) => <div key={adapter.id}><i className={adapter.status === 'online' ? 'adapter-online' : ''} /><span><strong>{adapter.name}</strong><small>{adapter.endpoint}</small></span><em>{adapter.status}</em></div>)}</div></article>
       </aside>
     </div>
   );
@@ -517,24 +559,27 @@ function EnergyView({ energy, processes, agent }: { energy?: EnergyEstimate; pro
   );
 }
 
-function HistoryView({ metrics }: MetricsProps) {
+function HistoryView({ metrics, energy, agent }: MetricsProps & { energy?: EnergyEstimate; agent?: AgentInfo }) {
   const [range, setRange] = useState('1 hour');
-  const history = useMemo(() => Array.from({ length: 64 }, (_, index) => Math.min(96, Math.max(8, metrics.history.cpu[index % metrics.history.cpu.length] + Math.sin(index / 5) * 15))), [metrics.history.cpu]);
+  const history = metrics.history.cpu;
+  const average = (values: number[]) => values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+  const peak = (values: number[]) => values.length ? Math.max(...values) : 0;
+  const uptimeMinutes = Math.floor((agent?.uptimeSeconds || 0) / 60);
   return (
     <div className="history-grid">
       <section className="panel history-chart-card">
         <div className="panel-header"><div><p className="eyebrow">SYSTEM LOAD</p><h2>Performance timeline</h2></div><div className="segmented-control">{['1 hour', '24 hours', '7 days'].map((item) => <button key={item} className={range === item ? 'active' : ''} onClick={() => setRange(item)}>{item}</button>)}</div></div>
-        <div className="history-legend"><span><i className="cyan-legend" />CPU average 44%</span><span><i className="violet-legend" />GPU average 68%</span></div>
+        <div className="history-legend"><span><i className="cyan-legend" />CPU average {average(metrics.history.cpu).toFixed(1)}%</span><span><i className="violet-legend" />GPU average {average(metrics.history.gpu).toFixed(1)}%</span></div>
         <div className="history-main-chart"><LineChart values={history} tone="cyan" height={250} /></div>
-        <div className="history-axis"><span>10:00</span><span>10:15</span><span>10:30</span><span>10:45</span><span>Now</span></div>
+        <div className="history-axis"><span>{history.length} samples ago</span><span>Rolling live buffer</span><span>Now</span></div>
       </section>
       <section className="peak-grid">
-        <PeakCard label="Peak CPU" value="92%" time="10:24" icon={<Cpu />} />
-        <PeakCard label="Peak GPU" value="98%" time="10:37" icon={<Gauge />} />
-        <PeakCard label="Peak memory" value="24.6 GB" time="10:41" icon={<MemoryStick />} />
-        <PeakCard label="Energy used" value="0.42 kWh" time="This session" icon={<Zap />} />
+        <PeakCard label="Peak CPU" value={`${peak(metrics.history.cpu).toFixed(1)}%`} time="Rolling buffer" icon={<Cpu />} />
+        <PeakCard label="Peak GPU" value={`${peak(metrics.history.gpu).toFixed(1)}%`} time="Rolling buffer" icon={<Gauge />} />
+        <PeakCard label="Peak memory" value={`${peak(metrics.history.ram).toFixed(1)}%`} time="Rolling buffer" icon={<MemoryStick />} />
+        <PeakCard label="Energy used" value={energy ? `${energy.sessionWh.toFixed(2)} Wh` : '—'} time="Agent session" icon={<Zap />} />
       </section>
-      <section className="panel session-card"><div><div className="session-icon"><Clock3 /></div><div><p className="eyebrow">CURRENT SESSION</p><h3>Started today at 08:42</h3><span>2h 14m recorded · 2 notable peaks</span></div></div><button className="ghost-button"><Download size={15} /> Export data</button></section>
+      <section className="panel session-card"><div><div className="session-icon"><Clock3 /></div><div><p className="eyebrow">CURRENT AGENT SESSION</p><h3>{agent ? `${Math.floor(uptimeMinutes / 60)}h ${uptimeMinutes % 60}m monitored` : 'Windows agent unavailable'}</h3><span>{history.length} live samples in the interface buffer · no fabricated history</span></div></div><span className="source-chip">LOCAL ONLY</span></section>
     </div>
   );
 }
@@ -543,37 +588,61 @@ function PeakCard({ label, value, time, icon }: { label: string; value: string; 
   return <article className="panel peak-card"><span>{icon}</span><div><p>{label}</p><strong>{value}</strong><small>{time}</small></div></article>;
 }
 
-function AlertsView() {
-  const [rules, setRules] = useState([
-    { id: 1, title: 'GPU temperature', condition: 'Above 80°C for 30 seconds', enabled: true, icon: <Thermometer />, tone: 'amber' },
-    { id: 2, title: 'VRAM pressure', condition: 'Above 95% for 10 seconds', enabled: true, icon: <Gauge />, tone: 'violet' },
-    { id: 3, title: 'CPU sustained load', condition: 'Above 90% for 2 minutes', enabled: false, icon: <Cpu />, tone: 'cyan' },
-    { id: 4, title: 'Network anomaly', condition: 'Unusual upload activity detected', enabled: true, icon: <Network />, tone: 'rose' },
-  ]);
+function AlertsView({ alerts, live, onToggle }: { alerts?: AlertsSnapshot; live: boolean; onToggle: (id: string, enabled: boolean) => Promise<unknown> }) {
+  const active = alerts?.active || [];
+  const watch = alerts?.watch || [];
+  const gaming = alerts?.gaming;
+  const formatDuration = (durationMs: number) => {
+    const seconds = Math.round(durationMs / 1000);
+    if (seconds < 60) return `${seconds} sec`;
+    const minutes = Math.floor(seconds / 60);
+    const remainder = seconds % 60;
+    return remainder ? `${minutes} min ${remainder} sec` : `${minutes} min`;
+  };
+  const rulePresentation = (metric: string) => metric.includes('Temp')
+    ? { icon: <Thermometer />, tone: 'amber' }
+    : metric === 'vram'
+      ? { icon: <Gauge />, tone: 'violet' }
+      : metric === 'cpu'
+        ? { icon: <Cpu />, tone: 'cyan' }
+        : { icon: <Gauge />, tone: 'rose' };
   return (
     <div className="alerts-grid">
-      <section className="panel alert-summary"><div className="alert-summary-icon"><Check /></div><div><p className="eyebrow">ALL CLEAR</p><h2>No active alerts</h2><span>Your hardware is operating within the limits you set.</span></div><button className="primary-button"><Plus size={16} /> New alert</button></section>
-      <section className="panel rules-card"><div className="panel-header"><div><p className="eyebrow">AUTOMATIONS</p><h2>Alert rules</h2></div><span>{rules.filter((rule) => rule.enabled).length} active</span></div><div className="rules-list">{rules.map((rule) => <div className="rule-row" key={rule.id}><span className={`rule-icon rule-${rule.tone}`}>{rule.icon}</span><div><strong>{rule.title}</strong><span>{rule.condition}</span></div><button className={`switch ${rule.enabled ? 'switch-on' : ''}`} onClick={() => setRules((current) => current.map((item) => item.id === rule.id ? { ...item, enabled: !item.enabled } : item))}><span /></button></div>)}</div></section>
-      <section className="panel recent-alert"><div className="recent-alert-head"><span><Info size={16} /></span><div><strong>VRAM pressure reached 91%</strong><small>Yesterday · 21:48</small></div><em>Resolved</em></div><p>Cyberpunk 2077 used 13.8 GB while Ollama held 8.2 GB. VISOR released the alert when usage returned below 85%.</p></section>
+      <section className={`panel alert-summary ${active.length ? 'alert-summary-active' : ''}`}><div className="alert-summary-icon">{active.length ? <ShieldAlert /> : <Check />}</div><div><p className="eyebrow">{active.length ? 'ACTION REQUIRED' : 'LIVE GUARD'}</p><h2>{active.length ? `${active.length} sustained alert${active.length > 1 ? 's' : ''}` : 'No sustained overload detected'}</h2><span>{active.length ? active.map((item) => `${item.title}: ${item.value}${item.unit}`).join(' · ') : 'VISOR waits for sustained conditions before interrupting you.'}</span></div><span className="policy-live"><i /> {live ? 'Agent policy live' : 'Agent offline'}</span></section>
+
+      <section className={`panel gaming-guard ${gaming?.active ? 'gaming-guard-active' : ''}`}><div className="gaming-guard-icon"><Gamepad2 /></div><div><p className="eyebrow">GAME-AWARE SUPPRESSION</p><h3>{gaming?.active ? `${gaming.processName} detected` : 'Gaming mode standing by'}</h3><span>{gaming?.active ? 'Sustained CPU/GPU load alerts are muted while the game is active. Thermal and VRAM protection remain live.' : 'VISOR only suppresses load alerts when a real game process is actively using CPU or GPU.'}</span></div><strong>{gaming?.active ? 'LOAD ALERTS MUTED' : 'ARMED'}</strong></section>
+
+      {watch.length > 0 && <section className="panel alert-watch-card"><div className="panel-header"><div><p className="eyebrow">CONDITION WATCH</p><h2>Thresholds currently observed</h2></div><span>{watch.length} signal{watch.length > 1 ? 's' : ''}</span></div><div className="alert-watch-list">{watch.map((item) => <div key={item.id}><span className={`watch-dot ${item.suppressed ? 'watch-suppressed' : ''}`} /><div><strong>{item.title}</strong><small>{item.suppressed ? 'Suppressed by active gaming context' : `${item.value}${item.unit} · ${item.progress}% of sustained duration`}</small></div><em>{item.suppressed ? 'MUTED' : `${item.progress}%`}</em></div>)}</div></section>}
+
+      <section className="panel rules-card"><div className="panel-header"><div><p className="eyebrow">SUSTAINED POLICIES</p><h2>Alert rules</h2></div><span>{alerts?.rules.filter((rule) => rule.enabled).length || 0} enabled</span></div><div className="rules-list">{(alerts?.rules || []).map((rule) => {
+        const presentation = rulePresentation(rule.metric);
+        const state = active.find((item) => item.id === rule.id) || watch.find((item) => item.id === rule.id);
+        return <div className="rule-row" key={rule.id}><span className={`rule-icon rule-${presentation.tone}`}>{presentation.icon}</span><div><strong>{rule.title}</strong><span>Above {rule.threshold}{rule.unit} for {formatDuration(rule.durationMs)}{rule.suppressDuringGaming ? ' · ignored during active gaming' : ' · always protected'}</span>{state && !state.suppressed && <i className="rule-progress"><b style={{ width: `${state.progress}%` }} /></i>}</div><button aria-label={`${rule.enabled ? 'Disable' : 'Enable'} ${rule.title}`} disabled={!live} className={`switch ${rule.enabled ? 'switch-on' : ''}`} onClick={() => void onToggle(rule.id, !rule.enabled)}><span /></button></div>;
+      })}</div></section>
+
+      <section className="panel recent-alert"><div className="recent-alert-head"><span><Info size={16} /></span><div><strong>{alerts?.recent[0]?.title || 'No resolved alert in this agent session'}</strong><small>{alerts?.recent[0] ? `Peak ${alerts.recent[0].peak}${alerts.recent[0].unit} · ${new Date(alerts.recent[0].resolvedAt).toLocaleTimeString()}` : 'Evidence appears here after a sustained alert resolves.'}</small></div>{alerts?.recent[0] && <em>Resolved</em>}</div><p>{alerts?.recent[0] ? 'The condition returned below its threshold. VISOR retained the peak and timing for diagnosis.' : 'Short spikes are intentionally ignored so notifications stay useful and quiet.'}</p></section>
     </div>
   );
 }
 
-function SettingsView({ theme, setTheme }: { theme: 'dark' | 'light'; setTheme: (theme: 'dark' | 'light') => void }) {
-  const [rate, setRate] = useState('900 ms');
-  const [toggles, setToggles] = useState({ startup: true, notifications: true, minimize: true, anonymous: false });
-  const toggle = (key: keyof typeof toggles) => setToggles((values) => ({ ...values, [key]: !values[key] }));
+function SettingsView({ theme, setTheme, metrics, agent }: { theme: ThemeId; setTheme: (theme: ThemeId) => void; metrics: MetricsProps['metrics']; agent?: AgentInfo }) {
+  const themes: Array<{ id: ThemeId; name: string; description: string; icon: React.ReactNode }> = [
+    { id: 'studio', name: 'Studio', description: 'Graphite glass, restrained color', icon: <Sparkles size={15} /> },
+    { id: 'porcelain', name: 'Porcelain', description: 'Bright, soft and editorial', icon: <Sun size={15} /> },
+    { id: 'cyber', name: 'Cyberdeck', description: 'Neon telemetry, precision grid', icon: <Activity size={15} /> },
+    { id: 'retro', name: 'Retro terminal', description: 'Warm phosphor, modern clarity', icon: <Clock3 size={15} /> },
+  ];
   return (
     <div className="settings-grid">
-      <section className="panel settings-card"><div className="settings-heading"><span><Sun /></span><div><h2>Appearance</h2><p>A calmer monitor is an easier monitor.</p></div></div><div className="theme-choices"><button className={theme === 'dark' ? 'active' : ''} onClick={() => setTheme('dark')}><span className="theme-preview theme-dark"><i /><b /><em /></span><strong><Moon size={15} /> Dark</strong></button><button className={theme === 'light' ? 'active' : ''} onClick={() => setTheme('light')}><span className="theme-preview theme-light"><i /><b /><em /></span><strong><Sun size={15} /> Light</strong></button></div></section>
-      <section className="panel settings-card"><div className="settings-heading"><span><Activity /></span><div><h2>Monitoring</h2><p>Balance responsiveness and resource use.</p></div></div><div className="setting-row"><div><strong>Refresh interval</strong><span>How often VISOR samples your hardware</span></div><div className="segmented-control">{['500 ms', '900 ms', '2 sec'].map((item) => <button key={item} className={rate === item ? 'active' : ''} onClick={() => setRate(item)}>{item}</button>)}</div></div><SettingToggle label="Start with Windows" detail="Open quietly in the system tray" enabled={toggles.startup} onClick={() => toggle('startup')} /><SettingToggle label="Minimize to tray" detail="Keep monitoring when the window closes" enabled={toggles.minimize} onClick={() => toggle('minimize')} /></section>
-      <section className="panel settings-card"><div className="settings-heading"><span><Bell /></span><div><h2>Notifications</h2><p>Useful signals, never noise.</p></div></div><SettingToggle label="Windows notifications" detail="Show critical alerts outside VISOR" enabled={toggles.notifications} onClick={() => toggle('notifications')} /><SettingToggle label="Anonymous diagnostics" detail="Help improve stability without sending metrics" enabled={toggles.anonymous} onClick={() => toggle('anonymous')} /></section>
+      <section className="panel settings-card appearance-card"><div className="settings-heading"><span><Palette /></span><div><h2>Appearance</h2><p>Four distinct art directions. The information hierarchy and contrast stay consistent.</p></div></div><div className="theme-choices">{themes.map((item) => <button key={item.id} aria-pressed={theme === item.id} className={theme === item.id ? 'active' : ''} onClick={() => setTheme(item.id)}><span className={`theme-preview theme-${item.id}`}><i /><b /><em /></span><strong>{item.icon}{item.name}</strong><small>{item.description}</small></button>)}</div></section>
+      <section className="panel settings-card"><div className="settings-heading"><span><Activity /></span><div><h2>Live data sources</h2><p>VISOR exposes coverage honestly. Missing hardware sensors are never replaced with invented values.</p></div></div><SettingStatus label="Windows agent" detail="One batched local snapshot every second" value={agent ? 'LIVE' : 'OFFLINE'} tone={agent ? 'live' : 'off'} /><SettingStatus label="Per-process GPU attribution" detail="Windows GPU engine counters and dedicated memory" value={agent?.gpuAttributionAvailable ? 'AVAILABLE' : 'UNAVAILABLE'} tone={agent?.gpuAttributionAvailable ? 'live' : 'off'} /><SettingStatus label="CPU temperature" detail={metrics.sensorSources?.cpu || 'Install or run a LibreHardwareMonitor WMI source to expose this sensor'} value={metrics.cpuTemp > 0 ? `${Math.round(metrics.cpuTemp)}°C` : 'UNAVAILABLE'} tone={metrics.cpuTemp > 0 ? 'live' : 'off'} /><SettingStatus label="SSD temperature" detail={metrics.storageTemperatures?.[0]?.source || 'Windows Storage Reliability or a hardware monitor is required'} value={(metrics.ssdTemp || 0) > 0 ? `${Math.round(metrics.ssdTemp || 0)}°C` : 'UNAVAILABLE'} tone={(metrics.ssdTemp || 0) > 0 ? 'live' : 'off'} /></section>
+      <section className="panel settings-card"><div className="settings-heading"><span><ShieldCheck /></span><div><h2>Privacy and trust</h2><p>Telemetry and runtime probes stay on this PC.</p></div></div><SettingStatus label="Network boundary" detail="Agent bound to IPv4 loopback only" value="127.0.0.1" tone="live" /><SettingStatus label="External telemetry" detail="VISOR sends no hardware or model data to a remote service" value="OFF" tone="live" /></section>
     </div>
   );
 }
 
-function SettingToggle({ label, detail, enabled, onClick }: { label: string; detail: string; enabled: boolean; onClick: () => void }) {
-  return <div className="setting-row"><div><strong>{label}</strong><span>{detail}</span></div><button className={`switch ${enabled ? 'switch-on' : ''}`} onClick={onClick}><span /></button></div>;
+function SettingStatus({ label, detail, value, tone }: { label: string; detail: string; value: string; tone: 'live' | 'off' }) {
+  return <div className="setting-row"><div><strong>{label}</strong><span>{detail}</span></div><em className={`setting-status setting-status-${tone}`}>{value}</em></div>;
 }
 
 function CommandPalette({ onClose, onNavigate }: { onClose: () => void; onNavigate: (view: ViewId) => void }) {
@@ -583,8 +652,8 @@ function CommandPalette({ onClose, onNavigate }: { onClose: () => void; onNaviga
         <div className="command-search"><Search size={18} /><input autoFocus placeholder="Search VISOR or type a command…" /><button onClick={onClose}><X size={16} /></button></div>
         <p>QUICK NAVIGATION</p>
         <button onClick={() => onNavigate('processes')}><span><Cpu size={18} /> View all processes</span><Command size={14} /></button>
-        <button onClick={() => onNavigate('ai')}><span><Bot size={18} /> Open AI workloads</span><em>1 active</em></button>
-        <button onClick={() => onNavigate('performance')}><span><Gauge size={18} /> Inspect GPU performance</span><em>78%</em></button>
+        <button onClick={() => onNavigate('ai')}><span><Bot size={18} /> Open AI workloads</span><em>Local adapters</em></button>
+        <button onClick={() => onNavigate('performance')}><span><Gauge size={18} /> Inspect GPU performance</span><em>Live telemetry</em></button>
         <button onClick={() => onNavigate('alerts')}><span><Bell size={18} /> Configure smart alerts</span></button>
         <div className="command-footer"><span><kbd>↑↓</kbd> Navigate</span><span><kbd>Enter</kbd> Select</span><span><kbd>Esc</kbd> Close</span></div>
       </div>

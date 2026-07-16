@@ -4,7 +4,9 @@ import { cpus, hostname, platform, release, totalmem, freemem, setPriority, cons
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import si from 'systeminformation';
+import { createAlertEngine } from './alert-engine.mjs';
 import { attributeProcessEnergy, estimateEnergy, inferCpuTdp, projectEnergy } from './energy-model.mjs';
+import { buildLocalAiSnapshot, detectAiApplication, discoverLocalModels } from './local-ai.mjs';
 
 const execFileAsync = promisify(execFile);
 const GiB = 1024 ** 3;
@@ -12,8 +14,11 @@ const MiB = 1024 ** 2;
 const PORT = Number.parseInt(process.env.VISOR_AGENT_PORT || '1421', 10);
 const POLL_MS = Math.min(5000, Math.max(650, Number.parseInt(process.env.VISOR_POLL_MS || '1000', 10)));
 const GPU_COUNTER_INTERVAL_MS = 5000;
+const SENSOR_INTERVAL_MS = 5000;
+const LOCAL_AI_INTERVAL_MS = 2500;
 const GPU_COUNTER_SCRIPT = fileURLToPath(new URL('./gpu-counters.ps1', import.meta.url));
 const PROCESS_SNAPSHOT_SCRIPT = fileURLToPath(new URL('./process-snapshot.ps1', import.meta.url));
+const SENSOR_SCRIPT = fileURLToPath(new URL('./sensors.ps1', import.meta.url));
 const allowedOrigins = new Set([
   'http://localhost:1420',
   'http://127.0.0.1:1420',
@@ -39,6 +44,7 @@ const criticalProcesses = new Set([
 const aiPatterns = /ollama|lm studio|llama|kobold|comfyui|python.*(torch|tensorflow)|stable.?diffusion|invokeai|fooocus/i;
 const creativePatterns = /photoshop|afterfx|premiere|blender|davinci|resolve|fusion|illustrator/i;
 const browserPatterns = /chrome|msedge|firefox|brave|opera/i;
+const gamePatterns = /\\steamapps\\|\\epic games\\|\\gog galaxy\\|\\riot games\\|cyberpunk2077|eldenring|starfield|valorant|fortnite|overwatch|helldivers|witcher3|rdr2\.exe/i;
 const finite = (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback;
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 const round = (value, digits = 1) => {
@@ -60,6 +66,13 @@ let lastAgentCpu = process.cpuUsage();
 let lastAgentCpuAt = process.hrtime.bigint();
 let previousProcessCpu = new Map();
 let lastProcessSampleAt = Date.now();
+let sensorCache = { cpuTemperature: 0, cpuSource: null, storage: [], hardwareMonitorAvailable: false };
+let sensorPending = false;
+let lastSensorAt = 0;
+let localAiDiscovery = { scannedAt: null, adapters: [], models: [] };
+let localAiPending = false;
+let lastLocalAiAt = 0;
+const alertEngine = createAlertEngine();
 
 function fallbackCpu() {
   const logical = cpus();
@@ -296,11 +309,55 @@ async function pollGpuProcessCounters() {
   }
 }
 
+async function pollSensorSnapshot() {
+  if (process.platform !== 'win32' || sensorPending || Date.now() - lastSensorAt < SENSOR_INTERVAL_MS) return;
+  sensorPending = true;
+  lastSensorAt = Date.now();
+  try {
+    const { stdout } = await execFileAsync('powershell.exe', [
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-File',
+      SENSOR_SCRIPT,
+    ], { windowsHide: true, timeout: 15_000, maxBuffer: 2 * MiB });
+    const parsed = JSON.parse(String(stdout || '{}').trim() || '{}');
+    sensorCache = {
+      cpuTemperature: Math.max(0, finite(parsed.cpuTemperature)),
+      cpuSource: parsed.cpuSource || null,
+      storage: Array.isArray(parsed.storage) ? parsed.storage : parsed.storage ? [parsed.storage] : [],
+      hardwareMonitorAvailable: Boolean(parsed.hardwareMonitorAvailable),
+    };
+  } catch {
+    // Optional hardware sensors stay explicitly unavailable.
+  } finally {
+    lastSensorAt = Date.now();
+    sensorPending = false;
+  }
+}
+
+async function pollLocalAiDiscovery() {
+  if (localAiPending || Date.now() - lastLocalAiAt < LOCAL_AI_INTERVAL_MS) return;
+  localAiPending = true;
+  lastLocalAiAt = Date.now();
+  try {
+    localAiDiscovery = await discoverLocalModels();
+  } catch {
+    // Process-level detection remains available when a runtime API is offline.
+  } finally {
+    lastLocalAiAt = Date.now();
+    localAiPending = false;
+  }
+}
+
 function classifyProcess(processData) {
   const haystack = `${processData.name} ${processData.command} ${processData.path}`;
-  if (aiPatterns.test(haystack)) return 'AI';
+  const aiIdentity = detectAiApplication(processData);
+  if (aiIdentity && aiIdentity.role !== 'ui-helper') return 'AI';
+  if (!/msedgewebview2/i.test(processData.name || '') && aiPatterns.test(haystack)) return 'AI';
   if (creativePatterns.test(haystack)) return 'Creative';
-  if (/\\steamapps\\|epic games|gog galaxy/i.test(haystack)) return 'Game';
+  if (gamePatterns.test(haystack)) return 'Game';
   return undefined;
 }
 
@@ -343,6 +400,7 @@ function normalizeProcesses(processData, memoryUsedBytes) {
   const normalized = list.map((item) => {
     const gpu = gpuProcessCache.get(Number(item.pid)) || {};
     const name = item.name || `PID ${item.pid}`;
+    const aiIdentity = detectAiApplication(item);
     // Windows exposes unused CPU capacity as PID 0. It is not workload and must
     // never be attributed power, memory, or GPU usage.
     const idleProcess = Number(item.pid) === 0 || /^(system idle process|idle)(\.exe)?$/i.test(name);
@@ -351,7 +409,7 @@ function normalizeProcesses(processData, memoryUsedBytes) {
       id: Number(item.pid),
       parentId: Number(item.parentPid),
       name,
-      subtitle: `${item.user || 'Local'} · PID ${item.pid}`,
+      subtitle: `${aiIdentity?.application || item.user || 'Local'} · PID ${item.pid}`,
       icon: name.replace(/\.exe$/i, '').slice(0, 2).toUpperCase(),
       color: colorForProcess(name),
       cpu: idleProcess ? 0 : round(Math.max(0, finite(item.cpu)), 1),
@@ -362,6 +420,9 @@ function normalizeProcesses(processData, memoryUsedBytes) {
       network: 0,
       power: 'Very low',
       kind: classifyProcess(item),
+      aiApplication: aiIdentity?.application,
+      aiRuntime: aiIdentity?.runtime,
+      aiRole: aiIdentity?.role,
       gpuEngines: gpu.engines || {},
       priority: finite(item.priority),
       state: item.state || '',
@@ -409,6 +470,8 @@ async function collectSnapshot() {
 
   try {
     void pollGpuProcessCounters();
+    void pollSensorSnapshot();
+    void pollLocalAiDiscovery();
     const [load, speed, temperatures, memory, graphics, fsStats, disksIo, networks, nativeProcesses, fallbackProcesses, nvidia] = await Promise.all([
       safe(() => si.currentLoad(), { currentLoad: 0, cpus: [] }),
       safe(() => si.cpuCurrentSpeed(), { avg: 0, min: 0, max: 0, cores: [] }),
@@ -464,6 +527,25 @@ async function collectSnapshot() {
         power: item.energyWatts >= 30 ? 'High' : item.energyWatts >= 10 ? 'Moderate' : item.energyWatts >= 2 ? 'Low' : 'Very low',
       }))
       .sort((left, right) => right.energyWatts - left.energyWatts);
+    const cpuTemperature = round(Math.max(finite(temperatures.main), finite(sensorCache.cpuTemperature)), 1);
+    const storageTemperatures = (sensorCache.storage || [])
+      .map((item) => ({
+        name: item.name || `Storage ${item.deviceId || ''}`.trim(),
+        deviceId: item.deviceId ?? null,
+        temperature: round(Math.max(0, finite(item.temperature)), 1),
+        temperatureMax: round(Math.max(0, finite(item.temperatureMax)), 1),
+        wear: Number.isFinite(Number(item.wear)) ? round(item.wear, 1) : null,
+        source: item.source || 'Windows sensor',
+      }))
+      .filter((item) => item.temperature > 0);
+    const ssdTemperature = storageTemperatures.reduce((highest, item) => Math.max(highest, item.temperature), 0);
+    const gamingProcess = attributed
+      .filter((item) => item.kind === 'Game' && (item.gpu >= 20 || item.cpu >= 10))
+      .sort((left, right) => right.gpu - left.gpu || right.cpu - left.cpu)[0];
+    const gaming = gamingProcess
+      ? { active: true, processName: gamingProcess.name, pid: gamingProcess.id }
+      : { active: false, processName: null, pid: null };
+    const localAI = buildLocalAiSnapshot(attributed, localAiDiscovery);
     const projection = projectEnergy(
       energyEstimate.watts,
       sessionWh,
@@ -471,47 +553,71 @@ async function collectSnapshot() {
       finite(process.env.VISOR_CARBON_G_KWH, 56),
     );
 
+    const metricSnapshot = {
+      cpu: round(cpuLoad, 1),
+      gpu: round(gpuLoad, 1),
+      ram: round(memoryUsed / memoryTotal * 100, 1),
+      vram: gpuTotalBytes > 0 ? round(gpuUsedBytes / gpuTotalBytes * 100, 1) : 0,
+      cpuTemp: cpuTemperature,
+      gpuTemp: round(finite(gpu?.temperatureGpu), 1),
+      ssdTemp: ssdTemperature,
+      storageTemperatures,
+      sensorSources: {
+        cpu: cpuTemperature > 0 ? (finite(temperatures.main) > 0 ? 'systeminformation' : sensorCache.cpuSource) : null,
+        gpu: finite(gpu?.temperatureGpu) > 0 ? (gpu?.telemetrySource || 'graphics driver') : null,
+        storage: [...new Set(storageTemperatures.map((item) => item.source))],
+      },
+      cpuPower: energyEstimate.breakdown.cpu,
+      gpuPower: round(finite(gpu?.powerDraw, energyEstimate.breakdown.gpu), 1),
+      cpuSpeedGhz: round(finite(speed.avg), 2),
+      cpuCoreLoads: (load.cpus || []).map((core) => round(finite(core.load), 1)),
+      download: round(rxBytes * 8 / 1_000_000, 2),
+      upload: round(txBytes * 8 / 1_000_000, 2),
+      diskRead: round(Math.max(0, finite(fsStats.rx_sec)) / MiB, 2),
+      diskWrite: round(Math.max(0, finite(fsStats.wx_sec)) / MiB, 2),
+      diskActivity: round(diskActivity, 1),
+      memory: {
+        totalBytes: memoryTotal,
+        usedBytes: memoryUsed,
+        availableBytes: finite(memory.available),
+        cachedBytes: finite(memory.cached),
+        swapTotalBytes: finite(memory.swaptotal),
+        swapUsedBytes: finite(memory.swapused),
+      },
+      gpuMemory: { totalBytes: gpuTotalBytes, usedBytes: gpuUsedBytes },
+    };
+    const alerts = alertEngine.evaluate(metricSnapshot, gaming, now);
+    const hardwareSnapshot = {
+      ...hardware,
+      storage: hardware.storage.map((disk, index) => {
+        const normalizedName = String(disk.name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+        const sensor = storageTemperatures.find((item) => {
+          const sensorName = String(item.name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+          return sensorName && normalizedName && (sensorName.includes(normalizedName) || normalizedName.includes(sensorName));
+        }) || storageTemperatures[index];
+        return { ...disk, temperature: sensor?.temperature || 0, temperatureSource: sensor?.source || null };
+      }),
+    };
+
     latestSnapshot = {
       timestamp: new Date(now).toISOString(),
       source: 'windows-agent',
       pollMs: POLL_MS,
-      hardware,
-      metrics: {
-        cpu: round(cpuLoad, 1),
-        gpu: round(gpuLoad, 1),
-        ram: round(memoryUsed / memoryTotal * 100, 1),
-        vram: gpuTotalBytes > 0 ? round(gpuUsedBytes / gpuTotalBytes * 100, 1) : 0,
-        cpuTemp: round(finite(temperatures.main), 1),
-        gpuTemp: round(finite(gpu?.temperatureGpu), 1),
-        cpuPower: energyEstimate.breakdown.cpu,
-        gpuPower: round(finite(gpu?.powerDraw, energyEstimate.breakdown.gpu), 1),
-        cpuSpeedGhz: round(finite(speed.avg), 2),
-        cpuCoreLoads: (load.cpus || []).map((core) => round(finite(core.load), 1)),
-        download: round(rxBytes * 8 / 1_000_000, 2),
-        upload: round(txBytes * 8 / 1_000_000, 2),
-        diskRead: round(Math.max(0, finite(fsStats.rx_sec)) / MiB, 2),
-        diskWrite: round(Math.max(0, finite(fsStats.wx_sec)) / MiB, 2),
-        diskActivity: round(diskActivity, 1),
-        memory: {
-          totalBytes: memoryTotal,
-          usedBytes: memoryUsed,
-          availableBytes: finite(memory.available),
-          cachedBytes: finite(memory.cached),
-          swapTotalBytes: finite(memory.swaptotal),
-          swapUsedBytes: finite(memory.swapused),
-        },
-        gpuMemory: { totalBytes: gpuTotalBytes, usedBytes: gpuUsedBytes },
-      },
+      hardware: hardwareSnapshot,
+      metrics: metricSnapshot,
       energy: {
         ...energyEstimate,
         ...projection,
       },
       processes: attributed,
       processCounts: processResult.counts,
+      localAI,
+      alerts,
       agent: {
         ...calculateAgentOverhead(),
         sampleDurationMs: Date.now() - startedAt,
         gpuAttributionAvailable: gpuProcessCache.size > 0,
+        sensorAttributionAvailable: cpuTemperature > 0 || storageTemperatures.length > 0,
         lastError: lastCollectionError,
       },
     };
@@ -628,6 +734,24 @@ const server = createServer(async (request, response) => {
       const result = processAction[2] === 'kill' ? await killProcess(pid, body) : await changePriority(pid, body);
       await collectSnapshot();
       sendJson(response, request, 200, result);
+    } catch (error) {
+      sendJson(response, request, 400, { ok: false, error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+
+  const alertAction = url.pathname.match(/^\/api\/alerts\/([a-z0-9-]+)$/);
+  if (request.method === 'POST' && alertAction) {
+    const requestError = validateActionRequest(request);
+    if (requestError) {
+      sendJson(response, request, 403, { ok: false, error: requestError });
+      return;
+    }
+    try {
+      const body = await readJson(request);
+      if (!alertEngine.setEnabled(alertAction[1], body.enabled)) throw new Error('Unknown alert rule.');
+      await collectSnapshot();
+      sendJson(response, request, 200, { ok: true, action: 'alert-rule', id: alertAction[1], enabled: Boolean(body.enabled) });
     } catch (error) {
       sendJson(response, request, 400, { ok: false, error: error instanceof Error ? error.message : String(error) });
     }

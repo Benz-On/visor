@@ -84,6 +84,9 @@ export function useVisorData(paused: boolean) {
   const setProcessPriority = useCallback((pid: number, priority: 'low' | 'belowNormal' | 'normal' | 'aboveNormal' | 'high') =>
     performAction(`/api/processes/${pid}/priority`, { priority }), [performAction]);
 
+  const setAlertRule = useCallback((id: string, enabled: boolean) =>
+    performAction(`/api/alerts/${id}`, { enabled }), [performAction]);
+
   const metrics = useMemo<LiveMetrics>(() => snapshot ? {
     ...fallback,
     ...snapshot.metrics,
@@ -98,6 +101,7 @@ export function useVisorData(paused: boolean) {
     processes: snapshot?.processes || demoProcesses,
     killProcess,
     setProcessPriority,
+    setAlertRule,
     refresh: fetchSnapshot,
   };
 }

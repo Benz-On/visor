@@ -1,5 +1,7 @@
 # VISOR
 
+Current version: **0.3.0**
+
 VISOR is a premium, local-first Windows system monitor for demanding
 workstations, AI workloads, games, and creative tools. It combines a calm,
 high-density interface with a local Windows agent that reads the machine and
@@ -14,8 +16,15 @@ performs explicitly confirmed process actions.
 - Protected Windows critical-process denylist and PID confirmation on destructive actions
 - Energy Lens with live whole-PC watts, component model, session energy, cost,
   carbon projection, confidence score, and per-process energy fingerprints
+- Exact local AI attribution from application to runtime to loaded model, with
+  adapters for Ollama, LM Studio, llama.cpp, and ComfyUI
+- Model evidence including source, confidence, quantization, parameter count,
+  context capacity, RAM/VRAM allocation, consumer PID, and application power
+- Stateful sustained-load and thermal alert policies running inside the agent
+- Game-aware CPU/GPU load suppression while thermal and VRAM protection stay active
+- Four persistent, legible themes: Studio, Porcelain, Cyberdeck, and Retro Terminal
 - Dedicated overview, performance, AI workload, history, alerts, and settings views
-- 1.1 second live refresh, pause/resume, command palette, and light/dark themes
+- 1.1 second live refresh, pause/resume, and command palette
 - Responsive desktop, compact, and mobile layouts
 - Local-only API bound to `127.0.0.1`; no telemetry leaves the device
 
@@ -57,6 +66,35 @@ npm.cmd run test:agent
 
 The production web bundle is written to `dist/`.
 
+## Local AI evidence
+
+VISOR probes loopback-only runtime APIs and joins their model evidence with the
+Windows process tree and GPU counters. An exact model name is only shown when a
+runtime reports it. A process-only detection is labeled as such.
+
+- Ollama: active models from `/api/ps`
+- LM Studio: loaded instances from its local API
+- llama.cpp: loaded model metadata from `/props`
+- ComfyUI: model files referenced by the active queue
+
+Runtime probes have short timeouts and never leave `127.0.0.1`.
+
+## Thermal sensor coverage
+
+NVIDIA temperature is read through vendor telemetry. CPU and storage
+temperatures are read when Windows exposes Storage Reliability counters or when
+LibreHardwareMonitor/OpenHardwareMonitor publishes temperature sensors through
+its WMI namespace. If this PC exposes neither source, VISOR displays
+`Unavailable`; it never fabricates a temperature.
+
+## Smart alert policy
+
+The Windows agent tracks condition duration rather than notifying on short
+spikes. Defaults include sustained CPU/GPU load, CPU/GPU/SSD temperature, VRAM
+pressure, resolution history, and progress toward each alert threshold. When an
+active game process is detected, only sustained CPU/GPU load alerts are muted.
+Temperature and VRAM policies remain armed.
+
 ## Energy methodology
 
 VISOR does not claim false measurement precision. With a compatible NVIDIA GPU,
@@ -89,8 +127,7 @@ useful when a vendor-specific API is unavailable:
 3. NVIDIA NVML first, followed by AMD and Intel adapters, for clocks, VRAM,
    temperature, fan, power, and engine details.
 4. ETW sessions for high-fidelity process, disk, and network attribution.
-5. AI adapters for Ollama, LM Studio, llama.cpp, and common Stable Diffusion
-   runtimes, with explicit confidence and source labels.
+5. Signed Windows notifications and durable alert/history persistence.
 
 The collector must poll asynchronously, batch updates into one snapshot, retain
 history in a bounded ring buffer, and expose its own CPU/memory overhead in the
