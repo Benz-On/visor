@@ -1,6 +1,6 @@
 # VISOR
 
-Current version: **0.4.0-alpha.2**
+Current version: **0.4.0-beta.1**
 
 VISOR is a premium, local-first Windows system monitor for demanding
 workstations, AI workloads, games, and creative tools. It combines a calm,
@@ -58,7 +58,7 @@ npm.cmd run dev
 
 Open [http://localhost:1420](http://localhost:1420).
 
-## Run the native desktop alpha
+## Run the native desktop beta
 
 Requirements: Windows 10/11, Rust stable with the MSVC target, Visual Studio
 2022 Build Tools with the C++ workload, Node.js 20 or newer, and WebView2.
@@ -99,6 +99,9 @@ The installer carries the Microsoft WebView2 bootstrapper. The portable build
 uses the WebView2 runtime already distributed with supported Windows 10/11
 systems. Alpha and beta artifacts are currently unsigned and Windows will show
 the corresponding publisher warning until production code signing is enabled.
+
+The current beta targets Windows 10/11 x64. See [docs/BETA.md](docs/BETA.md)
+for the tested delivery matrix, known limits, and release acceptance criteria.
 
 ## Validate
 

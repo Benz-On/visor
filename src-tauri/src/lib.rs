@@ -2,6 +2,7 @@ mod alerts;
 mod collector;
 mod energy;
 mod local_ai;
+mod timed_command;
 
 use collector::Collector;
 use serde_json::{json, Value};
@@ -56,10 +57,12 @@ fn kill_process(
         if force {
             args.push("/F".to_string());
         }
-        let output = hidden_command("taskkill.exe")
-            .args(args)
-            .output()
-            .map_err(|error| error.to_string())?;
+        let output = timed_command::output(
+            hidden_command("taskkill.exe").args(args),
+            None,
+            Duration::from_secs(10),
+        )
+        .map_err(|error| error.to_string())?;
         if !output.status.success() {
             let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
             return Err(if message.is_empty() {
@@ -103,8 +106,8 @@ fn set_process_priority(
     #[cfg(windows)]
     {
         let script = "& { param([int]$TargetPid,[string]$Class) $p = Get-Process -Id $TargetPid -ErrorAction Stop; $p.PriorityClass = $Class }";
-        let output = hidden_command("powershell.exe")
-            .args([
+        let output = timed_command::output(
+            hidden_command("powershell.exe").args([
                 "-NoProfile",
                 "-NonInteractive",
                 "-ExecutionPolicy",
@@ -115,9 +118,11 @@ fn set_process_priority(
                 &pid.to_string(),
                 "-Class",
                 windows_class,
-            ])
-            .output()
-            .map_err(|error| error.to_string())?;
+            ]),
+            None,
+            Duration::from_secs(10),
+        )
+        .map_err(|error| error.to_string())?;
         if !output.status.success() {
             let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
             return Err(if message.is_empty() {

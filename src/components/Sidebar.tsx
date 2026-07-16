@@ -22,6 +22,7 @@ interface SidebarProps {
   connection: 'connecting' | 'live' | 'demo' | 'error';
   activeModelCount: number;
   activeAlertCount: number;
+  collectorSource?: 'windows-agent' | 'tauri-native';
 }
 
 const primaryItems = [
@@ -37,7 +38,7 @@ const secondaryItems = [
   { id: 'alerts' as const, label: 'Alerts', icon: Bell },
 ];
 
-export function Sidebar({ active, collapsed, onNavigate, onCollapse, connection, activeModelCount, activeAlertCount }: SidebarProps) {
+export function Sidebar({ active, collapsed, onNavigate, onCollapse, connection, activeModelCount, activeAlertCount, collectorSource }: SidebarProps) {
   const renderItem = (item: (typeof primaryItems)[number] | (typeof secondaryItems)[number]) => {
     const { id, label, icon: Icon } = item;
     const staticBadge = 'badge' in item ? item.badge : undefined;
@@ -77,8 +78,8 @@ export function Sidebar({ active, collapsed, onNavigate, onCollapse, connection,
         <div className="collector-status">
           <span className="collector-pulse" />
           <div>
-            <strong>{connection === 'live' ? 'Windows agent' : connection === 'connecting' ? 'Connecting…' : 'Demo fallback'}</strong>
-            <span>{connection === 'live' ? 'real sensors · 1 sec' : 'simulated telemetry'}</span>
+            <strong>{connection === 'live' ? (collectorSource === 'tauri-native' ? 'Native collector' : 'Windows agent') : connection === 'connecting' ? 'Connecting…' : 'Demo fallback'}</strong>
+            <span>{connection === 'live' ? (collectorSource === 'tauri-native' ? 'embedded · local · 1 sec' : 'loopback · local · 1 sec') : 'simulated telemetry'}</span>
           </div>
         </div>
         <button

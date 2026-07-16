@@ -1,10 +1,10 @@
 use crate::alerts::AlertEngine;
 use crate::energy::{self, EnergyEstimate};
 use crate::local_ai;
+use crate::timed_command;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::{Duration, Instant};
 use sysinfo::{Disks, Networks, System};
 
@@ -540,13 +540,15 @@ fn attribute_energy(
 
 fn read_nvidia() -> Option<GpuInfo> {
     let fields = "name,driver_version,utilization.gpu,memory.total,memory.used,temperature.gpu,power.draw,power.limit";
-    let output = hidden_command("nvidia-smi.exe")
-        .args([
+    let output = timed_command::output(
+        hidden_command("nvidia-smi.exe").args([
             format!("--query-gpu={fields}"),
             "--format=csv,noheader,nounits".to_string(),
-        ])
-        .output()
-        .ok()?;
+        ]),
+        None,
+        Duration::from_secs(3),
+    )
+    .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -586,22 +588,19 @@ fn read_gpu_processes() -> HashMap<u32, Value> {
 }
 
 fn run_powershell_json(script: &str) -> Option<Value> {
-    let mut child = hidden_command("powershell.exe")
-        .args([
+    let output = timed_command::output(
+        hidden_command("powershell.exe").args([
             "-NoProfile",
             "-NonInteractive",
             "-ExecutionPolicy",
             "Bypass",
             "-Command",
             "-",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    child.stdin.as_mut()?.write_all(script.as_bytes()).ok()?;
-    let output = child.wait_with_output().ok()?;
+        ]),
+        Some(script.as_bytes()),
+        Duration::from_secs(8),
+    )
+    .ok()?;
     if !output.status.success() {
         return None;
     }

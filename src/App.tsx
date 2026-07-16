@@ -138,6 +138,7 @@ function App() {
         connection={visor.connection}
         activeModelCount={visor.snapshot?.localAI?.loadedModelCount || 0}
         activeAlertCount={activeAlertCount}
+        collectorSource={visor.snapshot?.source}
       />
 
       <main className="main-content">
@@ -187,12 +188,12 @@ function App() {
 
           {activeView === 'overview' && <Overview metrics={metrics} energy={visor.snapshot?.energy} hardware={visor.snapshot?.hardware} localAI={visor.snapshot?.localAI} processes={visor.processes} live={visor.connection === 'live'} onKill={visor.killProcess} onPriority={visor.setProcessPriority} />}
           {activeView === 'processes' && <ProcessExplorer metrics={metrics} processes={visor.processes} counts={visor.snapshot?.processCounts} live={visor.connection === 'live'} onKill={visor.killProcess} onPriority={visor.setProcessPriority} />}
-          {activeView === 'performance' && <Performance metrics={metrics} />}
+          {activeView === 'performance' && <Performance metrics={metrics} hardware={visor.snapshot?.hardware} />}
           {activeView === 'ai' && <AIWorkloads metrics={metrics} localAI={visor.snapshot?.localAI} />}
           {activeView === 'energy' && <EnergyView energy={visor.snapshot?.energy} processes={visor.processes} agent={visor.snapshot?.agent} />}
           {activeView === 'history' && <HistoryView metrics={metrics} energy={visor.snapshot?.energy} agent={visor.snapshot?.agent} />}
           {activeView === 'alerts' && <AlertsView alerts={visor.snapshot?.alerts} live={visor.connection === 'live'} onToggle={visor.setAlertRule} />}
-          {activeView === 'settings' && <SettingsView theme={theme} setTheme={setTheme} metrics={metrics} agent={visor.snapshot?.agent} />}
+          {activeView === 'settings' && <SettingsView theme={theme} setTheme={setTheme} metrics={metrics} agent={visor.snapshot?.agent} source={visor.snapshot?.source} />}
         </div>
       </main>
 
@@ -439,14 +440,19 @@ function SummaryItem({ icon, label, value, detail, warning = false }: { icon: Re
   return <article className="panel summary-item"><span className={warning ? 'summary-warning' : ''}>{icon}</span><div><p>{label}</p><strong>{value}</strong><small>{detail}</small></div></article>;
 }
 
-function Performance({ metrics }: MetricsProps) {
+function Performance({ metrics, hardware }: MetricsProps & { hardware?: HardwareInfo }) {
+  const memoryUsed = bytesToGb(metrics.memory?.usedBytes);
+  const memoryTotal = bytesToGb(metrics.memory?.totalBytes || hardware?.memory.totalBytes);
+  const vramUsed = bytesToGb(metrics.gpuMemory?.usedBytes);
+  const vramTotal = bytesToGb(metrics.gpuMemory?.totalBytes || hardware?.gpu?.vramBytes);
+  const coreCount = hardware?.cpu.physicalCores || hardware?.cpu.cores;
   const cards: Array<{ key: MetricKey | 'network' | 'disk'; label: string; value: string; detail: string; tone: MetricTone; icon: React.ReactNode }> = [
-    { key: 'cpu', label: 'Processor', value: `${Math.round(metrics.cpu)}%`, detail: '5.2 GHz · 16 cores', tone: 'cyan', icon: <Cpu /> },
-    { key: 'gpu', label: 'Graphics', value: `${Math.round(metrics.gpu)}%`, detail: `${Math.round(metrics.gpuTemp)}°C · ${Math.round(metrics.gpuPower)} W`, tone: 'violet', icon: <Gauge /> },
-    { key: 'ram', label: 'Memory', value: `${Math.round(metrics.ram)}%`, detail: '21.8 / 32 GB', tone: 'mint', icon: <MemoryStick /> },
-    { key: 'vram', label: 'Video memory', value: `${Math.round(metrics.vram)}%`, detail: '18.2 / 24 GB', tone: 'amber', icon: <CircleGauge /> },
-    { key: 'disk', label: 'NVMe drive', value: `${Math.round(metrics.diskRead)} MB/s`, detail: `${Math.round(metrics.diskWrite)} MB/s write`, tone: 'rose', icon: <HardDrive /> },
-    { key: 'network', label: 'Ethernet', value: `${metrics.download.toFixed(1)} Mbps`, detail: `${metrics.upload.toFixed(1)} Mbps upload`, tone: 'cyan', icon: <Network /> },
+    { key: 'cpu', label: hardware?.cpu.brand.trim() || 'Processor', value: `${Math.round(metrics.cpu)}%`, detail: `${metrics.cpuSpeedGhz ? `${metrics.cpuSpeedGhz.toFixed(2)} GHz` : 'Clock unavailable'} · ${coreCount ? `${coreCount} cores` : 'Core count unavailable'}`, tone: 'cyan', icon: <Cpu /> },
+    { key: 'gpu', label: hardware?.gpu?.model || 'Graphics', value: `${Math.round(metrics.gpu)}%`, detail: `${sensorValue(metrics.gpuTemp, '°C')} · ${Math.round(metrics.gpuPower)} W`, tone: 'violet', icon: <Gauge /> },
+    { key: 'ram', label: 'Memory', value: `${Math.round(metrics.ram)}%`, detail: memoryTotal ? `${memoryUsed.toFixed(1)} / ${memoryTotal.toFixed(1)} GB` : 'Capacity unavailable', tone: 'mint', icon: <MemoryStick /> },
+    { key: 'vram', label: 'Video memory', value: `${Math.round(metrics.vram)}%`, detail: vramTotal ? `${vramUsed.toFixed(1)} / ${vramTotal.toFixed(1)} GB` : 'Capacity unavailable', tone: 'amber', icon: <CircleGauge /> },
+    { key: 'disk', label: hardware?.storage[0]?.name || 'Storage', value: `${metrics.diskRead.toFixed(1)} MB/s`, detail: `${metrics.diskWrite.toFixed(1)} MB/s write`, tone: 'rose', icon: <HardDrive /> },
+    { key: 'network', label: 'Network', value: `${metrics.download.toFixed(1)} Mbps`, detail: `${metrics.upload.toFixed(1)} Mbps upload`, tone: 'cyan', icon: <Network /> },
   ];
   return (
     <div className="performance-grid">
@@ -625,7 +631,7 @@ function AlertsView({ alerts, live, onToggle }: { alerts?: AlertsSnapshot; live:
   );
 }
 
-function SettingsView({ theme, setTheme, metrics, agent }: { theme: ThemeId; setTheme: (theme: ThemeId) => void; metrics: MetricsProps['metrics']; agent?: AgentInfo }) {
+function SettingsView({ theme, setTheme, metrics, agent, source }: { theme: ThemeId; setTheme: (theme: ThemeId) => void; metrics: MetricsProps['metrics']; agent?: AgentInfo; source?: 'windows-agent' | 'tauri-native' }) {
   const themes: Array<{ id: ThemeId; name: string; description: string; icon: React.ReactNode }> = [
     { id: 'studio', name: 'Studio', description: 'Graphite glass, restrained color', icon: <Sparkles size={15} /> },
     { id: 'porcelain', name: 'Porcelain', description: 'Bright, soft and editorial', icon: <Sun size={15} /> },
@@ -635,8 +641,8 @@ function SettingsView({ theme, setTheme, metrics, agent }: { theme: ThemeId; set
   return (
     <div className="settings-grid">
       <section className="panel settings-card appearance-card"><div className="settings-heading"><span><Palette /></span><div><h2>Appearance</h2><p>Four distinct art directions. The information hierarchy and contrast stay consistent.</p></div></div><div className="theme-choices">{themes.map((item) => <button key={item.id} aria-pressed={theme === item.id} className={theme === item.id ? 'active' : ''} onClick={() => setTheme(item.id)}><span className={`theme-preview theme-${item.id}`}><i /><b /><em /></span><strong>{item.icon}{item.name}</strong><small>{item.description}</small></button>)}</div></section>
-      <section className="panel settings-card"><div className="settings-heading"><span><Activity /></span><div><h2>Live data sources</h2><p>VISOR exposes coverage honestly. Missing hardware sensors are never replaced with invented values.</p></div></div><SettingStatus label="Windows agent" detail="One batched local snapshot every second" value={agent ? 'LIVE' : 'OFFLINE'} tone={agent ? 'live' : 'off'} /><SettingStatus label="Per-process GPU attribution" detail="Windows GPU engine counters and dedicated memory" value={agent?.gpuAttributionAvailable ? 'AVAILABLE' : 'UNAVAILABLE'} tone={agent?.gpuAttributionAvailable ? 'live' : 'off'} /><SettingStatus label="CPU temperature" detail={metrics.sensorSources?.cpu || 'Install or run a LibreHardwareMonitor WMI source to expose this sensor'} value={metrics.cpuTemp > 0 ? `${Math.round(metrics.cpuTemp)}°C` : 'UNAVAILABLE'} tone={metrics.cpuTemp > 0 ? 'live' : 'off'} /><SettingStatus label="SSD temperature" detail={metrics.storageTemperatures?.[0]?.source || 'Windows Storage Reliability or a hardware monitor is required'} value={(metrics.ssdTemp || 0) > 0 ? `${Math.round(metrics.ssdTemp || 0)}°C` : 'UNAVAILABLE'} tone={(metrics.ssdTemp || 0) > 0 ? 'live' : 'off'} /></section>
-      <section className="panel settings-card"><div className="settings-heading"><span><ShieldCheck /></span><div><h2>Privacy and trust</h2><p>Telemetry and runtime probes stay on this PC.</p></div></div><SettingStatus label="Network boundary" detail="Agent bound to IPv4 loopback only" value="127.0.0.1" tone="live" /><SettingStatus label="External telemetry" detail="VISOR sends no hardware or model data to a remote service" value="OFF" tone="live" /></section>
+      <section className="panel settings-card"><div className="settings-heading"><span><Activity /></span><div><h2>Live data sources</h2><p>VISOR exposes coverage honestly. Missing hardware sensors are never replaced with invented values.</p></div></div><SettingStatus label="Collector runtime" detail="One batched local snapshot every second" value={agent ? (source === 'tauri-native' ? 'NATIVE' : 'LOOPBACK') : 'OFFLINE'} tone={agent ? 'live' : 'off'} /><SettingStatus label="Collector overhead" detail={agent ? `${agent.sampleDurationMs} ms last sample · PID ${agent.pid}` : 'Waiting for collector diagnostics'} value={agent ? `${agent.cpuPercent.toFixed(1)}% · ${agent.memoryMb.toFixed(0)} MB` : 'UNAVAILABLE'} tone={agent ? 'live' : 'off'} /><SettingStatus label="Per-process GPU attribution" detail="Windows GPU engine counters and dedicated memory" value={agent?.gpuAttributionAvailable ? 'AVAILABLE' : 'UNAVAILABLE'} tone={agent?.gpuAttributionAvailable ? 'live' : 'off'} /><SettingStatus label="CPU temperature" detail={metrics.sensorSources?.cpu || 'Install or run a LibreHardwareMonitor WMI source to expose this sensor'} value={metrics.cpuTemp > 0 ? `${Math.round(metrics.cpuTemp)}°C` : 'UNAVAILABLE'} tone={metrics.cpuTemp > 0 ? 'live' : 'off'} /><SettingStatus label="SSD temperature" detail={metrics.storageTemperatures?.[0]?.source || 'Windows Storage Reliability or a hardware monitor is required'} value={(metrics.ssdTemp || 0) > 0 ? `${Math.round(metrics.ssdTemp || 0)}°C` : 'UNAVAILABLE'} tone={(metrics.ssdTemp || 0) > 0 ? 'live' : 'off'} /></section>
+      <section className="panel settings-card"><div className="settings-heading"><span><ShieldCheck /></span><div><h2>Privacy and trust</h2><p>Telemetry and runtime probes stay on this PC.</p></div></div><SettingStatus label="Network boundary" detail={source === 'tauri-native' ? 'Native IPC; no telemetry HTTP server is started' : 'Browser agent bound to IPv4 loopback only'} value={source === 'tauri-native' ? 'IPC ONLY' : '127.0.0.1'} tone="live" /><SettingStatus label="External telemetry" detail="VISOR sends no hardware or model data to a remote service" value="OFF" tone="live" /></section>
     </div>
   );
 }
