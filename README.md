@@ -1,30 +1,47 @@
 # VISOR
 
-VISOR is a premium, local-first Windows system monitor designed for demanding
-workstations, AI workloads, games, and creative tools. This repository contains
-the first product foundation: the complete responsive interface and a live
-telemetry simulator isolated behind a React hook.
+VISOR is a premium, local-first Windows system monitor for demanding
+workstations, AI workloads, games, and creative tools. It combines a calm,
+high-density interface with a local Windows agent that reads the machine and
+performs explicitly confirmed process actions.
 
 ## What is working now
 
-- Live overview for CPU, GPU, RAM, VRAM, disk, network, thermals, and power
-- Resource attribution table with AI, game, and creative-workload badges
-- Full process explorer with search and resource sorting
-- Dedicated performance, AI workload, history, alerts, and settings views
-- 900 ms live refresh, pause/resume, command palette, and light/dark themes
+- Real-time CPU, GPU, RAM, VRAM, disk, network, thermal, and hardware telemetry
+- NVIDIA power, temperature, clocks, utilization, and VRAM through vendor telemetry
+- Full process explorer with live CPU, GPU, memory, VRAM, handles, and threads
+- Confirmed process termination plus efficiency and high-priority controls
+- Protected Windows critical-process denylist and PID confirmation on destructive actions
+- Energy Lens with live whole-PC watts, component model, session energy, cost,
+  carbon projection, confidence score, and per-process energy fingerprints
+- Dedicated overview, performance, AI workload, history, alerts, and settings views
+- 1.1 second live refresh, pause/resume, command palette, and light/dark themes
 - Responsive desktop, compact, and mobile layouts
-- Offline-safe interface with no remote fonts, images, or runtime assets
+- Local-only API bound to `127.0.0.1`; no telemetry leaves the device
 
-The values shown in this first milestone are realistic simulated telemetry. The
-UI is intentionally decoupled from collection so the simulator can be replaced
-by the native Windows collector without changing the product surfaces.
+When the local agent is unavailable, VISOR makes the fallback demo state
+explicit instead of presenting simulated values as real telemetry.
 
 ## Run locally
 
-Requirements: Node.js 20 or newer.
+Requirements: Windows and Node.js 20 or newer.
+
+Install once:
 
 ```powershell
 npm.cmd install
+```
+
+Start the local Windows agent in an **Administrator PowerShell** when you want
+to control processes owned by other users or by elevated applications:
+
+```powershell
+npm.cmd run agent
+```
+
+In a second PowerShell window, start the interface:
+
+```powershell
 npm.cmd run dev
 ```
 
@@ -35,15 +52,37 @@ Open [http://localhost:1420](http://localhost:1420).
 ```powershell
 npm.cmd run lint
 npm.cmd run build
+npm.cmd run test:agent
 ```
 
 The production web bundle is written to `dist/`.
 
-## Native Windows roadmap
+## Energy methodology
 
-The next milestone adds a Tauri 2 / Rust collector and replaces the telemetry
-hook with native commands. Collection should be layered so VISOR remains useful
-when a vendor-specific API is unavailable:
+VISOR does not claim false measurement precision. With a compatible NVIDIA GPU,
+GPU watts are measured by vendor telemetry while CPU, memory, storage, platform,
+and conversion losses are estimated from live utilization and detected hardware
+limits. The interface labels this as a **hybrid estimate** and exposes its
+confidence and methodology. Without a measured GPU power sensor, the entire
+figure is labeled **estimated**.
+
+Cost and carbon projections use configurable assumptions. Defaults are
+`0.25 EUR/kWh` and `56 gCO2e/kWh`; override them before starting the agent with
+`VISOR_TARIFF_EUR_KWH` and `VISOR_CARBON_G_KWH`.
+
+## Security model
+
+- The agent listens only on the IPv4 loopback interface.
+- Mutations accept only known VISOR origins and require an action header.
+- Process termination requires an exact PID confirmation in the request body.
+- Critical Windows processes, PID 0-4, and the agent itself cannot be terminated.
+- Command arguments are passed directly to Windows tools without shell interpolation.
+
+## Native collector roadmap
+
+The next milestone moves the agent into a signed Tauri 2 / Rust collector while
+keeping the same product surfaces. Collection will remain layered so VISOR stays
+useful when a vendor-specific API is unavailable:
 
 1. PDH and Windows performance counters for CPU, memory, disk, and network.
 2. DXGI and GPU engine counters for per-process GPU attribution.

@@ -7,17 +7,19 @@ import {
   ChevronRight,
   Cpu,
   History,
+  Leaf,
   LayoutDashboard,
   Settings,
 } from 'lucide-react';
 
-export type ViewId = 'overview' | 'processes' | 'performance' | 'ai' | 'history' | 'alerts' | 'settings';
+export type ViewId = 'overview' | 'processes' | 'performance' | 'ai' | 'energy' | 'history' | 'alerts' | 'settings';
 
 interface SidebarProps {
   active: ViewId;
   collapsed: boolean;
   onNavigate: (view: ViewId) => void;
   onCollapse: () => void;
+  connection: 'connecting' | 'live' | 'demo' | 'error';
 }
 
 const primaryItems = [
@@ -25,6 +27,7 @@ const primaryItems = [
   { id: 'processes' as const, label: 'Processes', icon: Cpu },
   { id: 'performance' as const, label: 'Performance', icon: ChartNoAxesCombined },
   { id: 'ai' as const, label: 'AI workloads', icon: Bot, badge: '1' },
+  { id: 'energy' as const, label: 'Energy lens', icon: Leaf, badge: 'LIVE' },
 ];
 
 const secondaryItems = [
@@ -32,7 +35,7 @@ const secondaryItems = [
   { id: 'alerts' as const, label: 'Alerts', icon: Bell, badge: '2' },
 ];
 
-export function Sidebar({ active, collapsed, onNavigate, onCollapse }: SidebarProps) {
+export function Sidebar({ active, collapsed, onNavigate, onCollapse, connection }: SidebarProps) {
   const renderItem = ({ id, label, icon: Icon, badge }: (typeof primaryItems)[number] | (typeof secondaryItems)[number]) => (
     <button
       key={id}
@@ -67,8 +70,8 @@ export function Sidebar({ active, collapsed, onNavigate, onCollapse }: SidebarPr
         <div className="collector-status">
           <span className="collector-pulse" />
           <div>
-            <strong>Live preview</strong>
-            <span>900 ms refresh</span>
+            <strong>{connection === 'live' ? 'Windows agent' : connection === 'connecting' ? 'Connecting…' : 'Demo fallback'}</strong>
+            <span>{connection === 'live' ? 'real sensors · 1 sec' : 'simulated telemetry'}</span>
           </div>
         </div>
         <button

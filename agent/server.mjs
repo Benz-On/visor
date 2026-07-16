@@ -1,0 +1,651 @@
+import { createServer } from 'node:http';
+import { execFile } from 'node:child_process';
+import { cpus, hostname, platform, release, totalmem, freemem, setPriority, constants as osConstants } from 'node:os';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
+import si from 'systeminformation';
+import { attributeProcessEnergy, estimateEnergy, inferCpuTdp, projectEnergy } from './energy-model.mjs';
+
+const execFileAsync = promisify(execFile);
+const GiB = 1024 ** 3;
+const MiB = 1024 ** 2;
+const PORT = Number.parseInt(process.env.VISOR_AGENT_PORT || '1421', 10);
+const POLL_MS = Math.min(5000, Math.max(650, Number.parseInt(process.env.VISOR_POLL_MS || '1000', 10)));
+const GPU_COUNTER_INTERVAL_MS = 5000;
+const GPU_COUNTER_SCRIPT = fileURLToPath(new URL('./gpu-counters.ps1', import.meta.url));
+const PROCESS_SNAPSHOT_SCRIPT = fileURLToPath(new URL('./process-snapshot.ps1', import.meta.url));
+const allowedOrigins = new Set([
+  'http://localhost:1420',
+  'http://127.0.0.1:1420',
+  'https://tauri.localhost',
+  'tauri://localhost',
+]);
+
+const criticalProcesses = new Set([
+  'system',
+  'system idle process',
+  'registry',
+  'memory compression',
+  'smss.exe',
+  'csrss.exe',
+  'wininit.exe',
+  'services.exe',
+  'lsass.exe',
+  'winlogon.exe',
+  'svchost.exe',
+  'fontdrvhost.exe',
+]);
+
+const aiPatterns = /ollama|lm studio|llama|kobold|comfyui|python.*(torch|tensorflow)|stable.?diffusion|invokeai|fooocus/i;
+const creativePatterns = /photoshop|afterfx|premiere|blender|davinci|resolve|fusion|illustrator/i;
+const browserPatterns = /chrome|msedge|firefox|brave|opera/i;
+const finite = (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback;
+const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+const round = (value, digits = 1) => {
+  const multiplier = 10 ** digits;
+  return Math.round(finite(value) * multiplier) / multiplier;
+};
+
+let hardware = null;
+let latestSnapshot = null;
+let gpuProcessCache = new Map();
+let gpuCounterPending = false;
+let lastGpuCounterAt = 0;
+let collectionPending = false;
+let lastCollectionError = null;
+let sessionWh = 0;
+let lastEnergyWatts = 0;
+let lastEnergyAt = Date.now();
+let lastAgentCpu = process.cpuUsage();
+let lastAgentCpuAt = process.hrtime.bigint();
+let previousProcessCpu = new Map();
+let lastProcessSampleAt = Date.now();
+
+function fallbackCpu() {
+  const logical = cpus();
+  const model = logical[0]?.model || 'Unknown processor';
+  return {
+    manufacturer: model.split(' ')[0] || 'Unknown',
+    brand: model,
+    cores: logical.length,
+    physicalCores: Math.max(1, Math.ceil(logical.length / 2)),
+    speed: round((logical[0]?.speed || 0) / 1000, 2),
+    speedMax: round(Math.max(...logical.map((core) => core.speed || 0)) / 1000, 2),
+    virtualization: false,
+    cache: {},
+  };
+}
+
+async function safe(call, fallback) {
+  try {
+    const value = await call();
+    return value ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+async function initializeHardware() {
+  const [system, cpu, memoryLayout, osInfo, graphics, diskLayout, baseboard, nvidia] = await Promise.all([
+    safe(() => si.system(), {}),
+    safe(() => si.cpu(), fallbackCpu()),
+    safe(() => si.memLayout(), []),
+    safe(() => si.osInfo(), {}),
+    safe(() => si.graphics(), { controllers: [], displays: [] }),
+    safe(() => si.diskLayout(), []),
+    safe(() => si.baseboard(), {}),
+    readNvidiaSnapshot(),
+  ]);
+  const cpuData = cpu?.brand ? cpu : fallbackCpu();
+  const controllers = Array.isArray(graphics.controllers) ? graphics.controllers : [];
+  const primaryGpu = nvidia || choosePrimaryGpu(controllers);
+
+  hardware = {
+    system: {
+      manufacturer: system.manufacturer || baseboard.manufacturer || 'Unknown',
+      model: system.model || baseboard.model || 'Windows PC',
+      version: system.version || '',
+    },
+    os: {
+      platform: osInfo.platform || platform(),
+      distro: osInfo.distro || 'Windows',
+      release: osInfo.release || release(),
+      build: osInfo.build || '',
+      arch: osInfo.arch || process.arch,
+      hostname: osInfo.hostname || hostname(),
+    },
+    cpu: {
+      manufacturer: cpuData.manufacturer || 'Unknown',
+      brand: cpuData.brand || fallbackCpu().brand,
+      cores: finite(cpuData.cores, cpus().length),
+      physicalCores: finite(cpuData.physicalCores, Math.ceil(cpus().length / 2)),
+      speed: finite(cpuData.speed),
+      speedMax: finite(cpuData.speedMax),
+      socket: cpuData.socket || '',
+      virtualization: Boolean(cpuData.virtualization),
+      cache: cpuData.cache || {},
+      estimatedTdp: inferCpuTdp(cpuData),
+    },
+    gpu: primaryGpu ? normalizeGpu(primaryGpu) : null,
+    memory: {
+      totalBytes: totalmem(),
+      modules: memoryLayout.map((module) => ({
+        sizeBytes: finite(module.size),
+        type: module.type || '',
+        clockMhz: finite(module.clockSpeed),
+        manufacturer: module.manufacturer || '',
+        bank: module.bank || '',
+      })),
+    },
+    storage: diskLayout.map((disk) => ({
+      name: disk.name || disk.device || 'Disk',
+      type: disk.type || disk.interfaceType || '',
+      sizeBytes: finite(disk.size),
+      vendor: disk.vendor || '',
+      smartStatus: disk.smartStatus || '',
+    })),
+    displays: (graphics.displays || []).map((display) => ({
+      model: display.model || 'Display',
+      main: Boolean(display.main),
+      resolution: display.currentResX && display.currentResY ? `${display.currentResX} × ${display.currentResY}` : '',
+      refreshRate: finite(display.currentRefreshRate),
+    })),
+  };
+}
+
+function choosePrimaryGpu(controllers = []) {
+  return [...controllers].sort((left, right) => {
+    const leftScore = (finite(left.memoryTotal, finite(left.vram) * MiB) || 0) + (/nvidia|amd|radeon/i.test(left.vendor) ? 10 ** 14 : 0);
+    const rightScore = (finite(right.memoryTotal, finite(right.vram) * MiB) || 0) + (/nvidia|amd|radeon/i.test(right.vendor) ? 10 ** 14 : 0);
+    return rightScore - leftScore;
+  })[0] || null;
+}
+
+function normalizeGpu(gpu) {
+  return {
+    vendor: gpu.vendor || 'Unknown',
+    model: gpu.model || gpu.name || 'Graphics adapter',
+    vramBytes: finite(gpu.memoryTotal, finite(gpu.vram) * MiB),
+    driverVersion: gpu.driverVersion || '',
+    bus: gpu.bus || gpu.pciBus || '',
+    powerLimit: finite(gpu.powerLimit),
+  };
+}
+
+async function readNvidiaSnapshot() {
+  if (process.platform !== 'win32') return null;
+  try {
+    const fields = [
+      'name',
+      'driver_version',
+      'utilization.gpu',
+      'memory.total',
+      'memory.used',
+      'temperature.gpu',
+      'power.draw',
+      'power.limit',
+      'clocks.current.graphics',
+      'clocks.current.memory',
+      'fan.speed',
+    ];
+    const { stdout } = await execFileAsync('nvidia-smi.exe', [
+      `--query-gpu=${fields.join(',')}`,
+      '--format=csv,noheader,nounits',
+    ], { windowsHide: true, timeout: 4000, maxBuffer: 256 * 1024 });
+    const firstLine = String(stdout || '').trim().split(/\r?\n/)[0];
+    if (!firstLine) return null;
+    const values = firstLine.split(',').map((value) => value.trim());
+    return {
+      vendor: 'NVIDIA',
+      model: values[0],
+      driverVersion: values[1],
+      utilizationGpu: finite(values[2]),
+      memoryTotal: finite(values[3]) * MiB,
+      memoryUsed: finite(values[4]) * MiB,
+      temperatureGpu: finite(values[5]),
+      powerDraw: finite(values[6]),
+      powerLimit: finite(values[7]),
+      clockCore: finite(values[8]),
+      clockMemory: finite(values[9]),
+      fanSpeed: finite(values[10]),
+      vram: finite(values[3]),
+      telemetrySource: 'nvidia-smi',
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function readFallbackProcesses() {
+  if (process.platform !== 'win32') return { all: 0, list: [] };
+  try {
+    const { stdout } = await execFileAsync('powershell.exe', [
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-File',
+      PROCESS_SNAPSHOT_SCRIPT,
+    ], { windowsHide: true, timeout: 7000, maxBuffer: 8 * MiB });
+    const parsed = JSON.parse(String(stdout || '[]').trim() || '[]');
+    const rows = Array.isArray(parsed) ? parsed : [parsed];
+    const sampledAt = Date.now();
+    const elapsedSeconds = Math.max(0.1, (sampledAt - lastProcessSampleAt) / 1000);
+    const logicalCores = Math.max(1, cpus().length);
+    const nextCpu = new Map();
+    const list = rows.map((row) => {
+      const pid = Number(row.pid);
+      const cpuSeconds = finite(row.cpuSeconds, -1);
+      const previous = previousProcessCpu.get(pid);
+      const cpu = previous && cpuSeconds >= 0
+        ? clamp((cpuSeconds - previous.cpuSeconds) / elapsedSeconds / logicalCores * 100, 0, 100)
+        : 0;
+      if (cpuSeconds >= 0) nextCpu.set(pid, { cpuSeconds });
+      return {
+        pid,
+        parentPid: 0,
+        name: row.name || `PID ${pid}`,
+        cpu,
+        mem: totalmem() > 0 ? finite(row.workingSetBytes) / totalmem() * 100 : 0,
+        memRss: finite(row.workingSetBytes),
+        memVsz: finite(row.privateBytes),
+        priority: finite(row.priority),
+        started: row.started || '',
+        state: row.responding === false ? 'not responding' : 'running',
+        user: '',
+        command: row.name || '',
+        params: '',
+        path: row.path || '',
+        handles: finite(row.handles),
+        threads: finite(row.threads),
+      };
+    });
+    previousProcessCpu = nextCpu;
+    lastProcessSampleAt = sampledAt;
+    return { all: list.length, running: list.filter((item) => item.state === 'running').length, list };
+  } catch {
+    return { all: 0, list: [] };
+  }
+}
+
+async function pollGpuProcessCounters() {
+  if (process.platform !== 'win32' || gpuCounterPending || Date.now() - lastGpuCounterAt < GPU_COUNTER_INTERVAL_MS) return;
+  gpuCounterPending = true;
+  lastGpuCounterAt = Date.now();
+  try {
+    const { stdout } = await execFileAsync('powershell.exe', [
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-File',
+      GPU_COUNTER_SCRIPT,
+    ], { windowsHide: true, timeout: 15_000, maxBuffer: 2 * MiB });
+    const parsed = JSON.parse(String(stdout || '[]').trim() || '[]');
+    const rows = Array.isArray(parsed) ? parsed : [parsed];
+    gpuProcessCache = new Map(rows.map((row) => [Number(row.pid), {
+      gpu: clamp(finite(row.gpu), 0, 100),
+      dedicatedBytes: Math.max(0, finite(row.dedicatedBytes)),
+      engines: row.engines || {},
+    }]));
+  } catch {
+    // Per-process GPU counters may be unavailable on older Windows builds.
+  } finally {
+    lastGpuCounterAt = Date.now();
+    gpuCounterPending = false;
+  }
+}
+
+function classifyProcess(processData) {
+  const haystack = `${processData.name} ${processData.command} ${processData.path}`;
+  if (aiPatterns.test(haystack)) return 'AI';
+  if (creativePatterns.test(haystack)) return 'Creative';
+  if (/\\steamapps\\|epic games|gog galaxy/i.test(haystack)) return 'Game';
+  return undefined;
+}
+
+function colorForProcess(name) {
+  let hash = 0;
+  for (const character of String(name)) hash = ((hash << 5) - hash + character.charCodeAt(0)) | 0;
+  const colors = ['#58d9ff', '#9c8cff', '#63e6be', '#ffbd5b', '#ff7190', '#6cbf7d', '#7785e8'];
+  return colors[Math.abs(hash) % colors.length];
+}
+
+function isProtected(processData) {
+  const name = String(processData.name || '').toLowerCase();
+  return processData.pid <= 4 || processData.pid === process.pid || criticalProcesses.has(name);
+}
+
+function mergeProcessData(nativeProcesses, fallbackProcesses) {
+  if (!nativeProcesses?.list?.length) return fallbackProcesses;
+
+  const fallbackByPid = new Map(
+    (fallbackProcesses?.list || []).map((item) => [Number(item.pid), item]),
+  );
+
+  return {
+    ...nativeProcesses,
+    list: nativeProcesses.list.map((item) => {
+      const fallback = fallbackByPid.get(Number(item.pid));
+      return {
+        ...fallback,
+        ...item,
+        handles: finite(fallback?.handles, finite(item.handles)),
+        threads: finite(fallback?.threads, finite(item.threads)),
+        path: item.path || fallback?.path || '',
+      };
+    }),
+  };
+}
+
+function normalizeProcesses(processData, memoryUsedBytes) {
+  const list = Array.isArray(processData.list) ? processData.list : [];
+  const normalized = list.map((item) => {
+    const gpu = gpuProcessCache.get(Number(item.pid)) || {};
+    const name = item.name || `PID ${item.pid}`;
+    // Windows exposes unused CPU capacity as PID 0. It is not workload and must
+    // never be attributed power, memory, or GPU usage.
+    const idleProcess = Number(item.pid) === 0 || /^(system idle process|idle)(\.exe)?$/i.test(name);
+    const memoryGb = idleProcess ? 0 : Math.max(0, finite(item.memRss) / GiB);
+    return {
+      id: Number(item.pid),
+      parentId: Number(item.parentPid),
+      name,
+      subtitle: `${item.user || 'Local'} · PID ${item.pid}`,
+      icon: name.replace(/\.exe$/i, '').slice(0, 2).toUpperCase(),
+      color: colorForProcess(name),
+      cpu: idleProcess ? 0 : round(Math.max(0, finite(item.cpu)), 1),
+      gpu: idleProcess ? 0 : round(finite(gpu.gpu), 1),
+      memory: round(memoryGb, 2),
+      vram: idleProcess ? 0 : round(finite(gpu.dedicatedBytes) / GiB, 2),
+      disk: 0,
+      network: 0,
+      power: 'Very low',
+      kind: classifyProcess(item),
+      gpuEngines: gpu.engines || {},
+      priority: finite(item.priority),
+      state: item.state || '',
+      user: item.user || '',
+      path: item.path || '',
+      command: item.command || '',
+      handles: finite(item.handles),
+      threads: finite(item.threads),
+      protected: isProtected(item),
+    };
+  });
+
+  return {
+    counts: {
+      all: finite(processData.all, normalized.length),
+      running: finite(processData.running),
+      blocked: finite(processData.blocked),
+      sleeping: finite(processData.sleeping),
+    },
+    list: normalized,
+    memoryUsedGb: memoryUsedBytes / GiB,
+  };
+}
+
+function calculateAgentOverhead() {
+  const now = process.hrtime.bigint();
+  const elapsedMicros = Number(now - lastAgentCpuAt) / 1000;
+  const delta = process.cpuUsage(lastAgentCpu);
+  const logicalCores = Math.max(1, cpus().length);
+  const cpuPercent = elapsedMicros > 0 ? ((delta.user + delta.system) / elapsedMicros) * 100 / logicalCores : 0;
+  lastAgentCpu = process.cpuUsage();
+  lastAgentCpuAt = now;
+  return {
+    cpuPercent: round(cpuPercent, 2),
+    memoryMb: round(process.memoryUsage().rss / MiB, 1),
+    pid: process.pid,
+    uptimeSeconds: Math.round(process.uptime()),
+  };
+}
+
+async function collectSnapshot() {
+  if (collectionPending) return latestSnapshot;
+  collectionPending = true;
+  const startedAt = Date.now();
+
+  try {
+    void pollGpuProcessCounters();
+    const [load, speed, temperatures, memory, graphics, fsStats, disksIo, networks, nativeProcesses, fallbackProcesses, nvidia] = await Promise.all([
+      safe(() => si.currentLoad(), { currentLoad: 0, cpus: [] }),
+      safe(() => si.cpuCurrentSpeed(), { avg: 0, min: 0, max: 0, cores: [] }),
+      safe(() => si.cpuTemperature(), { main: 0, max: 0, cores: [] }),
+      safe(() => si.mem(), { total: totalmem(), used: totalmem() - freemem(), available: freemem(), swaptotal: 0, swapused: 0 }),
+      safe(() => si.graphics(), { controllers: [] }),
+      safe(() => si.fsStats(), { rx_sec: 0, wx_sec: 0 }),
+      safe(() => si.disksIO(), { rWaitPercent: 0, wWaitPercent: 0, tWaitPercent: 0 }),
+      safe(() => si.networkStats(), []),
+      safe(() => si.processes(), { all: 0, list: [] }),
+      readFallbackProcesses(),
+      readNvidiaSnapshot(),
+    ]);
+
+    const processData = mergeProcessData(nativeProcesses, fallbackProcesses);
+    const gpu = nvidia || choosePrimaryGpu(graphics.controllers || []);
+    if (gpu && !hardware.gpu) hardware.gpu = normalizeGpu(gpu);
+    const memoryTotal = Math.max(1, finite(memory.total, totalmem()));
+    const memoryUsed = Math.max(0, finite(memory.used, memoryTotal - finite(memory.available)));
+    const gpuTotalBytes = Math.max(0, finite(gpu?.memoryTotal, finite(gpu?.vram) * MiB));
+    const gpuUsedBytes = Math.max(0, finite(gpu?.memoryUsed));
+    const networkRows = Array.isArray(networks) ? networks : [networks];
+    const rxBytes = networkRows.reduce((sum, item) => sum + Math.max(0, finite(item.rx_sec)), 0);
+    const txBytes = networkRows.reduce((sum, item) => sum + Math.max(0, finite(item.tx_sec)), 0);
+    const cpuLoad = clamp(finite(load.currentLoad), 0, 100);
+    const gpuLoad = clamp(finite(gpu?.utilizationGpu), 0, 100);
+    const diskActivity = clamp(finite(disksIo.tWaitPercent, finite(disksIo.rWaitPercent) + finite(disksIo.wWaitPercent)), 0, 100);
+    const cpuSpeedRatio = hardware.cpu.speedMax > 0 ? finite(speed.avg) / hardware.cpu.speedMax : 1;
+    const energyEstimate = estimateEnergy({
+      cpuLoad,
+      gpuLoad,
+      cpuTdp: hardware.cpu.estimatedTdp,
+      cpuSpeedRatio,
+      measuredGpuPower: finite(gpu?.powerDraw),
+      gpuPowerLimit: finite(gpu?.powerLimit, hardware.gpu?.powerLimit || 220),
+      memoryTotalGb: memoryTotal / GiB,
+      diskActivity,
+    });
+
+    const now = Date.now();
+    const elapsedHours = Math.min(5000, Math.max(0, now - lastEnergyAt)) / 3_600_000;
+    if (lastEnergyWatts > 0) sessionWh += ((lastEnergyWatts + energyEstimate.watts) / 2) * elapsedHours;
+    lastEnergyWatts = energyEstimate.watts;
+    lastEnergyAt = now;
+
+    const processResult = normalizeProcesses(processData, memoryUsed);
+    const attributed = attributeProcessEnergy(processResult.list, energyEstimate, processResult.memoryUsedGb, {
+      systemCpuLoad: cpuLoad,
+      systemGpuLoad: gpuLoad,
+    })
+      .map((item) => ({
+        ...item,
+        power: item.energyWatts >= 30 ? 'High' : item.energyWatts >= 10 ? 'Moderate' : item.energyWatts >= 2 ? 'Low' : 'Very low',
+      }))
+      .sort((left, right) => right.energyWatts - left.energyWatts);
+    const projection = projectEnergy(
+      energyEstimate.watts,
+      sessionWh,
+      finite(process.env.VISOR_TARIFF_EUR_KWH, 0.25),
+      finite(process.env.VISOR_CARBON_G_KWH, 56),
+    );
+
+    latestSnapshot = {
+      timestamp: new Date(now).toISOString(),
+      source: 'windows-agent',
+      pollMs: POLL_MS,
+      hardware,
+      metrics: {
+        cpu: round(cpuLoad, 1),
+        gpu: round(gpuLoad, 1),
+        ram: round(memoryUsed / memoryTotal * 100, 1),
+        vram: gpuTotalBytes > 0 ? round(gpuUsedBytes / gpuTotalBytes * 100, 1) : 0,
+        cpuTemp: round(finite(temperatures.main), 1),
+        gpuTemp: round(finite(gpu?.temperatureGpu), 1),
+        cpuPower: energyEstimate.breakdown.cpu,
+        gpuPower: round(finite(gpu?.powerDraw, energyEstimate.breakdown.gpu), 1),
+        cpuSpeedGhz: round(finite(speed.avg), 2),
+        cpuCoreLoads: (load.cpus || []).map((core) => round(finite(core.load), 1)),
+        download: round(rxBytes * 8 / 1_000_000, 2),
+        upload: round(txBytes * 8 / 1_000_000, 2),
+        diskRead: round(Math.max(0, finite(fsStats.rx_sec)) / MiB, 2),
+        diskWrite: round(Math.max(0, finite(fsStats.wx_sec)) / MiB, 2),
+        diskActivity: round(diskActivity, 1),
+        memory: {
+          totalBytes: memoryTotal,
+          usedBytes: memoryUsed,
+          availableBytes: finite(memory.available),
+          cachedBytes: finite(memory.cached),
+          swapTotalBytes: finite(memory.swaptotal),
+          swapUsedBytes: finite(memory.swapused),
+        },
+        gpuMemory: { totalBytes: gpuTotalBytes, usedBytes: gpuUsedBytes },
+      },
+      energy: {
+        ...energyEstimate,
+        ...projection,
+      },
+      processes: attributed,
+      processCounts: processResult.counts,
+      agent: {
+        ...calculateAgentOverhead(),
+        sampleDurationMs: Date.now() - startedAt,
+        gpuAttributionAvailable: gpuProcessCache.size > 0,
+        lastError: lastCollectionError,
+      },
+    };
+    lastCollectionError = null;
+    return latestSnapshot;
+  } catch (error) {
+    lastCollectionError = error instanceof Error ? error.message : String(error);
+    return latestSnapshot;
+  } finally {
+    collectionPending = false;
+  }
+}
+
+function corsHeaders(request) {
+  const origin = request.headers.origin;
+  const allowedOrigin = origin && allowedOrigins.has(origin) ? origin : 'http://localhost:1420';
+  return {
+    'Access-Control-Allow-Origin': allowedOrigin,
+    'Access-Control-Allow-Headers': 'Content-Type, X-Visor-Action',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Cache-Control': 'no-store',
+    'Content-Type': 'application/json; charset=utf-8',
+    Vary: 'Origin',
+  };
+}
+
+function sendJson(response, request, status, payload) {
+  response.writeHead(status, corsHeaders(request));
+  response.end(JSON.stringify(payload));
+}
+
+async function readJson(request) {
+  let data = '';
+  for await (const chunk of request) {
+    data += chunk;
+    if (data.length > 16_384) throw new Error('Request body is too large.');
+  }
+  return data ? JSON.parse(data) : {};
+}
+
+function validateActionRequest(request) {
+  const origin = request.headers.origin;
+  if (!origin || !allowedOrigins.has(origin)) return 'Origin is not allowed.';
+  if (request.headers['x-visor-action'] !== 'confirmed') return 'VISOR action confirmation header is missing.';
+  return null;
+}
+
+function findActionTarget(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('Invalid process identifier.');
+  const target = latestSnapshot?.processes?.find((item) => item.id === pid);
+  if (!target) throw new Error('The process is no longer running.');
+  if (target.protected) throw new Error('VISOR protects this critical Windows process.');
+  return target;
+}
+
+async function killProcess(pid, body) {
+  const target = findActionTarget(pid);
+  if (String(body.confirmation) !== String(pid)) throw new Error('PID confirmation does not match.');
+  const args = ['/PID', String(pid)];
+  if (body.tree !== false) args.push('/T');
+  if (body.force === true) args.push('/F');
+  await execFileAsync('taskkill.exe', args, { windowsHide: true, timeout: 10_000, maxBuffer: 256 * 1024 });
+  return { ok: true, action: 'kill', pid, name: target.name };
+}
+
+async function changePriority(pid, body) {
+  const target = findActionTarget(pid);
+  const priorities = {
+    low: osConstants.priority.PRIORITY_LOW,
+    belowNormal: osConstants.priority.PRIORITY_BELOW_NORMAL,
+    normal: osConstants.priority.PRIORITY_NORMAL,
+    aboveNormal: osConstants.priority.PRIORITY_ABOVE_NORMAL,
+    high: osConstants.priority.PRIORITY_HIGH,
+  };
+  if (!(body.priority in priorities)) throw new Error('Unsupported priority class.');
+  setPriority(pid, priorities[body.priority]);
+  return { ok: true, action: 'priority', pid, name: target.name, priority: body.priority };
+}
+
+const server = createServer(async (request, response) => {
+  if (request.method === 'OPTIONS') {
+    response.writeHead(204, corsHeaders(request));
+    response.end();
+    return;
+  }
+
+  const url = new URL(request.url || '/', `http://${request.headers.host || '127.0.0.1'}`);
+  if (request.method === 'GET' && url.pathname === '/api/health') {
+    sendJson(response, request, 200, {
+      ok: true,
+      source: 'windows-agent',
+      snapshotReady: Boolean(latestSnapshot),
+      lastError: lastCollectionError,
+      pid: process.pid,
+    });
+    return;
+  }
+  if (request.method === 'GET' && url.pathname === '/api/snapshot') {
+    const snapshot = latestSnapshot || await collectSnapshot();
+    sendJson(response, request, snapshot ? 200 : 503, snapshot || { error: 'Telemetry is not ready.' });
+    return;
+  }
+
+  const processAction = url.pathname.match(/^\/api\/processes\/(\d+)\/(kill|priority)$/);
+  if (request.method === 'POST' && processAction) {
+    const requestError = validateActionRequest(request);
+    if (requestError) {
+      sendJson(response, request, 403, { ok: false, error: requestError });
+      return;
+    }
+    try {
+      const body = await readJson(request);
+      const pid = Number(processAction[1]);
+      const result = processAction[2] === 'kill' ? await killProcess(pid, body) : await changePriority(pid, body);
+      await collectSnapshot();
+      sendJson(response, request, 200, result);
+    } catch (error) {
+      sendJson(response, request, 400, { ok: false, error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+
+  sendJson(response, request, 404, { error: 'Not found.' });
+});
+
+await initializeHardware();
+await collectSnapshot();
+setInterval(() => void collectSnapshot(), POLL_MS).unref();
+
+server.listen(PORT, '127.0.0.1', () => {
+  console.log(`VISOR Windows agent listening on http://127.0.0.1:${PORT}`);
+  console.log(`Sampling every ${POLL_MS} ms · PID ${process.pid}`);
+});
+
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.on(signal, () => server.close(() => process.exit(0)));
+}

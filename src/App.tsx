@@ -13,6 +13,7 @@ import {
   Gauge,
   HardDrive,
   Info,
+  Leaf,
   Maximize2,
   MemoryStick,
   Moon,
@@ -31,14 +32,14 @@ import {
 import { Donut, LineChart } from './components/Charts';
 import { ProcessTable } from './components/ProcessTable';
 import { Sidebar, type ViewId } from './components/Sidebar';
-import { useTelemetry } from './hooks/useTelemetry';
-import type { MetricKey, MetricTone } from './types';
+import { useVisorData } from './hooks/useVisorData';
+import type { AgentInfo, EnergyEstimate, HardwareInfo, MetricKey, MetricTone, ProcessInfo } from './types';
 
 const viewTitles: Record<ViewId, { eyebrow: string; title: string; description: string }> = {
   overview: {
     eyebrow: 'SYSTEM OVERVIEW',
     title: 'Good morning, Alex.',
-    description: 'Your workstation is running beautifully.',
+    description: 'Live hardware, processes and energy in one calm view.',
   },
   processes: {
     eyebrow: 'PROCESS EXPLORER',
@@ -54,6 +55,11 @@ const viewTitles: Record<ViewId, { eyebrow: string; title: string; description: 
     eyebrow: 'AI WORKLOADS',
     title: 'Local intelligence, understood.',
     description: 'Model activity, memory footprint and inference speed.',
+  },
+  energy: {
+    eyebrow: 'ENERGY LENS',
+    title: 'Every watt, made visible.',
+    description: 'Measured power, modeled consumption and application impact.',
   },
   history: {
     eyebrow: 'HISTORY',
@@ -78,7 +84,8 @@ function App() {
   const [paused, setPaused] = useState(false);
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
   const [commandOpen, setCommandOpen] = useState(false);
-  const metrics = useTelemetry(paused);
+  const visor = useVisorData(paused);
+  const metrics = visor.metrics;
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -93,6 +100,16 @@ function App() {
   }, []);
 
   const title = viewTitles[activeView];
+  const thermalAlert = metrics.cpuTemp >= 90 || metrics.gpuTemp >= 86;
+  const healthLabel = visor.connection === 'demo'
+    ? 'Demo mode'
+    : visor.connection === 'error'
+      ? 'Reconnecting'
+      : visor.connection === 'connecting'
+        ? 'Connecting'
+        : thermalAlert
+          ? 'Attention'
+          : 'Telemetry active';
 
   return (
     <div className="app-shell" data-theme={theme}>
@@ -101,6 +118,7 @@ function App() {
         collapsed={collapsed}
         onNavigate={setActiveView}
         onCollapse={() => setCollapsed((value) => !value)}
+        connection={visor.connection}
       />
 
       <main className="main-content">
@@ -145,17 +163,18 @@ function App() {
                 <div className="health-icon"><ShieldCheck size={20} /></div>
                 <div>
                   <span>System health</span>
-                  <strong>Excellent</strong>
+                  <strong>{healthLabel}</strong>
                 </div>
                 <ChevronDown size={16} />
               </div>
             )}
           </section>
 
-          {activeView === 'overview' && <Overview metrics={metrics} />}
-          {activeView === 'processes' && <ProcessExplorer />}
+          {activeView === 'overview' && <Overview metrics={metrics} energy={visor.snapshot?.energy} hardware={visor.snapshot?.hardware} processes={visor.processes} live={visor.connection === 'live'} onKill={visor.killProcess} onPriority={visor.setProcessPriority} />}
+          {activeView === 'processes' && <ProcessExplorer metrics={metrics} processes={visor.processes} counts={visor.snapshot?.processCounts} live={visor.connection === 'live'} onKill={visor.killProcess} onPriority={visor.setProcessPriority} />}
           {activeView === 'performance' && <Performance metrics={metrics} />}
           {activeView === 'ai' && <AIWorkloads metrics={metrics} />}
+          {activeView === 'energy' && <EnergyView energy={visor.snapshot?.energy} processes={visor.processes} agent={visor.snapshot?.agent} />}
           {activeView === 'history' && <HistoryView metrics={metrics} />}
           {activeView === 'alerts' && <AlertsView />}
           {activeView === 'settings' && <SettingsView theme={theme} setTheme={setTheme} />}
@@ -168,34 +187,53 @@ function App() {
 }
 
 interface MetricsProps {
-  metrics: ReturnType<typeof useTelemetry>;
+  metrics: ReturnType<typeof useVisorData>['metrics'];
 }
 
-function Overview({ metrics }: MetricsProps) {
+interface ProcessActions {
+  processes: ProcessInfo[];
+  live: boolean;
+  onKill: (pid: number) => Promise<unknown>;
+  onPriority: (pid: number, priority: 'low' | 'belowNormal' | 'normal' | 'aboveNormal' | 'high') => Promise<unknown>;
+}
+
+interface OverviewProps extends MetricsProps, ProcessActions {
+  energy?: EnergyEstimate;
+  hardware?: HardwareInfo;
+}
+
+const bytesToGb = (bytes = 0) => bytes / 1024 ** 3;
+const sensorValue = (value: number, suffix: string) => value > 0 ? `${Math.round(value)}${suffix}` : 'Unavailable';
+
+function Overview({ metrics, energy, hardware, processes, live, onKill, onPriority }: OverviewProps) {
+  const memoryUsed = bytesToGb(metrics.memory?.usedBytes);
+  const memoryTotal = bytesToGb(metrics.memory?.totalBytes || hardware?.memory.totalBytes);
+  const vramUsed = bytesToGb(metrics.gpuMemory?.usedBytes);
+  const vramTotal = bytesToGb(metrics.gpuMemory?.totalBytes || hardware?.gpu?.vramBytes);
   return (
     <div className="dashboard-grid">
       <section className="hero-metrics">
         <MetricHero
           label="CPU"
-          detail="AMD Ryzen 9 7950X"
+          detail={hardware?.cpu.brand.trim() || 'Processor'}
           value={metrics.cpu}
           tone="cyan"
           history={metrics.history.cpu}
           stats={[
-            ['Clock', '5.2 GHz'],
-            ['Temp', `${Math.round(metrics.cpuTemp)}°C`],
-            ['Power', `${Math.round(metrics.cpuPower)} W`],
+            ['Clock', metrics.cpuSpeedGhz ? `${metrics.cpuSpeedGhz.toFixed(2)} GHz` : 'Unavailable'],
+            ['Temp', sensorValue(metrics.cpuTemp, '°C')],
+            ['Power', `~${Math.round(metrics.cpuPower)} W`],
           ]}
         />
         <MetricHero
           label="GPU"
-          detail="NVIDIA GeForce RTX 4090"
+          detail={hardware?.gpu?.model || 'Graphics adapter'}
           value={metrics.gpu}
           tone="violet"
           history={metrics.history.gpu}
           stats={[
-            ['Clock', '2.72 GHz'],
-            ['Temp', `${Math.round(metrics.gpuTemp)}°C`],
+            ['VRAM', vramTotal ? `${vramTotal.toFixed(1)} GB` : 'Unavailable'],
+            ['Temp', sensorValue(metrics.gpuTemp, '°C')],
             ['Power', `${Math.round(metrics.gpuPower)} W`],
           ]}
         />
@@ -205,7 +243,7 @@ function Overview({ metrics }: MetricsProps) {
         <CompactMetric
           label="Memory"
           value={metrics.ram}
-          detail="21.8 of 32 GB"
+          detail={memoryTotal ? `${memoryUsed.toFixed(1)} of ${memoryTotal.toFixed(1)} GB` : 'Memory sensor unavailable'}
           tone="mint"
           history={metrics.history.ram}
           icon={<MemoryStick size={18} />}
@@ -213,14 +251,14 @@ function Overview({ metrics }: MetricsProps) {
         <CompactMetric
           label="VRAM"
           value={metrics.vram}
-          detail="18.2 of 24 GB"
+          detail={vramTotal ? `${vramUsed.toFixed(1)} of ${vramTotal.toFixed(1)} GB` : 'VRAM sensor unavailable'}
           tone="amber"
           history={metrics.history.vram}
           icon={<Gauge size={18} />}
         />
         <CompactMetric
           label="Disk"
-          value={42}
+          value={metrics.diskActivity || 0}
           detail={`${Math.round(metrics.diskRead)} MB/s read`}
           tone="rose"
           history={metrics.history.disk}
@@ -228,7 +266,7 @@ function Overview({ metrics }: MetricsProps) {
         />
         <CompactMetric
           label="Network"
-          value={36}
+          value={Math.min(100, metrics.download * 1.5)}
           detail={`${metrics.download.toFixed(1)} Mbps down`}
           tone="cyan"
           history={metrics.history.network}
@@ -236,11 +274,11 @@ function Overview({ metrics }: MetricsProps) {
         />
       </section>
 
-      <ProcessTable />
+      <ProcessTable processes={processes} live={live} onKillProcess={onKill} onSetPriority={onPriority} />
 
       <section className="insight-row">
-        <AIInsight metrics={metrics} />
-        <EfficiencyCard metrics={metrics} />
+        <AIInsight processes={processes} />
+        <EfficiencyCard metrics={metrics} energy={energy} />
         <ThermalCard metrics={metrics} />
       </section>
     </div>
@@ -299,65 +337,78 @@ function CompactMetric({ label, value, detail, tone, history, icon }: CompactMet
   );
 }
 
-function AIInsight({ metrics }: MetricsProps) {
+function AIInsight({ processes }: { processes: ProcessInfo[] }) {
+  const workload = processes.find((process) => process.kind === 'AI');
   return (
     <article className="panel insight-card ai-insight">
       <div className="insight-card-head">
         <div className="insight-icon violet-bg"><Bot size={19} /></div>
-        <div><span>AI WORKLOAD</span><strong>1 active model</strong></div>
-        <span className="status-badge"><i /> RUNNING</span>
+        <div><span>AI WORKLOAD</span><strong>{workload ? 'Detected locally' : 'No active model'}</strong></div>
+        {workload && <span className="status-badge"><i /> RUNNING</span>}
       </div>
-      <div className="model-name"><Sparkles size={16} /><strong>Llama 3.3 70B</strong><span>Q4_K_M</span></div>
+      <div className="model-name"><Sparkles size={16} /><strong>{workload?.name || 'Waiting for an AI runtime'}</strong><span>{workload ? `PID ${workload.id}` : 'LOCAL'}</span></div>
       <div className="model-stats">
-        <div><span>Inference</span><strong>42.8 <small>tok/s</small></strong></div>
-        <div><span>GPU load</span><strong>{Math.round(metrics.gpu * 0.54)}%</strong></div>
-        <div><span>VRAM</span><strong>14.2 <small>GB</small></strong></div>
+        <div><span>Attributed power</span><strong>~{(workload?.energyWatts || 0).toFixed(1)} <small>W</small></strong></div>
+        <div><span>GPU load</span><strong>{(workload?.gpu || 0).toFixed(1)}%</strong></div>
+        <div><span>VRAM</span><strong>{(workload?.vram || 0).toFixed(1)} <small>GB</small></strong></div>
       </div>
     </article>
   );
 }
 
-function EfficiencyCard({ metrics }: MetricsProps) {
-  const score = Math.max(72, Math.round(100 - (metrics.cpuPower + metrics.gpuPower) / 18));
+function EfficiencyCard({ metrics, energy }: MetricsProps & { energy?: EnergyEstimate }) {
+  const score = Math.max(40, Math.round(100 - (energy?.watts || metrics.cpuPower + metrics.gpuPower) / 6));
+  const rating = score >= 80 ? 'Excellent' : score >= 60 ? 'Balanced' : 'High draw';
   return (
     <article className="panel insight-card efficiency-card">
       <div className="insight-card-head">
         <div className="insight-icon mint-bg"><Zap size={19} /></div>
-        <div><span>EFFICIENCY</span><strong>Power score</strong></div>
+        <div><span>ENERGY LENS</span><strong>{energy ? `${energy.watts.toFixed(0)} W at the wall` : 'Power estimate'}</strong></div>
       </div>
-      <div className="score-row"><strong>{score}</strong><span>/ 100</span><em>Excellent</em></div>
+      <div className="score-row"><strong>{score}</strong><span>/ 100</span><em>{rating}</em></div>
       <div className="score-track"><span style={{ width: `${score}%` }} /></div>
-      <p>Performance per watt is 12% better than your 7-day average.</p>
+      <p>{energy ? `${energy.confidenceScore}% confidence · ${energy.sessionWh.toFixed(2)} Wh this session` : 'Start the Windows agent for a real-time wall-power estimate.'}</p>
     </article>
   );
 }
 
 function ThermalCard({ metrics }: MetricsProps) {
+  const sensedTemperatures = [metrics.cpuTemp, metrics.gpuTemp].filter((value) => value > 0);
+  const hottestTemperature = sensedTemperatures.length ? Math.max(...sensedTemperatures) : 0;
+  const thermalStatus = !hottestTemperature
+    ? 'Sensors unavailable'
+    : hottestTemperature >= 90
+      ? 'Thermal alert'
+      : hottestTemperature >= 80
+        ? 'Running warm'
+        : 'Within range';
   return (
     <article className="panel insight-card thermal-card">
       <div className="insight-card-head">
         <div className="insight-icon amber-bg"><Thermometer size={19} /></div>
-        <div><span>THERMALS</span><strong>Cool & stable</strong></div>
+        <div><span>THERMALS</span><strong>{thermalStatus}</strong></div>
       </div>
       <div className="thermal-readings">
-        <div><span>CPU</span><strong>{Math.round(metrics.cpuTemp)}°</strong><i style={{ width: `${metrics.cpuTemp}%` }} /></div>
-        <div><span>GPU</span><strong>{Math.round(metrics.gpuTemp)}°</strong><i style={{ width: `${metrics.gpuTemp}%` }} /></div>
-        <div><span>NVMe</span><strong>48°</strong><i style={{ width: '48%' }} /></div>
+        <div><span>CPU</span><strong>{metrics.cpuTemp > 0 ? `${Math.round(metrics.cpuTemp)}°` : '—'}</strong><i style={{ width: `${metrics.cpuTemp}%` }} /></div>
+        <div><span>GPU</span><strong>{metrics.gpuTemp > 0 ? `${Math.round(metrics.gpuTemp)}°` : '—'}</strong><i style={{ width: `${metrics.gpuTemp}%` }} /></div>
+        <div><span>NVMe</span><strong>—</strong><i style={{ width: '0%' }} /></div>
       </div>
     </article>
   );
 }
 
-function ProcessExplorer() {
+function ProcessExplorer({ metrics, processes, counts, live, onKill, onPriority }: MetricsProps & ProcessActions & { counts?: { all: number; running: number } }) {
+  const totalThreads = processes.reduce((sum, process) => sum + (process.threads || 0), 0);
+  const powerHungry = processes.filter((process) => (process.energyWatts || 0) >= 10);
   return (
     <div className="single-page-grid">
       <section className="summary-strip">
-        <SummaryItem icon={<Activity />} label="Processes" value="212" detail="3,847 threads" />
-        <SummaryItem icon={<Cpu />} label="CPU load" value="47%" detail="4.8 GHz average" />
-        <SummaryItem icon={<MemoryStick />} label="Memory" value="21.8 GB" detail="10.2 GB available" />
-        <SummaryItem icon={<Zap />} label="Power hungry" value="2" detail="Ollama + Cyberpunk" warning />
+        <SummaryItem icon={<Activity />} label="Processes" value={String(counts?.all || processes.length)} detail={`${totalThreads.toLocaleString()} threads`} />
+        <SummaryItem icon={<Cpu />} label="CPU load" value={`${Math.round(metrics.cpu)}%`} detail={`${metrics.cpuSpeedGhz?.toFixed(2) || '—'} GHz average`} />
+        <SummaryItem icon={<MemoryStick />} label="Memory" value={`${bytesToGb(metrics.memory?.usedBytes).toFixed(1)} GB`} detail={`${bytesToGb(metrics.memory?.availableBytes).toFixed(1)} GB available`} />
+        <SummaryItem icon={<Zap />} label="Power hungry" value={String(powerHungry.length)} detail={powerHungry[0]?.name || 'None detected'} warning />
       </section>
-      <ProcessTable expanded />
+      <ProcessTable expanded processes={processes} live={live} onKillProcess={onKill} onSetPriority={onPriority} />
     </div>
   );
 }
@@ -415,6 +466,55 @@ function AIWorkloads({ metrics }: MetricsProps) {
 
 function ResourceBar({ label, value, detail, tone }: { label: string; value: number; detail: string; tone: MetricTone }) {
   return <div className={`resource-bar tone-${tone}`}><div><span>{label}</span><strong>{detail}</strong></div><i><b style={{ width: `${value}%` }} /></i></div>;
+}
+
+function EnergyView({ energy, processes, agent }: { energy?: EnergyEstimate; processes: ProcessInfo[]; agent?: AgentInfo }) {
+  if (!energy) {
+    return <section className="panel energy-offline"><div className="insight-icon amber-bg"><Zap size={21} /></div><div><p className="eyebrow">WINDOWS AGENT REQUIRED</p><h2>Energy Lens is waiting for real sensors.</h2><span>Run `npm.cmd run agent` locally to enable power measurement and process attribution.</span></div></section>;
+  }
+
+  const attributed = [...processes].sort((a, b) => (b.energyWatts || 0) - (a.energyWatts || 0)).slice(0, 7);
+  const breakdown = [
+    { label: 'Processor', value: energy.breakdown.cpu, tone: 'cyan' as const },
+    { label: 'Graphics', value: energy.breakdown.gpu, tone: 'violet' as const },
+    { label: 'Memory', value: energy.breakdown.memory, tone: 'mint' as const },
+    { label: 'Storage', value: energy.breakdown.storage, tone: 'rose' as const },
+    { label: 'Platform + conversion', value: energy.breakdown.platform + energy.breakdown.conversionLoss, tone: 'amber' as const },
+  ];
+  const maxBreakdown = Math.max(...breakdown.map((item) => item.value), 1);
+
+  return (
+    <div className="energy-page-grid">
+      <section className="panel energy-live-card">
+        <div className="energy-live-head"><div className="insight-icon mint-bg"><Leaf size={20} /></div><div><p className="eyebrow">LIVE WALL-POWER ESTIMATE</p><h2>Energy Lens</h2></div><span className={`confidence-badge confidence-${energy.confidence}`}>{energy.confidenceScore}% confidence</span></div>
+        <div className="energy-live-value"><strong>{energy.watts.toFixed(0)}</strong><span>W</span><em>right now</em></div>
+        <div className="energy-session-line"><span>Session consumption</span><strong>{energy.sessionWh.toFixed(2)} Wh</strong><i /><span>At the current load</span><strong>{energy.dailyKwh.toFixed(2)} kWh/day</strong></div>
+        <p>{energy.methodology}</p>
+      </section>
+
+      <section className="panel energy-breakdown-card">
+        <div className="panel-header"><div><p className="eyebrow">POWER PATH</p><h2>Where each watt goes</h2></div><span>Live estimate</span></div>
+        <div className="energy-breakdown-list">{breakdown.map((item) => <div className={`energy-breakdown-row tone-${item.tone}`} key={item.label}><span>{item.label}</span><i><b style={{ width: `${item.value / maxBreakdown * 100}%` }} /></i><strong>{item.value.toFixed(1)} W</strong></div>)}</div>
+      </section>
+
+      <section className="energy-projection-grid">
+        <SummaryItem icon={<Clock3 />} label="Cost at current load" value={`€${energy.dailyCost.toFixed(2)}`} detail={`per day · €${energy.tariffPerKwh.toFixed(2)}/kWh`} />
+        <SummaryItem icon={<Zap />} label="30-day projection" value={`€${energy.monthlyCost.toFixed(2)}`} detail={`${(energy.dailyKwh * 30).toFixed(1)} kWh`} />
+        <SummaryItem icon={<Leaf />} label="Carbon projection" value={`${energy.dailyCarbonGrams} g`} detail={`CO₂e/day · ${energy.carbonGramsPerKwh} g/kWh`} />
+        <SummaryItem icon={<Activity />} label="VISOR overhead" value={`${agent?.cpuPercent.toFixed(2) || '—'}%`} detail={`${agent?.memoryMb.toFixed(0) || '—'} MB RAM`} />
+      </section>
+
+      <section className="panel energy-attribution-card">
+        <div className="panel-header"><div><p className="eyebrow">ENERGY FINGERPRINTS</p><h2>Applications responsible right now</h2></div><span>Modeled attribution</span></div>
+        <div className="energy-process-list">{attributed.map((process) => {
+          const dailySavings = (process.energyWatts || 0) * 24 / 1000 * energy.tariffPerKwh;
+          return <div className="energy-process-row" key={process.id}><span className="app-icon" style={{ background: process.color }}>{process.icon}</span><div><strong>{process.name}</strong><span>PID {process.id} · CPU {process.cpu.toFixed(1)}% · GPU {process.gpu.toFixed(1)}%</span></div><div className="energy-process-impact"><strong>~{(process.energyWatts || 0).toFixed(1)} W</strong><span>€{dailySavings.toFixed(2)}/day at this load</span></div></div>;
+        })}</div>
+      </section>
+
+      <section className="panel energy-trust-card"><ShieldCheck size={19} /><div><strong>No fake precision</strong><span>GPU power is measured through vendor telemetry when available. CPU, platform losses, and per-process energy are modeled and labeled. Tariff and carbon factors are assumptions you can change.</span></div></section>
+    </div>
+  );
 }
 
 function HistoryView({ metrics }: MetricsProps) {
