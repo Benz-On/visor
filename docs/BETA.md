@@ -1,7 +1,8 @@
-# VISOR 0.4 beta
+# VISOR 0.5 beta
 
-VISOR 0.4.0-beta.1 is the first end-to-end desktop beta. It is intended for
-real Windows workstation testing, not only interface preview.
+VISOR 0.5.0-beta.1 adds the local-model advisor, installed-model inventory,
+per-service AI attribution, and the Geist numeric typography system. It is
+intended for real Windows workstation testing, not only interface preview.
 
 ## Supported delivery
 
@@ -38,6 +39,8 @@ native collector has equivalent coverage and has passed platform QA.
   sensor reports a measured component value. Confidence and source are displayed.
 - Some protected or elevated processes require VISOR itself to run elevated before
   Windows permits a control action.
+- Model tok/s values are conservative estimates until a runtime benchmark is run;
+  model architecture, context size, backend, and offload settings affect real speed.
 
 ## Release acceptance
 

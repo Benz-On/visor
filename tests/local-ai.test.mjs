@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildLocalAiSnapshot, detectAiApplication, parseComfyQueuePayload, parseLlamaCppPayload, parseOllamaPayload } from '../agent/local-ai.mjs';
+import { buildLocalAiSnapshot, detectAiApplication, parseComfyQueuePayload, parseLlamaCppPayload, parseLmStudioPayload, parseOllamaPayload, parseOllamaTagsPayload } from '../agent/local-ai.mjs';
 
 test('Ollama adapter keeps the exact model identity and allocation', () => {
   const [model] = parseOllamaPayload({
@@ -34,7 +34,49 @@ test('local AI snapshot connects an exact model to its application workload', ()
 
 test('Ollama WebView helpers are identified without becoming model runners', () => {
   const identity = detectAiApplication({ name: 'msedgewebview2.exe', command: '--webview-exe-name="ollama app.exe"' });
-  assert.deepEqual(identity, { application: 'Ollama Desktop', runtime: 'WebView UI', role: 'ui-helper' });
+  assert.deepEqual(identity, { application: 'Ollama Desktop', runtime: 'WebView UI', role: 'ui-helper', category: 'local-runtime', execution: 'local', provider: 'Ollama' });
+});
+
+test('installed Ollama models are inventoried even when they are not running', () => {
+  const [model] = parseOllamaTagsPayload({
+    models: [{ name: 'qwen3-coder:30b', size: 18_556_700_761, details: { parameter_size: '30.5B', quantization_level: 'Q4_K_M', format: 'gguf' } }],
+  });
+  assert.equal(model.status, 'detected');
+  assert.equal(model.installed, true);
+  assert.equal(model.sizeBytes, 18_556_700_761);
+  assert.equal(model.parameters, '30.5B');
+});
+
+test('LM Studio keeps downloaded models that are not loaded', () => {
+  const [model] = parseLmStudioPayload({ data: [{ id: 'qwen-14b', state: 'not-loaded', size_bytes: 9_000_000_000, quantization: 'Q4_K_M', max_context_length: 32768 }] });
+  assert.equal(model.status, 'detected');
+  assert.equal(model.model, 'qwen-14b');
+  assert.equal(model.contextLength, 32768);
+});
+
+test('cloud coding agents are separated from local inference runtimes', () => {
+  const codex = detectAiApplication({ name: 'ChatGPT.exe', path: 'C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.7\\ChatGPT.exe' });
+  const claude = detectAiApplication({ name: 'node.exe', command: 'node C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js' });
+  const kimi = detectAiApplication({ name: 'kimi.exe', path: 'C:\\Users\\me\\.local\\bin\\kimi.exe' });
+  assert.equal(codex.application, 'Codex');
+  assert.equal(codex.execution, 'cloud');
+  assert.equal(claude.application, 'Claude Code');
+  assert.equal(kimi.application, 'Kimi Code');
+});
+
+test('commands that merely mention an AI product are not counted as its service', () => {
+  assert.equal(detectAiApplication({ name: 'powershell.exe', command: "Write-Output 'LocalAI ChatGPT Codex'" }), null);
+  assert.equal(detectAiApplication({ name: 'chrome.exe', command: '--app=https://chatgpt.com/' }), null);
+});
+
+test('service totals expose live resource attribution per AI provider', () => {
+  const snapshot = buildLocalAiSnapshot([
+    { id: 10, name: 'codex.exe', path: 'OpenAI.Codex', cpu: 3, gpu: 2, memory: 0.4, vram: 0.1, energyWatts: 9 },
+    { id: 11, name: 'ollama.exe', command: 'ollama serve', cpu: 5, gpu: 30, memory: 1.2, vram: 6, energyWatts: 74 },
+  ], { adapters: [], models: [], modelRoots: [] });
+  assert.equal(snapshot.serviceCount, 2);
+  assert.equal(snapshot.applications.find((item) => item.application === 'Codex').execution, 'cloud');
+  assert.equal(snapshot.applications.find((item) => item.application === 'Ollama').energyWatts, 74);
 });
 
 test('ComfyUI adapter extracts model files from the active queue', () => {

@@ -343,6 +343,7 @@ impl Collector {
                 "priority": 0,
                 "state": format!("{:?}", process.status()),
                 "path": path,
+                "command": command,
                 "handles": 0,
                 "threads": 0,
                 "gpuEngines": self.gpu_processes.get(&id).and_then(|item| item.get("engines")).cloned().unwrap_or_else(|| json!({}))

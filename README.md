@@ -1,6 +1,6 @@
 # VISOR
 
-Current version: **0.4.0-beta.1**
+Current version: **0.5.0-beta.1**
 
 VISOR is a premium, local-first Windows system monitor for demanding
 workstations, AI workloads, games, and creative tools. It combines a calm,
@@ -16,12 +16,17 @@ performs explicitly confirmed process actions.
 - Protected Windows critical-process denylist and PID confirmation on destructive actions
 - Energy Lens with live whole-PC watts, component model, session energy, cost,
   carbon projection, confidence score, and per-process energy fingerprints
-- Exact local AI attribution from application to runtime to loaded model, with
-  adapters for Ollama, LM Studio, llama.cpp, and ComfyUI
+- Installed and loaded local-model inventory through Ollama, LM Studio,
+  llama.cpp, Jan, ComfyUI, GGUF/GGML folders, and Transformers weight folders
+- Hardware-fit advisor with conservative memory and generation-speed ranges;
+  embedding workloads are identified separately from generative LLMs
+- Live AI-service attribution for Codex, ChatGPT, Claude Code, Kimi Code,
+  Copilot, Ollama, LM Studio, Jan, GPT4All, llama.cpp, and related runtimes
 - Model evidence including source, confidence, quantization, parameter count,
   context capacity, RAM/VRAM allocation, consumer PID, and application power
 - Stateful sustained-load and thermal alert policies running inside the agent
 - Game-aware CPU/GPU load suppression while thermal and VRAM protection stay active
+- Self-hosted Geist and Geist Mono typography with tabular, legible live numbers
 - Four persistent, legible themes: Studio, Porcelain, Cyberdeck, and Retro Terminal
 - Dedicated overview, performance, AI workload, history, alerts, and settings views
 - 1.1 second live refresh, pause/resume, and command palette
@@ -120,10 +125,17 @@ VISOR probes loopback-only runtime APIs and joins their model evidence with the
 Windows process tree and GPU counters. An exact model name is only shown when a
 runtime reports it. A process-only detection is labeled as such.
 
-- Ollama: active models from `/api/ps`
-- LM Studio: loaded instances from its local API
+- Ollama: installed models from `/api/tags` and active models from `/api/ps`
+- LM Studio: installed models and loaded instances from its local API
 - llama.cpp: loaded model metadata from `/props`
+- Jan: models exposed by its local OpenAI-compatible API
 - ComfyUI: model files referenced by the active queue
+- Known local model roots: GGUF, GGML, Safetensors, ONNX, and PyTorch weights;
+  add custom roots with `VISOR_MODEL_PATHS`
+
+The hardware advisor reserves memory for Windows and the runtime before deciding
+whether a model fits in VRAM, split VRAM/RAM, CPU RAM, or is too large. Token
+speed is explicitly presented as an engineering range, not a measured benchmark.
 
 Runtime probes have short timeouts and never leave `127.0.0.1`.
 

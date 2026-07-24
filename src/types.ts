@@ -77,6 +77,7 @@ export interface LocalAiProcess {
   role: string;
   cpu: number;
   gpu: number;
+  memoryGb?: number;
   vramGb: number;
   energyWatts: number;
 }
@@ -94,11 +95,14 @@ export interface LocalModelInfo {
   quantization: string;
   format: string;
   contextLength: number;
+  sizeBytes?: number;
   allocatedBytes: number;
   allocatedVramBytes: number;
   allocatedRamBytes: number;
   allocatedVramGb: number;
   expiresAt: string | null;
+  installed?: boolean;
+  location?: string;
   process: LocalAiProcess | null;
   applicationEnergyWatts: number | null;
   applicationCpu: number;
@@ -109,6 +113,9 @@ export interface LocalAiApplication {
   id: string;
   application: string;
   runtime: string;
+  provider?: string;
+  category?: 'local-runtime' | 'cloud-client' | 'coding-agent' | 'creative-ai';
+  execution?: 'local' | 'cloud' | 'hybrid' | 'unknown';
   processes: LocalAiProcess[];
   cpu: number;
   gpu: number;
@@ -116,6 +123,7 @@ export interface LocalAiApplication {
   vramGb: number;
   energyWatts: number;
   active: boolean;
+  running?: boolean;
 }
 
 export interface LocalAiSnapshot {
@@ -123,8 +131,25 @@ export interface LocalAiSnapshot {
   adapters: Array<{ id: string; name: string; status: 'online' | 'offline'; endpoint: string }>;
   models: LocalModelInfo[];
   applications: LocalAiApplication[];
+  modelRoots?: Array<{ label: string; modelCount: number }>;
   activeModelCount: number;
   loadedModelCount: number;
+  installedModelCount?: number;
+  serviceCount?: number;
+}
+
+export interface ModelCompatibility {
+  workload: 'generation' | 'embedding';
+  state: 'excellent' | 'good' | 'limited' | 'too-large' | 'unknown';
+  label: string;
+  mode: 'gpu' | 'hybrid' | 'cpu' | 'unavailable';
+  requiredMemoryGb: number;
+  availableVramGb: number;
+  availableRamGb: number;
+  estimatedTpsMin: number | null;
+  estimatedTpsMax: number | null;
+  confidence: 'medium' | 'low';
+  reason: string;
 }
 
 export interface AlertRule {

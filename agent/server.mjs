@@ -41,7 +41,7 @@ const criticalProcesses = new Set([
   'fontdrvhost.exe',
 ]);
 
-const aiPatterns = /ollama|lm studio|llama|kobold|comfyui|python.*(torch|tensorflow)|stable.?diffusion|invokeai|fooocus/i;
+const aiPatterns = /ollama|lm studio|llama|kobold|comfyui|python.*(torch|tensorflow)|stable.?diffusion|invokeai|fooocus|chatgpt|codex|claude|kimi|copilot|gpt4all|anythingllm|vllm|localai/i;
 const creativePatterns = /photoshop|afterfx|premiere|blender|davinci|resolve|fusion|illustrator/i;
 const browserPatterns = /chrome|msedge|firefox|brave|opera/i;
 const gamePatterns = /\\steamapps\\|\\epic games\\|\\gog galaxy\\|\\riot games\\|cyberpunk2077|eldenring|starfield|valorant|fortnite|overwatch|helldivers|witcher3|rdr2\.exe/i;
@@ -69,7 +69,7 @@ let lastProcessSampleAt = Date.now();
 let sensorCache = { cpuTemperature: 0, cpuSource: null, storage: [], hardwareMonitorAvailable: false };
 let sensorPending = false;
 let lastSensorAt = 0;
-let localAiDiscovery = { scannedAt: null, adapters: [], models: [] };
+let localAiDiscovery = { scannedAt: null, adapters: [], models: [], modelRoots: [] };
 let localAiPending = false;
 let lastLocalAiAt = 0;
 const alertEngine = createAlertEngine();
@@ -387,9 +387,14 @@ function mergeProcessData(nativeProcesses, fallbackProcesses) {
       return {
         ...fallback,
         ...item,
+        // systeminformation may return a valid Windows process row with zeroed
+        // memory counters. Keep the richer Get-Process snapshot in that case.
+        memRss: Math.max(finite(item.memRss), finite(fallback?.memRss)),
+        memVsz: Math.max(finite(item.memVsz), finite(fallback?.memVsz)),
         handles: finite(fallback?.handles, finite(item.handles)),
         threads: finite(fallback?.threads, finite(item.threads)),
         path: item.path || fallback?.path || '',
+        command: item.command || fallback?.command || '',
       };
     }),
   };

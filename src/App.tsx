@@ -3,6 +3,7 @@ import {
   Activity,
   Bell,
   Bot,
+  Cloud,
   Check,
   ChevronDown,
   CircleGauge,
@@ -21,6 +22,7 @@ import {
   Pause,
   Play,
   Search,
+  Server,
   ShieldCheck,
   ShieldAlert,
   Sparkles,
@@ -33,7 +35,8 @@ import { Donut, LineChart } from './components/Charts';
 import { ProcessTable } from './components/ProcessTable';
 import { Sidebar, type ViewId } from './components/Sidebar';
 import { useVisorData } from './hooks/useVisorData';
-import type { AgentInfo, AlertsSnapshot, EnergyEstimate, HardwareInfo, LocalAiSnapshot, MetricKey, MetricTone, ProcessInfo, ThemeId } from './types';
+import { analyzeLocalModel } from './modelAdvisor';
+import type { AgentInfo, AlertsSnapshot, EnergyEstimate, HardwareInfo, LocalAiSnapshot, LocalModelInfo, MetricKey, MetricTone, ProcessInfo, ThemeId } from './types';
 
 const themeOrder: ThemeId[] = ['studio', 'porcelain', 'cyber', 'retro'];
 const themeNames: Record<ThemeId, string> = {
@@ -189,7 +192,7 @@ function App() {
           {activeView === 'overview' && <Overview metrics={metrics} energy={visor.snapshot?.energy} hardware={visor.snapshot?.hardware} localAI={visor.snapshot?.localAI} processes={visor.processes} live={visor.connection === 'live'} onKill={visor.killProcess} onPriority={visor.setProcessPriority} />}
           {activeView === 'processes' && <ProcessExplorer metrics={metrics} processes={visor.processes} counts={visor.snapshot?.processCounts} live={visor.connection === 'live'} onKill={visor.killProcess} onPriority={visor.setProcessPriority} />}
           {activeView === 'performance' && <Performance metrics={metrics} hardware={visor.snapshot?.hardware} />}
-          {activeView === 'ai' && <AIWorkloads metrics={metrics} localAI={visor.snapshot?.localAI} />}
+          {activeView === 'ai' && <AIWorkloads metrics={metrics} localAI={visor.snapshot?.localAI} hardware={visor.snapshot?.hardware} />}
           {activeView === 'energy' && <EnergyView energy={visor.snapshot?.energy} processes={visor.processes} agent={visor.snapshot?.agent} />}
           {activeView === 'history' && <HistoryView metrics={metrics} energy={visor.snapshot?.energy} agent={visor.snapshot?.agent} />}
           {activeView === 'alerts' && <AlertsView alerts={visor.snapshot?.alerts} live={visor.connection === 'live'} onToggle={visor.setAlertRule} />}
@@ -312,11 +315,12 @@ interface MetricHeroProps {
 }
 
 function MetricHero({ label, detail, value, tone, history, stats }: MetricHeroProps) {
+  const loadState = value >= 90 ? 'metric-critical' : value >= 75 ? 'metric-elevated' : '';
   return (
-    <article className={`panel metric-hero tone-${tone}`}>
+    <article className={`panel metric-hero tone-${tone} ${loadState}`}>
       <div className="metric-hero-top">
         <div>
-          <div className="metric-label-line"><span className="metric-dot" />{label}</div>
+          <div className="metric-label-line"><span className="metric-dot" />{label}{loadState && <em>{value >= 90 ? 'CRITICAL LOAD' : 'HIGH LOAD'}</em>}</div>
           <p>{detail}</p>
         </div>
         <button className="expand-button" aria-label={`Expand ${label}`}><Maximize2 size={15} /></button>
@@ -345,8 +349,9 @@ interface CompactMetricProps {
 }
 
 function CompactMetric({ label, value, detail, tone, history, icon }: CompactMetricProps) {
+  const loadState = value >= 90 ? 'metric-critical' : value >= 75 ? 'metric-elevated' : '';
   return (
-    <article className={`panel compact-card tone-${tone}`}>
+    <article className={`panel compact-card tone-${tone} ${loadState}`}>
       <div className="compact-card-head"><span>{icon}</span><strong>{label}</strong><em>{Math.round(value)}%</em></div>
       <div className="compact-chart"><LineChart values={history} tone={tone} height={62} compact /></div>
       <p>{detail}</p>
@@ -357,14 +362,14 @@ function CompactMetric({ label, value, detail, tone, history, icon }: CompactMet
 function AIInsight({ processes, localAI }: { processes: ProcessInfo[]; localAI?: LocalAiSnapshot }) {
   const workload = processes.find((process) => process.kind === 'AI');
   const model = localAI?.models.find((item) => item.status === 'active') || localAI?.models[0];
-  const application = localAI?.applications.find((item) => item.application === model?.application) || localAI?.applications[0];
+  const application = localAI?.applications.find((item) => item.application === model?.application) || (!model ? localAI?.applications[0] : undefined);
   const modelDetected = Boolean(model || application || workload);
   return (
     <article className="panel insight-card ai-insight">
       <div className="insight-card-head">
         <div className="insight-icon violet-bg"><Bot size={19} /></div>
         <div><span>LOCAL AI</span><strong>{model ? `${model.application} · ${model.runtime}` : application ? `${application.application} detected` : 'No active model'}</strong></div>
-        {modelDetected && <span className="status-badge"><i /> {model?.status === 'active' ? 'ACTIVE' : 'LOADED'}</span>}
+        {modelDetected && <span className="status-badge"><i /> {model?.status === 'active' ? 'ACTIVE' : model?.status === 'loaded' ? 'LOADED' : 'INSTALLED'}</span>}
       </div>
       <div className="model-name"><Sparkles size={16} /><strong>{model?.model || 'Waiting for a runtime API'}</strong><span>{model ? `${model.confidence}% exact` : workload ? `PID ${workload.id}` : 'LOCAL'}</span></div>
       <div className="model-stats">
@@ -467,15 +472,38 @@ function Performance({ metrics, hardware }: MetricsProps & { hardware?: Hardware
   );
 }
 
-function AIWorkloads({ metrics, localAI }: MetricsProps & { localAI?: LocalAiSnapshot }) {
-  const model = localAI?.models.find((item) => item.status === 'active') || localAI?.models[0];
-  const application = localAI?.applications.find((item) => item.application === model?.application) || localAI?.applications[0];
+const modelSizeParts = (model: LocalModelInfo) => {
+  const bytes = model.sizeBytes || model.allocatedBytes || 0;
+  if (!bytes) return { value: '—', unit: 'size unavailable' };
+  return bytes >= 1024 ** 3
+    ? { value: bytesToGb(bytes).toFixed(bytesToGb(bytes) >= 10 ? 1 : 2), unit: 'GB' }
+    : { value: String(Math.round(bytes / 1024 ** 2)), unit: 'MB' };
+};
+
+const modelSize = (model: LocalModelInfo) => Object.values(modelSizeParts(model)).join(' ');
+
+const tokenSpeed = (minimum: number | null, maximum: number | null, workload: 'generation' | 'embedding' = 'generation') => workload === 'embedding'
+  ? 'Embedding model'
+  : minimum !== null && maximum !== null ? `${minimum}–${maximum} tok/s` : 'Speed unknown';
+
+function AIWorkloads({ metrics, localAI, hardware }: MetricsProps & { localAI?: LocalAiSnapshot; hardware?: HardwareInfo }) {
+  const preferredModel = localAI?.models.find((item) => item.status === 'active') || localAI?.models.find((item) => item.status === 'loaded') || localAI?.models[0];
+  const [selectedModelId, setSelectedModelId] = useState('');
+  useEffect(() => {
+    if (preferredModel && !localAI?.models.some((item) => item.id === selectedModelId)) setSelectedModelId(preferredModel.id);
+  }, [localAI?.models, preferredModel, selectedModelId]);
+  const model = localAI?.models.find((item) => item.id === selectedModelId) || preferredModel;
+  const application = localAI?.applications.find((item) => item.application === model?.application) || (!model ? localAI?.applications[0] : undefined);
   const runtimeProcess = model?.process || application?.processes.find((item) => item.role === 'model-runner' || item.role === 'runtime') || application?.processes[0];
   const allocatedRamGb = bytesToGb(model?.allocatedRamBytes);
-  const modelVramGb = model?.allocatedVramGb || application?.vramGb || 0;
+  const modelVramGb = model?.allocatedVramGb || (model?.status !== 'detected' ? application?.vramGb : 0) || 0;
   const totalVramGb = bytesToGb(metrics.gpuMemory?.totalBytes);
   const appEnergy = model?.applicationEnergyWatts ?? application?.energyWatts ?? 0;
   const exactModel = Boolean(model);
+  const compatibility = model ? analyzeLocalModel(model, hardware) : null;
+  const selectedModelSize = model ? modelSizeParts(model) : null;
+  const installedModels = localAI?.models || [];
+  const services = localAI?.applications || [];
   return (
     <div className="ai-page-grid">
       <section className="panel ai-model-card">
@@ -489,10 +517,17 @@ function AIWorkloads({ metrics, localAI }: MetricsProps & { localAI?: LocalAiSna
           <div><span>RUNTIME</span><strong>{model?.runtime || application?.runtime || '—'}</strong></div><em>→</em>
           <div><span>MODEL</span><strong>{model?.model || 'Not reported'}</strong></div>
         </div>
+        {compatibility && <div className={`compatibility-banner fit-${compatibility.state}`}><div><span>HARDWARE FIT</span><strong>{compatibility.label}</strong><small>{compatibility.requiredMemoryGb.toFixed(1)} GB estimated · {compatibility.mode.toUpperCase()}</small></div><div><span>{compatibility.workload === 'embedding' ? 'EMBEDDING WORKLOAD' : 'ESTIMATED GENERATION'}</span><strong>{tokenSpeed(compatibility.estimatedTpsMin, compatibility.estimatedTpsMax, compatibility.workload)}</strong><small>{compatibility.workload === 'embedding' ? 'generation tok/s does not apply' : `${compatibility.confidence} confidence · not a benchmark`}</small></div></div>}
         <div className="ai-primary-stats">
-          <div><span>Model VRAM allocation</span><strong>{modelVramGb.toFixed(2)}</strong><small>GB reported by {model?.application || 'process counters'}</small></div>
-          <div><span>Model RAM allocation</span><strong>{allocatedRamGb.toFixed(2)}</strong><small>GB outside VRAM</small></div>
-          <div><span>Application power now</span><strong>{appEnergy.toFixed(1)}</strong><small>watts · modeled attribution</small></div>
+          {model?.status === 'detected' ? <>
+            <div><span>Installed model size</span><strong>{selectedModelSize?.value || '—'}</strong><small>{selectedModelSize?.unit === 'size unavailable' ? selectedModelSize.unit : `${selectedModelSize?.unit} on disk`}</small></div>
+            <div><span>Estimated memory need</span><strong>{compatibility?.requiredMemoryGb.toFixed(1) || '—'}</strong><small>GB including runtime overhead</small></div>
+            <div><span>{compatibility?.workload === 'embedding' ? 'Workload type' : 'Estimated generation'}</span><strong>{compatibility?.workload === 'embedding' ? 'EMBED' : compatibility?.estimatedTpsMax ?? '—'}</strong><small>{compatibility?.workload === 'embedding' ? 'generation speed is not applicable' : 'tok/s upper range · not loaded'}</small></div>
+          </> : <>
+            <div><span>Model VRAM allocation</span><strong>{modelVramGb.toFixed(2)}</strong><small>GB reported by {model?.application || 'process counters'}</small></div>
+            <div><span>Model RAM allocation</span><strong>{allocatedRamGb.toFixed(2)}</strong><small>GB outside VRAM</small></div>
+            <div><span>Application power now</span><strong>{appEnergy.toFixed(1)}</strong><small>watts · modeled attribution</small></div>
+          </>}
         </div>
         <div className="model-spec-grid">
           <div><span>Family</span><strong>{model?.family || 'Not reported'}</strong></div>
@@ -508,6 +543,26 @@ function AIWorkloads({ metrics, localAI }: MetricsProps & { localAI?: LocalAiSna
         <article className="panel runtime-card"><p className="eyebrow">RUNTIME DETAILS</p><dl><div><dt>Application</dt><dd>{model?.application || application?.application || '—'}</dd></div><div><dt>Runtime</dt><dd>{model?.runtime || application?.runtime || '—'}</dd></div><div><dt>Consumer process</dt><dd>{runtimeProcess?.name || 'Not exposed'}</dd></div><div><dt>PID</dt><dd>{runtimeProcess?.pid || 'Not exposed'}</dd></div><div><dt>API evidence</dt><dd>{model?.source || 'Process tree only'}</dd></div></dl></article>
         <article className="panel runtime-card adapter-card"><p className="eyebrow">LOCAL ADAPTERS</p><div className="adapter-list">{(localAI?.adapters || []).map((adapter) => <div key={adapter.id}><i className={adapter.status === 'online' ? 'adapter-online' : ''} /><span><strong>{adapter.name}</strong><small>{adapter.endpoint}</small></span><em>{adapter.status}</em></div>)}</div></article>
       </aside>
+      <section className="panel ai-inventory-card">
+        <div className="panel-header"><div><p className="eyebrow">LOCAL MODEL CHECKER</p><h2>What this machine can actually run</h2></div><span>{localAI?.installedModelCount || installedModels.length} models inventoried</span></div>
+        <div className="inventory-hardware-strip"><span><Server size={15} /><strong>{hardware?.gpu?.model || 'GPU unavailable'}</strong><small>{bytesToGb(hardware?.gpu?.vramBytes).toFixed(1)} GB VRAM</small></span><span><Cpu size={15} /><strong>{hardware?.cpu.brand || 'CPU unavailable'}</strong><small>{hardware?.cpu.physicalCores || hardware?.cpu.cores || 0} physical cores</small></span><span><MemoryStick size={15} /><strong>{bytesToGb(hardware?.memory.totalBytes).toFixed(1)} GB RAM</strong><small>OS reserve included in every verdict</small></span></div>
+        <div className="model-inventory-list">
+          {installedModels.length === 0 && <div className="ai-empty-state"><Bot size={20} /><div><strong>No local model found yet</strong><span>VISOR checked Ollama, LM Studio, llama.cpp, Jan and known GGUF folders.</span></div></div>}
+          {installedModels.map((item) => {
+            const fit = analyzeLocalModel(item, hardware);
+            return <button key={item.id} className={item.id === model?.id ? 'selected' : ''} onClick={() => setSelectedModelId(item.id)}><div className="model-inventory-name"><strong>{item.model}</strong><span>{item.application} · {item.quantization || item.format?.toUpperCase() || 'metadata partial'}</span></div><span className="model-size-cell">{modelSize(item)}<small>{item.status}</small></span><span className={`fit-badge fit-${fit.state}`}>{fit.label}<small>{fit.mode}</small></span><span className="speed-cell">{tokenSpeed(fit.estimatedTpsMin, fit.estimatedTpsMax, fit.workload)}<small>{fit.workload === 'embedding' ? 'no generation tok/s' : `${fit.confidence} confidence`}</small></span></button>;
+          })}
+        </div>
+        <p className="advisor-disclaimer">Predictions are conservative engineering ranges based on model weight, quantization, usable VRAM/RAM, CPU class and execution mode. Run a benchmark to replace the estimate with measured throughput.</p>
+      </section>
+      <section className="panel ai-services-card">
+        <div className="panel-header"><div><p className="eyebrow">AI SERVICE ATTRIBUTION</p><h2>Every local runtime and cloud client</h2></div><span>{services.length} services · live process totals</span></div>
+        <div className="ai-service-table">
+          <div className="ai-service-head"><span>Service</span><span>CPU</span><span>GPU</span><span>RAM</span><span>VRAM</span><span>Power</span></div>
+          {services.length === 0 && <div className="ai-empty-state"><Cloud size={20} /><div><strong>No AI service process detected</strong><span>VISOR watches local runtimes, desktop clients and coding agents without reading prompts.</span></div></div>}
+          {services.map((service) => <div className="ai-service-row" key={service.id}><div><span className={`service-mode service-${service.execution || 'unknown'}`}>{service.execution === 'local' ? <Server size={13} /> : <Cloud size={13} />}</span><span><strong>{service.application}</strong><small>{service.provider || service.runtime} · {service.processes.length} process{service.processes.length === 1 ? '' : 'es'}</small></span><em>{service.execution || 'unknown'}</em></div><strong>{service.cpu.toFixed(1)}%</strong><strong>{service.gpu.toFixed(1)}%</strong><strong>{service.memoryGb.toFixed(2)} GB</strong><strong>{service.vramGb.toFixed(2)} GB</strong><strong className="service-power">{service.energyWatts.toFixed(1)} W</strong></div>)}
+        </div>
+      </section>
     </div>
   );
 }
