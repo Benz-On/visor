@@ -14,8 +14,8 @@ Do not describe VISOR as open source until this decision is complete.
 ## GitHub repository settings
 
 - [ ] Confirm that `benz.on.contact@gmail.com` may remain visible in Git history.
-- [ ] Change repository visibility to **Public**.
-- [ ] Keep Actions workflow permissions read-only by default; `release.yml` grants
+- [x] Change repository visibility to **Public**.
+- [x] Keep Actions workflow permissions read-only by default; `release.yml` grants
       `contents: write` only to its publish job.
 - [ ] Protect `main`: require pull requests, CI success, resolved conversations,
       and block force pushes/deletion.
@@ -44,5 +44,7 @@ Suggested topics: `system-monitor`, `tauri`, `rust`, `react`, `windows`, `macos`
 - [x] Direct runtime dependency licenses were reviewed and documented.
 - [x] Windows x64 portable and NSIS artifacts were built; the portable binary
       passed an eight-second startup smoke test.
+- [x] Windows x64 beta artifacts, checksums, and manifest were manually uploaded
+      to the matching GitHub prerelease without committing binaries to Git.
 - [x] npm and RustSec audits report no known dependency vulnerabilities; residual
       transitive warnings are documented in `docs/SECURITY-AUDIT.md`.
