@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing version tag to build, for example v0.6.0-beta.1
+        description: Existing version tag to build, for example v0.6.0-beta.2
         required: true
         type: string
 
@@ -22,8 +22,25 @@ env:
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
 
 jobs:
+  preflight:
+    name: Release preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
+
+      - name: Verify release metadata and workflow integrity
+        run: |
+          node scripts/check-release-version.mjs "${{ env.RELEASE_TAG }}"
+          node scripts/check-workflow-pins.mjs
+
   build:
     name: ${{ matrix.label }}
+    needs: preflight
     strategy:
       fail-fast: false
       matrix:
@@ -68,19 +85,19 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Check out release tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ env.RELEASE_TAG }}
           persist-credentials: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
           cache: npm
 
       - name: Set up Rust target
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           targets: ${{ matrix.target }}
 
@@ -142,7 +159,7 @@ jobs:
           cp "$deb" "release-assets/VISOR-$version-linux-${{ matrix.arch }}.deb"
 
       - name: Upload platform assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: visor-${{ matrix.platform }}-${{ matrix.arch }}
           path: release-assets/*
@@ -158,18 +175,18 @@ jobs:
       contents: write
     steps:
       - name: Check out release metadata
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ env.RELEASE_TAG }}
           persist-credentials: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
 
       - name: Download all platform assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: visor-*
           path: release-assets

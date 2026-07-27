@@ -176,20 +176,20 @@ impl Collector {
         } else {
             1.0
         };
-        let energy_estimate = energy::estimate(
-            cpu,
-            self.gpu.utilization,
-            memory_total / GIB,
+        let energy_estimate = energy::estimate(energy::EnergyInputs {
+            cpu_load: cpu,
+            gpu_load: self.gpu.utilization,
+            memory_total_gb: memory_total / GIB,
             disk_activity,
             cpu_tdp,
             speed_ratio,
-            self.gpu.power,
-            if self.gpu.power_limit > 0.0 {
+            measured_gpu_power: self.gpu.power,
+            gpu_power_limit: if self.gpu.power_limit > 0.0 {
                 self.gpu.power_limit
             } else {
                 220.0
             },
-        );
+        });
         self.session_wh += energy_estimate.watts * elapsed / 3600.0;
 
         let mut processes = self.build_processes(logical_cores, elapsed);
@@ -499,6 +499,15 @@ pub fn is_protected(pid: u32, name: &str) -> bool {
             | "winlogon"
             | "svchost"
             | "fontdrvhost"
+            | "launchd"
+            | "kernel_task"
+            | "windowserver"
+            | "loginwindow"
+            | "systemd"
+            | "systemd-journald"
+            | "systemd-logind"
+            | "dbus-daemon"
+            | "sshd"
     )
 }
 
@@ -644,6 +653,8 @@ mod tests {
     fn protects_critical_system_processes() {
         assert!(is_protected(4, "System"));
         assert!(is_protected(200, "lsass.exe"));
+        assert!(is_protected(200, "launchd"));
+        assert!(is_protected(200, "systemd-journald"));
         assert!(!is_protected(20_000, "notepad.exe"));
     }
 

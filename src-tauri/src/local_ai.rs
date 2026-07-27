@@ -44,13 +44,19 @@ fn detect(process: &Value) -> Option<Identity> {
     let path = string(process.get("path")).to_ascii_lowercase();
     let command = string(process.get("command")).to_ascii_lowercase();
     let haystack = format!("{name} {path} {command}");
+    let node_host = matches!(
+        name.as_str(),
+        "node" | "node.exe" | "bun" | "bun.exe" | "deno" | "deno.exe"
+    );
 
     // Cloud clients and coding agents must win before generic host executable rules.
-    if haystack.contains("openai.codex")
-        || haystack.contains("@openai/codex")
-        || haystack.contains("@openai\\codex")
+    if path.contains("openai.codex")
+        || path.contains("/openai/codex/")
+        || path.contains("\\openai\\codex\\")
         || name == "codex.exe"
+        || name == "codex"
         || name.starts_with("codex-")
+        || (node_host && (command.contains("@openai/codex") || command.contains("@openai\\codex")))
     {
         return Some(identity(
             "Codex",
@@ -65,7 +71,7 @@ fn detect(process: &Value) -> Option<Identity> {
             "OpenAI",
         ));
     }
-    if name == "chatgpt.exe" || path.contains("openai.chatgpt") {
+    if matches!(name.as_str(), "chatgpt" | "chatgpt.exe") || path.contains("openai.chatgpt") {
         return Some(identity(
             "ChatGPT",
             "OpenAI cloud",
@@ -75,16 +81,17 @@ fn detect(process: &Value) -> Option<Identity> {
             "OpenAI",
         ));
     }
-    if haystack.contains("claude-code")
-        || haystack.contains("claude code")
-        || haystack.contains(".claude\\")
-        || haystack.contains(".claude/")
-        || name == "claude.exe"
-    {
-        let coding_agent = haystack.contains("claude-code")
-            || haystack.contains(".claude\\")
-            || haystack.contains(".claude/")
-            || name == "node.exe";
+    let claude_binary = matches!(name.as_str(), "claude" | "claude.exe");
+    let claude_code_marker = path.contains("claude-code")
+        || path.contains(".claude\\")
+        || path.contains(".claude/")
+        || command.contains("@anthropic-ai/claude-code")
+        || command.contains("@anthropic-ai\\claude-code")
+        || command.contains("claude-code")
+        || command.contains(".claude\\")
+        || command.contains(".claude/");
+    if claude_binary || (node_host && claude_code_marker) {
+        let coding_agent = claude_code_marker;
         return Some(identity(
             if coding_agent {
                 "Claude Code"
@@ -106,10 +113,12 @@ fn detect(process: &Value) -> Option<Identity> {
             "Anthropic",
         ));
     }
-    if haystack.contains("@moonshot-ai")
-        || haystack.contains("kimi-code")
-        || haystack.contains("kimi-cli")
-        || name == "kimi.exe"
+    if matches!(name.as_str(), "kimi" | "kimi.exe")
+        || (node_host
+            && (path.contains("@moonshot-ai")
+                || command.contains("@moonshot-ai")
+                || command.contains("kimi-code")
+                || command.contains("kimi-cli")))
     {
         return Some(identity(
             "Kimi Code",
@@ -120,10 +129,19 @@ fn detect(process: &Value) -> Option<Identity> {
             "Moonshot AI",
         ));
     }
-    if haystack.contains("github copilot")
-        || haystack.contains("github-copilot")
-        || haystack.contains("copilot-agent")
-        || haystack.contains("copilot-language-server")
+    if matches!(
+        name.as_str(),
+        "copilot-agent"
+            | "copilot-agent.exe"
+            | "copilot-language-server"
+            | "copilot-language-server.exe"
+    ) || path.contains("github copilot")
+        || path.contains("github-copilot")
+        || (node_host
+            && (command.contains("github copilot")
+                || command.contains("github-copilot")
+                || command.contains("copilot-agent")
+                || command.contains("copilot-language-server")))
     {
         return Some(identity(
             "GitHub Copilot",
@@ -132,6 +150,55 @@ fn detect(process: &Value) -> Option<Identity> {
             "coding-agent",
             "cloud",
             "GitHub",
+        ));
+    }
+    if path.contains("@google/gemini-cli")
+        || path.contains("@google\\gemini-cli")
+        || path.contains("/.gemini/")
+        || path.contains("\\.gemini\\")
+        || (node_host
+            && (command.contains("@google/gemini-cli")
+                || command.contains("@google\\gemini-cli")
+                || command.contains("/.gemini/")
+                || command.contains("\\.gemini\\")))
+        || matches!(name.as_str(), "gemini" | "gemini.exe" | "gemini.cmd")
+    {
+        return Some(identity(
+            "Gemini CLI",
+            "Google cloud",
+            "coding-agent",
+            "coding-agent",
+            "cloud",
+            "Google",
+        ));
+    }
+    if matches!(name.as_str(), "opencode" | "opencode.exe")
+        || path.contains("/opencode/")
+        || path.contains("\\opencode\\")
+    {
+        return Some(identity(
+            "OpenCode",
+            "Configured AI provider",
+            "coding-agent",
+            "coding-agent",
+            "hybrid",
+            "OpenCode",
+        ));
+    }
+    if matches!(name.as_str(), "aider" | "aider.exe")
+        || (name.contains("python")
+            && (command.contains(" -m aider ")
+                || command.ends_with(" -m aider")
+                || command.contains("/aider-chat/")
+                || command.contains("\\aider-chat\\")))
+    {
+        return Some(identity(
+            "Aider",
+            "Configured AI provider",
+            "coding-agent",
+            "coding-agent",
+            "hybrid",
+            "Aider",
         ));
     }
 
@@ -223,7 +290,13 @@ fn detect(process: &Value) -> Option<Identity> {
             "Jan",
         ));
     }
-    if haystack.contains("anythingllm") || haystack.contains("anything-llm") {
+    if name.contains("anythingllm")
+        || name.contains("anything-llm")
+        || path.contains("/anythingllm/")
+        || path.contains("/anything-llm/")
+        || path.contains("\\anythingllm\\")
+        || path.contains("\\anything-llm\\")
+    {
         return Some(identity(
             "AnythingLLM",
             "Local orchestrator",
@@ -231,6 +304,107 @@ fn detect(process: &Value) -> Option<Identity> {
             "local-runtime",
             "hybrid",
             "Mintplex Labs",
+        ));
+    }
+    if name.contains("open-webui")
+        || name.contains("open_webui")
+        || path.contains("/open-webui/")
+        || path.contains("/open_webui/")
+        || path.contains("\\open-webui\\")
+        || path.contains("\\open_webui\\")
+        || (name.contains("python") && command.contains(" -m open_webui"))
+    {
+        return Some(identity(
+            "Open WebUI",
+            "Local AI interface",
+            "application",
+            "local-runtime",
+            "hybrid",
+            "Open WebUI",
+        ));
+    }
+    if matches!(name.as_str(), "msty" | "msty.exe")
+        || path.contains("/msty/")
+        || path.contains("\\msty\\")
+    {
+        return Some(identity(
+            "Msty",
+            "Local AI interface",
+            "application",
+            "local-runtime",
+            "hybrid",
+            "Msty",
+        ));
+    }
+    if matches!(name.as_str(), "tabby" | "tabby.exe") || haystack.contains("tabbyml") {
+        return Some(identity(
+            "Tabby",
+            "Local code model server",
+            "model-runner",
+            "local-runtime",
+            "local",
+            "TabbyML",
+        ));
+    }
+    if name.contains("llamafile") || path.contains("/llamafile/") || path.contains("\\llamafile\\")
+    {
+        return Some(identity(
+            "llamafile",
+            "llama.cpp",
+            "model-runner",
+            "local-runtime",
+            "local",
+            "Mozilla",
+        ));
+    }
+    if name.contains("mlx_lm")
+        || name.contains("mlx-lm")
+        || path.contains("/mlx_lm/")
+        || path.contains("/mlx-lm/")
+        || path.contains("\\mlx_lm\\")
+        || path.contains("\\mlx-lm\\")
+        || (name.contains("python") && command.contains("mlx_lm"))
+    {
+        return Some(identity(
+            "MLX LM",
+            "Apple MLX",
+            "model-runner",
+            "local-runtime",
+            "local",
+            "MLX Community",
+        ));
+    }
+    if matches!(name.as_str(), "exo" | "exo.exe")
+        || path.contains("/exo/")
+        || path.contains("\\exo\\")
+        || (name.contains("python")
+            && (command.contains("exo-inference") || command.contains("exo_inference")))
+    {
+        return Some(identity(
+            "exo",
+            "Distributed local inference",
+            "model-runner",
+            "local-runtime",
+            "local",
+            "exo",
+        ));
+    }
+    if name.contains("tensorrt-llm")
+        || name.contains("tensorrt_llm")
+        || path.contains("/tensorrt-llm/")
+        || path.contains("/tensorrt_llm/")
+        || path.contains("\\tensorrt-llm\\")
+        || path.contains("\\tensorrt_llm\\")
+        || (name.contains("python")
+            && (command.contains("tensorrt-llm") || command.contains("tensorrt_llm")))
+    {
+        return Some(identity(
+            "TensorRT-LLM",
+            "NVIDIA TensorRT",
+            "model-runner",
+            "local-runtime",
+            "local",
+            "NVIDIA",
         ));
     }
     if haystack.contains("llama-server")
@@ -356,17 +530,30 @@ impl EmptyFallback for String {
     }
 }
 
-fn model_base(
+struct ModelBaseInput<'a> {
     id: String,
-    application: &str,
-    runtime: &str,
+    application: &'a str,
+    runtime: &'a str,
     model: String,
-    status: &str,
-    source: &str,
+    status: &'a str,
+    source: &'a str,
     confidence: u64,
     size_bytes: f64,
-    location: &str,
-) -> Value {
+    location: String,
+}
+
+fn model_base(input: ModelBaseInput<'_>) -> Value {
+    let ModelBaseInput {
+        id,
+        application,
+        runtime,
+        model,
+        status,
+        source,
+        confidence,
+        size_bytes,
+        location,
+    } = input;
     json!({
         "id": id,
         "application": application,
@@ -398,24 +585,24 @@ fn parse_ollama(payload: &Value) -> Vec<Value> {
         .map(|row| {
             let model = string(row.get("name")).or_else(|| string(row.get("model")));
             let digest = string(row.get("digest"));
-            let mut item = model_base(
-                format!(
+            let mut item = model_base(ModelBaseInput {
+                id: format!(
                     "ollama:{}",
                     if digest.is_empty() { &model } else { &digest }
                 ),
-                "Ollama",
-                "Ollama engine",
-                if model.is_empty() {
+                application: "Ollama",
+                runtime: "Ollama engine",
+                model: if model.is_empty() {
                     "Unknown Ollama model".to_string()
                 } else {
                     model
                 },
-                "loaded",
-                "Ollama /api/ps",
-                100,
-                number(row.get("size")),
-                "Ollama library",
-            );
+                status: "loaded",
+                source: "Ollama /api/ps",
+                confidence: 100,
+                size_bytes: number(row.get("size")),
+                location: "Ollama library".to_string(),
+            });
             let details = row.get("details").unwrap_or(&Value::Null);
             item["family"] = Value::String(string(details.get("family")));
             item["parameters"] = Value::String(string(details.get("parameter_size")));
@@ -439,24 +626,24 @@ fn parse_ollama_tags(payload: &Value) -> Vec<Value> {
         .map(|row| {
             let model = string(row.get("name")).or_else(|| string(row.get("model")));
             let digest = string(row.get("digest"));
-            let mut item = model_base(
-                format!(
+            let mut item = model_base(ModelBaseInput {
+                id: format!(
                     "ollama:{}",
                     if digest.is_empty() { &model } else { &digest }
                 ),
-                "Ollama",
-                "Ollama engine",
-                if model.is_empty() {
+                application: "Ollama",
+                runtime: "Ollama engine",
+                model: if model.is_empty() {
                     "Unknown Ollama model".to_string()
                 } else {
                     model
                 },
-                "detected",
-                "Ollama /api/tags",
-                100,
-                number(row.get("size")),
-                "Ollama library",
-            );
+                status: "detected",
+                source: "Ollama /api/tags",
+                confidence: 100,
+                size_bytes: number(row.get("size")),
+                location: "Ollama library".to_string(),
+            });
             let details = row.get("details").unwrap_or(&Value::Null);
             item["family"] = Value::String(string(details.get("family")));
             item["parameters"] = Value::String(string(details.get("parameter_size")));
@@ -488,17 +675,17 @@ fn parse_lm_studio(payload: &Value) -> Vec<Value> {
                 .or_else(|| string(row.get("displayName")))
                 .or_else(|| string(row.get("id")))
                 .or_else(|| "LM Studio model".to_string());
-            let mut item = model_base(
-                format!("lmstudio:{key}:0"),
-                "LM Studio",
-                "llama.cpp",
-                name,
-                "detected",
-                "LM Studio /api/v0/models",
-                98,
-                number(row.get("size_bytes")).max(number(row.get("size"))),
-                "LM Studio library",
-            );
+            let mut item = model_base(ModelBaseInput {
+                id: format!("lmstudio:{key}:0"),
+                application: "LM Studio",
+                runtime: "llama.cpp",
+                model: name,
+                status: "detected",
+                source: "LM Studio /api/v0/models",
+                confidence: 98,
+                size_bytes: number(row.get("size_bytes")).max(number(row.get("size"))),
+                location: "LM Studio library".to_string(),
+            });
             enrich_lm_studio(&mut item, row, None);
             models.push(item);
         } else {
@@ -510,17 +697,17 @@ fn parse_lm_studio(payload: &Value) -> Vec<Value> {
                     .or_else(|| string(row.get("displayName")))
                     .or_else(|| string(row.get("id")))
                     .or_else(|| "Loaded LM Studio model".to_string());
-                let mut item = model_base(
-                    format!("lmstudio:{key}:{instance_index}"),
-                    "LM Studio",
-                    "llama.cpp",
-                    name,
-                    "loaded",
-                    "LM Studio /api/v0/models",
-                    98,
-                    number(row.get("size_bytes")).max(number(row.get("size"))),
-                    "LM Studio library",
-                );
+                let mut item = model_base(ModelBaseInput {
+                    id: format!("lmstudio:{key}:{instance_index}"),
+                    application: "LM Studio",
+                    runtime: "llama.cpp",
+                    model: name,
+                    status: "loaded",
+                    source: "LM Studio /api/v0/models",
+                    confidence: 98,
+                    size_bytes: number(row.get("size_bytes")).max(number(row.get("size"))),
+                    location: "LM Studio library".to_string(),
+                });
                 enrich_lm_studio(&mut item, row, Some(instance));
                 models.push(item);
             }
@@ -547,24 +734,29 @@ fn parse_llama_cpp(payload: &Value) -> Vec<Value> {
         return Vec::new();
     }
     let model = path.rsplit(['/', '\\']).next().unwrap_or(&path).to_string();
-    let mut item = model_base(
-        format!("llamacpp:{model}"),
-        "llama.cpp",
-        "llama.cpp server",
-        model.clone(),
-        "loaded",
-        "llama.cpp /props",
-        98,
-        0.0,
-        "Active llama.cpp server",
-    );
+    let mut item = model_base(ModelBaseInput {
+        id: format!("llamacpp:{model}"),
+        application: "llama.cpp",
+        runtime: "llama.cpp server",
+        model: model.clone(),
+        status: "loaded",
+        source: "llama.cpp /props",
+        confidence: 98,
+        size_bytes: 0.0,
+        location: "Active llama.cpp server".to_string(),
+    });
     item["installed"] = Value::Bool(false);
     item["format"] = Value::String(model.rsplit('.').next().unwrap_or_default().to_string());
     item["contextLength"] = json!(number(payload.get("n_ctx")));
     vec![item]
 }
 
-fn parse_openai_models(payload: &Value, application: &str, source: &str) -> Vec<Value> {
+fn parse_openai_models(
+    payload: &Value,
+    application: &str,
+    runtime: &str,
+    source: &str,
+) -> Vec<Value> {
     payload
         .get("data")
         .and_then(Value::as_array)
@@ -576,8 +768,8 @@ fn parse_openai_models(payload: &Value, application: &str, source: &str) -> Vec<
                 .or_else(|| string(row.get("name")))
                 .or_else(|| "Local API model".to_string());
             let slug = application.to_ascii_lowercase().replace(' ', "-");
-            let mut item = model_base(
-                format!(
+            let mut item = model_base(ModelBaseInput {
+                id: format!(
                     "{slug}:{}",
                     if name.is_empty() {
                         index.to_string()
@@ -586,18 +778,18 @@ fn parse_openai_models(payload: &Value, application: &str, source: &str) -> Vec<
                     }
                 ),
                 application,
-                "llama.cpp",
-                name,
-                if string(row.get("state")) == "not-loaded" {
+                runtime,
+                model: name,
+                status: if string(row.get("state")) == "not-loaded" {
                     "detected"
                 } else {
                     "loaded"
                 },
                 source,
-                92,
-                number(row.get("size_bytes")).max(number(row.get("size"))),
-                &format!("{application} library"),
-            );
+                confidence: 92,
+                size_bytes: number(row.get("size_bytes")).max(number(row.get("size"))),
+                location: format!("{application} library"),
+            });
             item["family"] = Value::String(string(row.get("architecture")));
             item["parameters"] = Value::String(string(row.get("parameter_size")));
             item["quantization"] = Value::String(string(row.get("quantization")));
@@ -644,17 +836,17 @@ fn parse_comfy(payload: &Value) -> Vec<Value> {
         .into_iter()
         .enumerate()
         .map(|(index, model)| {
-            let mut item = model_base(
-                format!("comfyui:{model}:{index}"),
-                "ComfyUI",
-                "PyTorch",
-                model.clone(),
-                "active",
-                "ComfyUI active queue",
-                98,
-                0.0,
-                "Active ComfyUI workflow",
-            );
+            let mut item = model_base(ModelBaseInput {
+                id: format!("comfyui:{model}:{index}"),
+                application: "ComfyUI",
+                runtime: "PyTorch",
+                model: model.clone(),
+                status: "active",
+                source: "ComfyUI active queue",
+                confidence: 98,
+                size_bytes: 0.0,
+                location: "Active ComfyUI workflow".to_string(),
+            });
             item["installed"] = Value::Bool(false);
             item["format"] =
                 Value::String(model.rsplit('.').next().unwrap_or_default().to_string());
@@ -700,6 +892,7 @@ fn candidate_model_roots() -> Vec<(PathBuf, String)> {
             .unwrap_or_else(|| home.join(".local").join("share"))
     };
     let mut roots = vec![
+        (home.join(".ollama").join("models"), "Ollama".to_string()),
         (
             home.join(".lmstudio").join("models"),
             "LM Studio".to_string(),
@@ -802,6 +995,97 @@ fn directory_model_name(directory: &Path, root: &Path) -> String {
         .unwrap_or_else(|| "Local model".to_string())
 }
 
+fn parse_ollama_manifest(payload: &Value, relative_parts: &[String]) -> Option<Value> {
+    if relative_parts.len() < 3 {
+        return None;
+    }
+    let tag = relative_parts.last()?.trim();
+    let mut model_parts = relative_parts[1..relative_parts.len() - 1].to_vec();
+    if model_parts.first().is_some_and(|part| part == "library") {
+        model_parts.remove(0);
+    }
+    if tag.is_empty() || model_parts.is_empty() {
+        return None;
+    }
+    let model = format!("{}:{tag}", model_parts.join("/"));
+    let size = number(payload.get("config").and_then(|config| config.get("size")))
+        + payload
+            .get("layers")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|layer| number(layer.get("size")))
+            .sum::<f64>();
+    let mut item = model_base(ModelBaseInput {
+        id: format!("ollama-manifest:{model}"),
+        application: "Ollama",
+        runtime: "Ollama engine",
+        model,
+        status: "detected",
+        source: "Ollama manifest store",
+        confidence: 99,
+        size_bytes: size,
+        location: "Ollama library".to_string(),
+    });
+    item["format"] = Value::String("ollama".to_string());
+    Some(item)
+}
+
+fn scan_ollama_manifests(root: &Path) -> Vec<Value> {
+    let manifest_root = root.join("manifests");
+    let mut models = Vec::new();
+    let mut pending = VecDeque::from([(manifest_root.clone(), 0_u8)]);
+    let mut scanned_entries = 0;
+    while let Some((directory, depth)) = pending.pop_front() {
+        if scanned_entries >= MAX_SCANNED_ENTRIES || models.len() >= MAX_FILE_MODELS {
+            break;
+        }
+        let Ok(entries) = fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            scanned_entries += 1;
+            if scanned_entries >= MAX_SCANNED_ENTRIES || models.len() >= MAX_FILE_MODELS {
+                break;
+            }
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() && depth < 6 {
+                pending.push_back((path, depth + 1));
+                continue;
+            }
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if !metadata.is_file() || metadata.len() > 2 * 1024 * 1024 {
+                continue;
+            }
+            let Ok(relative) = path.strip_prefix(&manifest_root) else {
+                continue;
+            };
+            let parts = relative
+                .components()
+                .map(|part| part.as_os_str().to_string_lossy().to_string())
+                .collect::<Vec<_>>();
+            let Some(payload) = fs::read_to_string(&path)
+                .ok()
+                .and_then(|source| serde_json::from_str::<Value>(&source).ok())
+            else {
+                continue;
+            };
+            if let Some(model) = parse_ollama_manifest(&payload, &parts) {
+                models.push(model);
+            }
+        }
+    }
+    models
+}
+
 fn scan_model_root(root: &Path, label: &str) -> Vec<Value> {
     let mut models = Vec::new();
     let mut pending = VecDeque::from([(root.to_path_buf(), 0_u8)]);
@@ -817,8 +1101,11 @@ fn scan_model_root(root: &Path, label: &str) -> Vec<Value> {
         let transformer_weights = entries
             .iter()
             .filter(|entry| {
-                let path = entry.path();
-                if !path.is_file() {
+                if !entry
+                    .file_type()
+                    .ok()
+                    .is_some_and(|file_type| file_type.is_file())
+                {
                     return false;
                 }
                 let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
@@ -846,17 +1133,18 @@ fn scan_model_root(root: &Path, label: &str) -> Vec<Value> {
                 .into_iter()
                 .collect::<Vec<_>>()
                 .join("+");
-            let mut item = model_base(
-                format!("weights:{}:{}", slug(label), slug(&model)),
-                label,
-                "Transformers runtime",
-                model.clone(),
-                "detected",
-                &format!("{label} weight folder"),
-                90,
-                size,
-                label,
-            );
+            let source = format!("{label} weight folder");
+            let mut item = model_base(ModelBaseInput {
+                id: format!("weights:{}:{}", slug(label), slug(&model)),
+                application: label,
+                runtime: "Transformers runtime",
+                model: model.clone(),
+                status: "detected",
+                source: &source,
+                confidence: 90,
+                size_bytes: size,
+                location: label.to_string(),
+            });
             item["parameters"] = Value::String(infer_parameters(&model));
             item["format"] = Value::String(formats);
             models.push(item);
@@ -867,11 +1155,20 @@ fn scan_model_root(root: &Path, label: &str) -> Vec<Value> {
                 break;
             }
             let path = entry.path();
-            if path.is_dir() && depth < 6 {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() && depth < 6 {
                 let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
                 if !matches!(name.as_str(), "node_modules" | ".git" | "blobs") {
                     pending.push_back((path, depth + 1));
                 }
+                continue;
+            }
+            if !file_type.is_file() {
                 continue;
             }
             let extension = path
@@ -887,17 +1184,18 @@ fn scan_model_root(root: &Path, label: &str) -> Vec<Value> {
                 .metadata()
                 .map(|metadata| metadata.len() as f64)
                 .unwrap_or_default();
-            let mut item = model_base(
-                format!("file:{}:{}", slug(label), slug(&model)),
-                label,
-                "GGUF runtime",
-                model.clone(),
-                "detected",
-                &format!("{label} model folder"),
-                95,
-                size,
-                label,
-            );
+            let source = format!("{label} model folder");
+            let mut item = model_base(ModelBaseInput {
+                id: format!("file:{}:{}", slug(label), slug(&model)),
+                application: label,
+                runtime: "GGUF runtime",
+                model: model.clone(),
+                status: "detected",
+                source: &source,
+                confidence: 95,
+                size_bytes: size,
+                location: label.to_string(),
+            });
             item["parameters"] = Value::String(infer_parameters(&model));
             item["quantization"] = Value::String(infer_quantization(&model));
             item["format"] = Value::String(extension);
@@ -920,7 +1218,11 @@ fn discover_file_models() -> (Vec<Value>, Vec<Value>) {
     let mut models = Vec::new();
     let mut roots = Vec::new();
     for (path, label) in candidate_model_roots() {
-        let found = scan_model_root(&path, &label);
+        let found = if label == "Ollama" {
+            scan_ollama_manifests(&path)
+        } else {
+            scan_model_root(&path, &label)
+        };
         if !found.is_empty() {
             roots.push(json!({ "label": label, "modelCount": found.len() }));
             models.extend(found);
@@ -1061,23 +1363,41 @@ pub fn build(processes: &[Value]) -> Value {
             .then_with(|| number(right.get("memoryGb")).total_cmp(&number(left.get("memoryGb"))))
     });
 
-    let (ollama_running, ollama_installed, lm_studio, llama_cpp, comfy, jan) =
-        thread::scope(|scope| {
-            let ollama_running = scope.spawn(|| probe_json("http://127.0.0.1:11434/api/ps"));
-            let ollama_installed = scope.spawn(|| probe_json("http://127.0.0.1:11434/api/tags"));
-            let lm_studio = scope.spawn(|| probe_json("http://127.0.0.1:1234/api/v0/models"));
-            let llama_cpp = scope.spawn(|| probe_json("http://127.0.0.1:8080/props"));
-            let comfy = scope.spawn(|| probe_json("http://127.0.0.1:8188/queue"));
-            let jan = scope.spawn(|| probe_json("http://127.0.0.1:1337/v1/models"));
-            (
-                ollama_running.join().unwrap_or(None),
-                ollama_installed.join().unwrap_or(None),
-                lm_studio.join().unwrap_or(None),
-                llama_cpp.join().unwrap_or(None),
-                comfy.join().unwrap_or(None),
-                jan.join().unwrap_or(None),
-            )
-        });
+    let (
+        ollama_running,
+        ollama_installed,
+        lm_studio,
+        llama_cpp,
+        comfy,
+        jan,
+        gpt4all,
+        vllm,
+        text_generation_web_ui,
+        open_ai_8080,
+    ) = thread::scope(|scope| {
+        let ollama_running = scope.spawn(|| probe_json("http://127.0.0.1:11434/api/ps"));
+        let ollama_installed = scope.spawn(|| probe_json("http://127.0.0.1:11434/api/tags"));
+        let lm_studio = scope.spawn(|| probe_json("http://127.0.0.1:1234/api/v0/models"));
+        let llama_cpp = scope.spawn(|| probe_json("http://127.0.0.1:8080/props"));
+        let comfy = scope.spawn(|| probe_json("http://127.0.0.1:8188/queue"));
+        let jan = scope.spawn(|| probe_json("http://127.0.0.1:1337/v1/models"));
+        let gpt4all = scope.spawn(|| probe_json("http://127.0.0.1:4891/v1/models"));
+        let vllm = scope.spawn(|| probe_json("http://127.0.0.1:8000/v1/models"));
+        let text_generation_web_ui = scope.spawn(|| probe_json("http://127.0.0.1:5000/v1/models"));
+        let open_ai_8080 = scope.spawn(|| probe_json("http://127.0.0.1:8080/v1/models"));
+        (
+            ollama_running.join().unwrap_or(None),
+            ollama_installed.join().unwrap_or(None),
+            lm_studio.join().unwrap_or(None),
+            llama_cpp.join().unwrap_or(None),
+            comfy.join().unwrap_or(None),
+            jan.join().unwrap_or(None),
+            gpt4all.join().unwrap_or(None),
+            vllm.join().unwrap_or(None),
+            text_generation_web_ui.join().unwrap_or(None),
+            open_ai_8080.join().unwrap_or(None),
+        )
+    });
     let (file_models, model_roots) = discover_file_models();
     let mut models = merge_models(vec![
         ollama_installed
@@ -1092,8 +1412,48 @@ pub fn build(processes: &[Value]) -> Value {
         llama_cpp.as_ref().map(parse_llama_cpp).unwrap_or_default(),
         comfy.as_ref().map(parse_comfy).unwrap_or_default(),
         jan.as_ref()
-            .map(|value| parse_openai_models(value, "Jan", "Jan /v1/models"))
+            .map(|value| parse_openai_models(value, "Jan", "llama.cpp", "Jan /v1/models"))
             .unwrap_or_default(),
+        gpt4all
+            .as_ref()
+            .map(|value| parse_openai_models(value, "GPT4All", "Local API", "GPT4All /v1/models"))
+            .unwrap_or_default(),
+        vllm.as_ref()
+            .map(|value| {
+                parse_openai_models(
+                    value,
+                    "vLLM / compatible",
+                    "OpenAI-compatible",
+                    "Loopback :8000 /v1/models",
+                )
+            })
+            .unwrap_or_default(),
+        text_generation_web_ui
+            .as_ref()
+            .map(|value| {
+                parse_openai_models(
+                    value,
+                    "Text generation web UI / compatible",
+                    "OpenAI-compatible",
+                    "Loopback :5000 /v1/models",
+                )
+            })
+            .unwrap_or_default(),
+        if llama_cpp.is_none() {
+            open_ai_8080
+                .as_ref()
+                .map(|value| {
+                    parse_openai_models(
+                        value,
+                        "LocalAI / compatible",
+                        "OpenAI-compatible",
+                        "Loopback :8080 /v1/models",
+                    )
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        },
         file_models,
     ]);
 
@@ -1189,7 +1549,11 @@ pub fn build(processes: &[Value]) -> Value {
             { "id": "lmstudio", "name": "LM Studio", "status": if lm_studio.is_some() { "online" } else { "offline" }, "endpoint": "127.0.0.1:1234" },
             { "id": "llamacpp", "name": "llama.cpp", "status": if llama_cpp.is_some() { "online" } else { "offline" }, "endpoint": "127.0.0.1:8080" },
             { "id": "jan", "name": "Jan", "status": if jan.is_some() { "online" } else { "offline" }, "endpoint": "127.0.0.1:1337" },
-            { "id": "comfyui", "name": "ComfyUI", "status": if comfy.is_some() { "online" } else { "offline" }, "endpoint": "127.0.0.1:8188" }
+            { "id": "comfyui", "name": "ComfyUI", "status": if comfy.is_some() { "online" } else { "offline" }, "endpoint": "127.0.0.1:8188" },
+            { "id": "gpt4all", "name": "GPT4All API", "status": if gpt4all.is_some() { "online" } else { "offline" }, "endpoint": "127.0.0.1:4891" },
+            { "id": "openai-8000", "name": "vLLM / compatible", "status": if vllm.is_some() { "online" } else { "offline" }, "endpoint": "127.0.0.1:8000" },
+            { "id": "openai-5000", "name": "Text generation web UI / compatible", "status": if text_generation_web_ui.is_some() { "online" } else { "offline" }, "endpoint": "127.0.0.1:5000" },
+            { "id": "openai-8080", "name": "LocalAI / llama.cpp compatible", "status": if open_ai_8080.is_some() { "online" } else { "offline" }, "endpoint": "127.0.0.1:8080" }
         ],
         "modelRoots": model_roots,
         "models": models,
@@ -1229,6 +1593,64 @@ mod tests {
     }
 
     #[test]
+    fn offline_ollama_manifest_keeps_identity_and_size() {
+        let model = parse_ollama_manifest(
+            &json!({ "config": { "size": 120 }, "layers": [{ "size": 400 }, { "size": 500 }] }),
+            &[
+                "registry.ollama.ai".to_string(),
+                "library".to_string(),
+                "qwen3".to_string(),
+                "8b".to_string(),
+            ],
+        )
+        .expect("valid Ollama manifest");
+        assert_eq!(model["model"], "qwen3:8b");
+        assert_eq!(model["sizeBytes"], 1020.0);
+        assert_eq!(model["status"], "detected");
+    }
+
+    #[test]
+    fn expanded_catalog_separates_cloud_hybrid_and_local_services() {
+        let cases = [
+            (
+                json!({ "name": "gemini.cmd", "path": "C:\\npm\\gemini.cmd" }),
+                "Gemini CLI",
+                "cloud",
+            ),
+            (
+                json!({ "name": "opencode.exe", "path": "C:\\Tools\\OpenCode\\opencode.exe" }),
+                "OpenCode",
+                "hybrid",
+            ),
+            (
+                json!({ "name": "open-webui.exe", "path": "C:\\Open-WebUI\\open-webui.exe" }),
+                "Open WebUI",
+                "hybrid",
+            ),
+            (
+                json!({ "name": "llamafile.exe", "path": "C:\\Models\\llamafile.exe" }),
+                "llamafile",
+                "local",
+            ),
+            (
+                json!({ "name": "python.exe", "command": "python -m mlx_lm.server --model qwen" }),
+                "MLX LM",
+                "local",
+            ),
+            (
+                json!({ "name": "tabby.exe", "path": "C:\\TabbyML\\tabby.exe" }),
+                "Tabby",
+                "local",
+            ),
+        ];
+        for (process, application, execution) in cases {
+            let detected = detect(&process).expect("service should be detected");
+            assert_eq!(detected.application, application);
+            assert_eq!(detected.execution, execution);
+        }
+    }
+
+    #[test]
     fn product_names_in_shell_text_are_not_services() {
         let process = json!({
             "name": "powershell.exe",
@@ -1236,5 +1658,11 @@ mod tests {
             "command": "Write-Output 'LocalAI ChatGPT Codex'"
         });
         assert!(detect(&process).is_none());
+        let expanded = json!({
+            "name": "powershell.exe",
+            "path": "C:\\Windows\\System32\\WindowsPowerShell\\powershell.exe",
+            "command": "Write-Output 'Gemini OpenCode Aider Open WebUI llamafile Claude Code Kimi Copilot'"
+        });
+        assert!(detect(&expanded).is_none());
     }
 }

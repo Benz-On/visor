@@ -44,3 +44,5 @@ Suggested topics: `system-monitor`, `tauri`, `rust`, `react`, `windows`, `macos`
 - [x] Direct runtime dependency licenses were reviewed and documented.
 - [x] Windows x64 portable and NSIS artifacts were built; the portable binary
       passed an eight-second startup smoke test.
+- [x] npm and RustSec audits report no known dependency vulnerabilities; residual
+      transitive warnings are documented in `docs/SECURITY-AUDIT.md`.

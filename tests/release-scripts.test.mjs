@@ -9,10 +9,15 @@ import test from 'node:test';
 const node = process.execPath;
 
 test('release version gate accepts the synchronized prerelease tag', () => {
-  const output = execFileSync(node, ['scripts/check-release-version.mjs', 'v0.6.0-beta.1'], {
+  const output = execFileSync(node, ['scripts/check-release-version.mjs', 'v0.6.0-beta.2'], {
     encoding: 'utf8',
   });
   assert.match(output, /release metadata is consistent/);
+});
+
+test('GitHub Actions use immutable commit pins', () => {
+  const output = execFileSync(node, ['scripts/check-workflow-pins.mjs'], { encoding: 'utf8' });
+  assert.match(output, /Verified immutable action pins/);
 });
 
 test('release version gate rejects a tag that does not match the manifests', () => {
@@ -35,7 +40,7 @@ test('release manifest records asset bytes and SHA-256 checksums', async () => {
   const checksums = await readFile(join(directory, 'SHA256SUMS.txt'), 'utf8');
   const digest = createHash('sha256').update(asset).digest('hex');
 
-  assert.equal(manifest.version, '0.6.0-beta.1');
+  assert.equal(manifest.version, '0.6.0-beta.2');
   assert.equal(manifest.channel, 'prerelease');
   assert.deepEqual(manifest.files, [{ name: assetName, bytes: asset.byteLength, sha256: digest }]);
   assert.equal(checksums, `${digest}  ${assetName}\n`);

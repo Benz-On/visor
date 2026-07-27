@@ -11,7 +11,7 @@ Thank you for helping improve VISOR.
 
 ## Development
 
-Install Node.js 20+, Rust stable, and the current platform prerequisites for Tauri.
+Install Node.js 20.19+, Rust stable, and the current platform prerequisites for Tauri.
 
 ```bash
 npm install

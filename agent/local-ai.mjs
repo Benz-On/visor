@@ -1,4 +1,4 @@
-import { readdir, stat } from 'node:fs/promises';
+import { readFile, readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, delimiter, extname, join } from 'node:path';
 
@@ -27,21 +27,39 @@ export function detectAiApplication(processData = {}) {
 
   // Cloud clients and coding agents are intentionally classified before their
   // generic host executable (ChatGPT.exe, node.exe, python.exe, WebView2, etc.).
-  if (/openai\.codex|\\openai\\codex\\|@openai[\\/]codex|codex-code-mode-host|codex-command-runner/.test(haystack) || name === 'codex.exe') {
+  const nodeHost = /^(node|node\.exe|bun|bun\.exe|deno|deno\.exe)$/.test(name);
+  if (/openai\.codex|[\\/]openai[\\/]codex[\\/]/.test(path)
+      || /^(codex(?:\.exe)?|codex-code-mode-host(?:\.exe)?|codex-command-runner(?:\.exe)?)$/.test(name)
+      || (nodeHost && /@openai[\\/]codex/.test(command))) {
     return identity('Codex', 'OpenAI cloud', /host|runner/.test(name) ? 'agent-helper' : 'coding-agent', 'coding-agent', 'cloud', 'OpenAI');
   }
-  if (name === 'chatgpt.exe' || /openai\.chatgpt/.test(path)) {
+  if (name === 'chatgpt' || name === 'chatgpt.exe' || /openai\.chatgpt/.test(path)) {
     return identity('ChatGPT', 'OpenAI cloud', /msedgewebview2/.test(name) ? 'ui-helper' : 'application', 'cloud-client', 'cloud', 'OpenAI');
   }
-  if (/@anthropic-ai[\\/]claude-code|claude-code|\.claude[\\/]|\bclaude(?:\.exe)?\b/.test(haystack)) {
-    const codingAgent = /claude-code|\.claude[\\/]|node(?:\.exe)?/.test(haystack);
+  const claudeBinary = name === 'claude' || name === 'claude.exe';
+  const claudeCodeMarker = /@anthropic-ai[\\/]claude-code|claude-code|\.claude[\\/]/.test(`${path} ${command}`);
+  if (claudeBinary || (nodeHost && claudeCodeMarker)) {
+    const codingAgent = claudeCodeMarker;
     return identity(codingAgent ? 'Claude Code' : 'Claude', 'Anthropic cloud', codingAgent ? 'coding-agent' : 'application', codingAgent ? 'coding-agent' : 'cloud-client', 'cloud', 'Anthropic');
   }
-  if (/@moonshot-ai[\\/]|kimi-code|kimi-cli|\bkimi(?:\.exe)?\b/.test(haystack)) {
+  if (name === 'kimi' || name === 'kimi.exe' || (nodeHost && /@moonshot-ai[\\/]|kimi-code|kimi-cli/.test(`${path} ${command}`))) {
     return identity('Kimi Code', 'Moonshot cloud', 'coding-agent', 'coding-agent', 'cloud', 'Moonshot AI');
   }
-  if (/github[ ._-]?copilot|copilot-agent|copilot-language-server/.test(haystack)) {
+  if (/^(copilot-agent|copilot-language-server)(?:\.exe)?$/.test(name)
+      || /github[ ._-]?copilot/.test(path)
+      || (nodeHost && /github[ ._-]?copilot|copilot-agent|copilot-language-server/.test(command))) {
     return identity('GitHub Copilot', 'GitHub cloud', 'agent-helper', 'coding-agent', 'cloud', 'GitHub');
+  }
+  if (/@google[\\/]gemini-cli|[\\/]\.gemini[\\/]/.test(path)
+      || (nodeHost && /@google[\\/]gemini-cli|[\\/]\.gemini[\\/]/.test(command))
+      || ['gemini', 'gemini.exe', 'gemini.cmd'].includes(name)) {
+    return identity('Gemini CLI', 'Google cloud', 'coding-agent', 'coding-agent', 'cloud', 'Google');
+  }
+  if (['opencode', 'opencode.exe'].includes(name) || /[\\/]opencode[\\/]/.test(path)) {
+    return identity('OpenCode', 'Configured AI provider', 'coding-agent', 'coding-agent', 'hybrid', 'OpenCode');
+  }
+  if (['aider', 'aider.exe'].includes(name) || (/python/.test(name) && /(?:^|\s)-m\s+aider(?:\s|$)|[\\/]aider(?:-chat)?[\\/]/.test(command))) {
+    return identity('Aider', 'Configured AI provider', 'coding-agent', 'coding-agent', 'hybrid', 'Aider');
   }
 
   if (name.includes('msedgewebview2') && /ollama app\.exe/.test(haystack)) {
@@ -63,8 +81,29 @@ export function detectAiApplication(processData = {}) {
   if (/(^|[\\/ ])jan(?:\.exe)?\b|jan\.ai/.test(haystack)) {
     return identity('Jan', 'llama.cpp', /llama|server/.test(name) ? 'model-runner' : 'application', 'local-runtime', 'local', 'Jan');
   }
-  if (/anythingllm|anything-llm/.test(haystack)) {
+  if (/anythingllm|anything-llm/.test(name) || /[\\/]anything-?llm[\\/]/.test(path)) {
     return identity('AnythingLLM', 'Local orchestrator', 'application', 'local-runtime', 'hybrid', 'Mintplex Labs');
+  }
+  if (/open-webui|open_webui/.test(name) || /[\\/]open[ _-]?webui[\\/]/.test(path) || (/python/.test(name) && /(?:^|\s)-m\s+open_webui(?:\s|$)/.test(command))) {
+    return identity('Open WebUI', 'Local AI interface', 'application', 'local-runtime', 'hybrid', 'Open WebUI');
+  }
+  if (/\bmsty(?:\.exe)?\b|[\\/]msty[\\/]/.test(haystack)) {
+    return identity('Msty', 'Local AI interface', 'application', 'local-runtime', 'hybrid', 'Msty');
+  }
+  if (/\btabby(?:\.exe)?\b|tabbyml/.test(haystack)) {
+    return identity('Tabby', 'Local code model server', 'model-runner', 'local-runtime', 'local', 'TabbyML');
+  }
+  if (/llamafile/.test(name) || /[\\/]llamafile[\\/]/.test(path)) {
+    return identity('llamafile', 'llama.cpp', 'model-runner', 'local-runtime', 'local', 'Mozilla');
+  }
+  if (/mlx[_-]lm/.test(name) || /[\\/]mlx[_-]lm[\\/]/.test(path) || (/python/.test(name) && /mlx_lm(?:\.server)?/.test(command))) {
+    return identity('MLX LM', 'Apple MLX', 'model-runner', 'local-runtime', 'local', 'MLX Community');
+  }
+  if (['exo', 'exo.exe'].includes(name) || /[\\/]exo[\\/]/.test(path) || (/python/.test(name) && /exo[_-]inference/.test(command))) {
+    return identity('exo', 'Distributed local inference', 'model-runner', 'local-runtime', 'local', 'exo');
+  }
+  if (/tensorrt[_-]?llm/.test(name) || /[\\/]tensorrt[_-]?llm[\\/]/.test(path) || (/python/.test(name) && /tensorrt[_-]?llm/.test(command))) {
+    return identity('TensorRT-LLM', 'NVIDIA TensorRT', 'model-runner', 'local-runtime', 'local', 'NVIDIA');
   }
   if (/llama-server|llama\.cpp|koboldcpp|kobold/.test(haystack)) {
     const application = /kobold/.test(haystack) ? 'KoboldCpp' : 'llama.cpp';
@@ -148,6 +187,31 @@ export function parseOllamaTagsPayload(payload = {}) {
     format: model.details?.format || '',
     location: 'Ollama library',
   }));
+}
+
+export function parseOllamaManifest(payload = {}, relativeParts = []) {
+  const parts = relativeParts.map(String).filter(Boolean);
+  if (parts.length < 3) return null;
+  const tag = parts.pop();
+  parts.shift(); // Registry host, normally registry.ollama.ai.
+  if (parts[0] === 'library') parts.shift();
+  if (parts.length === 0 || !tag) return null;
+  const model = `${parts.join('/')}:${tag}`;
+  const layers = Array.isArray(payload.layers) ? payload.layers : [];
+  const sizeBytes = finite(payload.config?.size) + layers.reduce((sum, layer) => sum + finite(layer?.size), 0);
+  return {
+    ...modelBase({
+      id: `ollama-manifest:${model}`,
+      application: 'Ollama',
+      runtime: 'Ollama engine',
+      model,
+      source: 'Ollama manifest store',
+      confidence: 99,
+      sizeBytes,
+    }),
+    format: 'ollama',
+    location: 'Ollama library',
+  };
 }
 
 export function parseLmStudioPayload(payload = {}) {
@@ -261,6 +325,7 @@ function candidateModelRoots() {
   const appData = process.env.APPDATA || join(home, 'AppData', 'Roaming');
   const localAppData = process.env.LOCALAPPDATA || join(home, 'AppData', 'Local');
   const roots = [
+    { path: join(home, '.ollama', 'models'), label: 'Ollama' },
     { path: join(home, '.lmstudio', 'models'), label: 'LM Studio' },
     { path: join(home, '.cache', 'lm-studio', 'models'), label: 'LM Studio' },
     { path: join(home, '.cache', 'huggingface', 'hub'), label: 'Hugging Face' },
@@ -277,6 +342,42 @@ function candidateModelRoots() {
   return [...new Map(roots.map((root) => [root.path.toLowerCase(), root])).values()];
 }
 
+async function scanOllamaManifests(root) {
+  const manifestRoot = join(root.path, 'manifests');
+  const models = [];
+  const pending = [{ path: manifestRoot, depth: 0 }];
+  let scannedEntries = 0;
+  while (pending.length && scannedEntries < MAX_SCANNED_ENTRIES && models.length < MAX_FILE_MODELS) {
+    const current = pending.shift();
+    let entries;
+    try {
+      entries = await readdir(current.path, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      scannedEntries += 1;
+      if (scannedEntries >= MAX_SCANNED_ENTRIES || models.length >= MAX_FILE_MODELS) break;
+      const path = join(current.path, entry.name);
+      if (entry.isDirectory() && current.depth < 6) {
+        pending.push({ path, depth: current.depth + 1 });
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      try {
+        const file = await stat(path);
+        if (file.size > 2 * 1024 * 1024) continue;
+        const relativeParts = path.slice(manifestRoot.length).split(/[\\/]/).filter(Boolean);
+        const model = parseOllamaManifest(JSON.parse(await readFile(path, 'utf8')), relativeParts);
+        if (model) models.push(model);
+      } catch {
+        // A corrupt or concurrently updated manifest must not break telemetry.
+      }
+    }
+  }
+  return models;
+}
+
 async function scanModelRoot(root) {
   const models = [];
   const pending = [{ path: root.path, depth: 0 }];
@@ -289,7 +390,7 @@ async function scanModelRoot(root) {
     } catch {
       continue;
     }
-    const transformerWeights = entries.filter((entry) => (entry.isFile() || entry.isSymbolicLink()) && (
+    const transformerWeights = entries.filter((entry) => entry.isFile() && (
       /\.safetensors$/i.test(entry.name)
       || /\.onnx$/i.test(entry.name)
       || /^pytorch_model(?:-\d+-of-\d+)?\.bin$/i.test(entry.name)
@@ -320,12 +421,13 @@ async function scanModelRoot(root) {
       scannedEntries += 1;
       if (scannedEntries >= MAX_SCANNED_ENTRIES || models.length >= MAX_FILE_MODELS) break;
       const path = join(current.path, entry.name);
+      if (entry.isSymbolicLink()) continue;
       if (entry.isDirectory() && current.depth < 6 && !/^(node_modules|\.git|blobs)$/i.test(entry.name)) {
         pending.push({ path, depth: current.depth + 1 });
         continue;
       }
       const extension = extname(entry.name).toLowerCase();
-      if ((!entry.isFile() && !entry.isSymbolicLink()) || !['.gguf', '.ggml'].includes(extension)) continue;
+      if (!entry.isFile() || !['.gguf', '.ggml'].includes(extension)) continue;
       let file;
       try {
         file = await stat(path);
@@ -356,7 +458,10 @@ async function scanModelRoot(root) {
 async function discoverFileModels() {
   if (Date.now() < fileInventoryCache.expiresAt) return fileInventoryCache;
   const roots = candidateModelRoots();
-  const scanned = await Promise.all(roots.map(async (root) => ({ root, models: await scanModelRoot(root) })));
+  const scanned = await Promise.all(roots.map(async (root) => ({
+    root,
+    models: root.label === 'Ollama' ? await scanOllamaManifests(root) : await scanModelRoot(root),
+  })));
   fileInventoryCache = {
     expiresAt: Date.now() + INVENTORY_TTL_MS,
     models: scanned.flatMap((item) => item.models),
@@ -400,13 +505,17 @@ function mergeModels(...collections) {
 }
 
 export async function discoverLocalModels() {
-  const [ollamaRunning, ollamaInstalled, lmStudio, llamaCpp, comfy, jan, files] = await Promise.all([
+  const [ollamaRunning, ollamaInstalled, lmStudio, llamaCpp, comfy, jan, gpt4all, vllm, textGenerationWebUi, openAi8080, files] = await Promise.all([
     probeJson('http://127.0.0.1:11434/api/ps'),
     probeJson('http://127.0.0.1:11434/api/tags'),
     probeJson('http://127.0.0.1:1234/api/v0/models'),
     probeJson('http://127.0.0.1:8080/props'),
     probeJson('http://127.0.0.1:8188/queue'),
     probeJson('http://127.0.0.1:1337/v1/models'),
+    probeJson('http://127.0.0.1:4891/v1/models'),
+    probeJson('http://127.0.0.1:8000/v1/models'),
+    probeJson('http://127.0.0.1:5000/v1/models'),
+    probeJson('http://127.0.0.1:8080/v1/models'),
     discoverFileModels(),
   ]);
 
@@ -417,6 +526,10 @@ export async function discoverLocalModels() {
     llamaCpp ? parseLlamaCppPayload(llamaCpp) : [],
     comfy ? parseComfyQueuePayload(comfy) : [],
     jan ? parseOpenAiModelsPayload(jan, 'Jan', 'llama.cpp', 'Jan /v1/models') : [],
+    gpt4all ? parseOpenAiModelsPayload(gpt4all, 'GPT4All', 'Local API', 'GPT4All /v1/models') : [],
+    vllm ? parseOpenAiModelsPayload(vllm, 'vLLM / compatible', 'OpenAI-compatible', 'Loopback :8000 /v1/models') : [],
+    textGenerationWebUi ? parseOpenAiModelsPayload(textGenerationWebUi, 'Text generation web UI / compatible', 'OpenAI-compatible', 'Loopback :5000 /v1/models') : [],
+    openAi8080 && !llamaCpp ? parseOpenAiModelsPayload(openAi8080, 'LocalAI / compatible', 'OpenAI-compatible', 'Loopback :8080 /v1/models') : [],
     files.models,
   );
 
@@ -428,6 +541,10 @@ export async function discoverLocalModels() {
       { id: 'llamacpp', name: 'llama.cpp', status: llamaCpp ? 'online' : 'offline', endpoint: '127.0.0.1:8080' },
       { id: 'jan', name: 'Jan', status: jan ? 'online' : 'offline', endpoint: '127.0.0.1:1337' },
       { id: 'comfyui', name: 'ComfyUI', status: comfy ? 'online' : 'offline', endpoint: '127.0.0.1:8188' },
+      { id: 'gpt4all', name: 'GPT4All API', status: gpt4all ? 'online' : 'offline', endpoint: '127.0.0.1:4891' },
+      { id: 'openai-8000', name: 'vLLM / compatible', status: vllm ? 'online' : 'offline', endpoint: '127.0.0.1:8000' },
+      { id: 'openai-5000', name: 'Text generation web UI / compatible', status: textGenerationWebUi ? 'online' : 'offline', endpoint: '127.0.0.1:5000' },
+      { id: 'openai-8080', name: 'LocalAI / llama.cpp compatible', status: openAi8080 ? 'online' : 'offline', endpoint: '127.0.0.1:8080' },
     ],
     models,
     modelRoots: files.roots,

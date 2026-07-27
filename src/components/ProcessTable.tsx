@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { AlertTriangle, ChevronDown, Gauge, Search, Shield, SlidersHorizontal, Trash2, Zap } from 'lucide-react';
 import { processes as demoProcesses } from '../data';
 import type { ProcessInfo } from '../types';
@@ -45,11 +45,7 @@ export function ProcessTable({
       })
       .slice(0, expanded ? 80 : 5);
   }, [expanded, processes, query, sort]);
-  const selectedProcess = processes.find((process) => process.id === selected) || null;
-
-  useEffect(() => {
-    if (expanded && !selectedProcess && processes.length > 0) setSelected(processes[0].id);
-  }, [expanded, processes, selectedProcess]);
+  const selectedProcess = processes.find((process) => process.id === selected) || (expanded ? processes[0] : null);
 
   const cycleSort = () => setSort((current) => current === 'gpu' ? 'cpu' : current === 'cpu' ? 'energy' : 'gpu');
 
@@ -86,7 +82,7 @@ export function ProcessTable({
       <div className="panel-header process-header">
         <div>
           <p className="eyebrow">RESOURCE ATTRIBUTION</p>
-          <h2>{expanded ? 'Process explorer' : 'Top consumers'} {live && <span className="native-data-badge">WINDOWS LIVE</span>}</h2>
+          <h2>{expanded ? 'Process explorer' : 'Top consumers'} {live && <span className="native-data-badge">LOCAL LIVE</span>}</h2>
         </div>
         <div className="table-tools">
           {expanded && (

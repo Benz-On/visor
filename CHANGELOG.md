@@ -3,6 +3,27 @@
 All notable VISOR changes are documented here. Versions follow Semantic
 Versioning while the product remains in beta.
 
+## [0.6.0-beta.2] - 2026-07-27
+
+### Added
+
+- Offline Ollama manifest discovery plus loopback adapters for GPT4All, vLLM,
+  Text generation web UI, and LocalAI-compatible runtimes.
+- Process attribution for Gemini CLI, OpenCode, Aider, Open WebUI, Msty, Tabby,
+  llamafile, MLX LM, exo, and TensorRT-LLM.
+- Documented evidence levels and explicit privacy boundaries for local runtimes,
+  cloud clients, and paid provider APIs.
+- Critical-process protection for macOS and Linux process controls.
+
+### Changed
+
+- Pinned every GitHub Action to an immutable full commit SHA and gated CI and
+  release fan-out behind a single workflow-integrity preflight.
+- Clarified that cloud-client telemetry is the local process footprint only;
+  account status, tokens, API costs, prompts, and encrypted traffic are not read.
+- Improved important-metric typography consistency and cross-platform wording.
+- Updated the lint toolchain and removed all reported npm dependency advisories.
+
 ## [0.6.0-beta.1] - 2026-07-27
 
 ### Added
@@ -34,5 +55,6 @@ Versioning while the product remains in beta.
 - Premium Geist typography, four themes, thermal emphasis, and sustained-load
   alerts with gaming-aware suppression.
 
+[0.6.0-beta.2]: https://github.com/Benz-On/visor/compare/v0.6.0-beta.1...v0.6.0-beta.2
 [0.6.0-beta.1]: https://github.com/Benz-On/visor/compare/v0.5.0-beta.1...v0.6.0-beta.1
 [0.5.0-beta.1]: https://github.com/Benz-On/visor/releases/tag/v0.5.0-beta.1

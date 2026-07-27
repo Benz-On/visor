@@ -52,11 +52,15 @@ export function useVisorData(paused: boolean) {
 
   useEffect(() => {
     const controller = new AbortController();
-    void fetchSnapshot(controller.signal);
-    if (paused) return () => controller.abort();
+    const initialTimer = window.setTimeout(() => void fetchSnapshot(controller.signal), 0);
+    if (paused) return () => {
+      controller.abort();
+      window.clearTimeout(initialTimer);
+    };
     const timer = window.setInterval(() => void fetchSnapshot(controller.signal), 1100);
     return () => {
       controller.abort();
+      window.clearTimeout(initialTimer);
       window.clearInterval(timer);
     };
   }, [fetchSnapshot, paused]);

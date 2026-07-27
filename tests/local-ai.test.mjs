@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildLocalAiSnapshot, detectAiApplication, parseComfyQueuePayload, parseLlamaCppPayload, parseLmStudioPayload, parseOllamaPayload, parseOllamaTagsPayload } from '../agent/local-ai.mjs';
+import { buildLocalAiSnapshot, detectAiApplication, parseComfyQueuePayload, parseLlamaCppPayload, parseLmStudioPayload, parseOllamaManifest, parseOllamaPayload, parseOllamaTagsPayload } from '../agent/local-ai.mjs';
 
 test('Ollama adapter keeps the exact model identity and allocation', () => {
   const [model] = parseOllamaPayload({
@@ -47,6 +47,17 @@ test('installed Ollama models are inventoried even when they are not running', (
   assert.equal(model.parameters, '30.5B');
 });
 
+test('offline Ollama manifests preserve model identity and total layer size', () => {
+  const model = parseOllamaManifest({
+    config: { size: 120 },
+    layers: [{ size: 400 }, { size: 500 }],
+  }, ['registry.ollama.ai', 'library', 'qwen3', '8b']);
+  assert.equal(model.model, 'qwen3:8b');
+  assert.equal(model.sizeBytes, 1020);
+  assert.equal(model.status, 'detected');
+  assert.equal(model.source, 'Ollama manifest store');
+});
+
 test('LM Studio keeps downloaded models that are not loaded', () => {
   const [model] = parseLmStudioPayload({ data: [{ id: 'qwen-14b', state: 'not-loaded', size_bytes: 9_000_000_000, quantization: 'Q4_K_M', max_context_length: 32768 }] });
   assert.equal(model.status, 'detected');
@@ -64,8 +75,26 @@ test('cloud coding agents are separated from local inference runtimes', () => {
   assert.equal(kimi.application, 'Kimi Code');
 });
 
+test('expanded service catalog separates cloud, hybrid and local execution', () => {
+  const cases = [
+    [{ name: 'gemini.cmd', path: 'C:\\npm\\gemini.cmd' }, 'Gemini CLI', 'cloud'],
+    [{ name: 'opencode.exe', path: 'C:\\Tools\\OpenCode\\opencode.exe' }, 'OpenCode', 'hybrid'],
+    [{ name: 'open-webui.exe', path: 'C:\\Open WebUI\\open-webui.exe' }, 'Open WebUI', 'hybrid'],
+    [{ name: 'llamafile.exe', path: 'C:\\Models\\llamafile.exe' }, 'llamafile', 'local'],
+    [{ name: 'python.exe', command: 'python -m mlx_lm.server --model qwen' }, 'MLX LM', 'local'],
+    [{ name: 'tabby.exe', path: 'C:\\TabbyML\\tabby.exe' }, 'Tabby', 'local'],
+  ];
+  for (const [processData, application, execution] of cases) {
+    const detected = detectAiApplication(processData);
+    assert.equal(detected.application, application);
+    assert.equal(detected.execution, execution);
+  }
+});
+
 test('commands that merely mention an AI product are not counted as its service', () => {
   assert.equal(detectAiApplication({ name: 'powershell.exe', command: "Write-Output 'LocalAI ChatGPT Codex'" }), null);
+  assert.equal(detectAiApplication({ name: 'powershell.exe', command: "Write-Output 'Gemini OpenCode Aider'" }), null);
+  assert.equal(detectAiApplication({ name: 'powershell.exe', command: "Write-Output 'Claude Code Kimi Copilot'" }), null);
   assert.equal(detectAiApplication({ name: 'chrome.exe', command: '--app=https://chatgpt.com/' }), null);
 });
 

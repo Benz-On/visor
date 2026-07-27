@@ -13,18 +13,32 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  preflight:
+    name: Workflow preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Verify immutable action references
+        run: node scripts/check-workflow-pins.mjs
+
   frontend-and-agent:
     name: Frontend and agent
+    needs: preflight
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
           cache: npm
@@ -41,11 +55,12 @@ jobs:
       - name: Build web application
         run: npm run build
 
-      - name: Audit production dependencies
-        run: npm audit --omit=dev --audit-level=high
+      - name: Audit JavaScript dependencies
+        run: npm audit --audit-level=high
 
   native:
     name: Native tests · ${{ matrix.os }}
+    needs: preflight
     strategy:
       fail-fast: false
       matrix:
@@ -54,7 +69,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
 
@@ -65,12 +80,21 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy
 
       - name: Check Rust formatting
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 
+      - name: Lint native code
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+
       - name: Run native tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+
+      - name: Audit Rust dependencies
+        if: runner.os == 'Linux'
+        run: |
+          cargo install cargo-audit --locked --version 0.22.2
+          cargo audit --file src-tauri/Cargo.lock

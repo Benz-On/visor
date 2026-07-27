@@ -1,6 +1,6 @@
 # VISOR 0.6 beta
 
-VISOR 0.6.0-beta.1 introduces the public multi-platform release pipeline and
+VISOR 0.6.0-beta.2 introduces the hardened public multi-platform release pipeline and
 native preview packages for Windows, macOS, and Linux on x64 and ARM64.
 
 ## Delivery matrix

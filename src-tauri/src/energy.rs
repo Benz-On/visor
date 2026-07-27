@@ -11,6 +11,17 @@ pub struct EnergyEstimate {
     pub measured_gpu: bool,
 }
 
+pub struct EnergyInputs {
+    pub cpu_load: f64,
+    pub gpu_load: f64,
+    pub memory_total_gb: f64,
+    pub disk_activity: f64,
+    pub cpu_tdp: f64,
+    pub speed_ratio: f64,
+    pub measured_gpu_power: f64,
+    pub gpu_power_limit: f64,
+}
+
 fn clamp(value: f64, min: f64, max: f64) -> f64 {
     value.max(min).min(max)
 }
@@ -31,29 +42,21 @@ pub fn infer_cpu_tdp(physical_cores: usize, brand: &str) -> f64 {
     }
 }
 
-pub fn estimate(
-    cpu_load: f64,
-    gpu_load: f64,
-    memory_total_gb: f64,
-    disk_activity: f64,
-    cpu_tdp: f64,
-    speed_ratio: f64,
-    measured_gpu_power: f64,
-    gpu_power_limit: f64,
-) -> EnergyEstimate {
-    let cpu_idle = (cpu_tdp * 0.075).max(5.0);
+pub fn estimate(inputs: EnergyInputs) -> EnergyEstimate {
+    let cpu_idle = (inputs.cpu_tdp * 0.075).max(5.0);
     let cpu = cpu_idle
-        + (cpu_tdp - cpu_idle)
-            * (clamp(cpu_load, 0.0, 100.0) / 100.0).powf(0.78)
-            * clamp(speed_ratio, 0.45, 1.35);
-    let measured_gpu = measured_gpu_power > 0.0;
+        + (inputs.cpu_tdp - cpu_idle)
+            * (clamp(inputs.cpu_load, 0.0, 100.0) / 100.0).powf(0.78)
+            * clamp(inputs.speed_ratio, 0.45, 1.35);
+    let measured_gpu = inputs.measured_gpu_power > 0.0;
     let gpu = if measured_gpu {
-        measured_gpu_power
+        inputs.measured_gpu_power
     } else {
-        gpu_power_limit.max(30.0) * (0.1 + 0.9 * (clamp(gpu_load, 0.0, 100.0) / 100.0).powf(0.92))
+        inputs.gpu_power_limit.max(30.0)
+            * (0.1 + 0.9 * (clamp(inputs.gpu_load, 0.0, 100.0) / 100.0).powf(0.92))
     };
-    let memory = 2.0 + memory_total_gb.max(1.0) * 0.12;
-    let storage = 2.5 + clamp(disk_activity, 0.0, 100.0) * 0.055;
+    let memory = 2.0 + inputs.memory_total_gb.max(1.0) * 0.12;
+    let storage = 2.5 + clamp(inputs.disk_activity, 0.0, 100.0) * 0.055;
     let platform = 30.0;
     let components = cpu + gpu + memory + storage + platform;
     let efficiency = if components > 350.0 {
@@ -119,8 +122,21 @@ mod tests {
 
     #[test]
     fn measured_gpu_improves_confidence_without_hiding_estimates() {
-        let estimated = estimate(50.0, 60.0, 32.0, 10.0, 105.0, 1.0, 0.0, 220.0);
-        let hybrid = estimate(50.0, 60.0, 32.0, 10.0, 105.0, 1.0, 142.0, 220.0);
+        let base = || EnergyInputs {
+            cpu_load: 50.0,
+            gpu_load: 60.0,
+            memory_total_gb: 32.0,
+            disk_activity: 10.0,
+            cpu_tdp: 105.0,
+            speed_ratio: 1.0,
+            measured_gpu_power: 0.0,
+            gpu_power_limit: 220.0,
+        };
+        let estimated = estimate(base());
+        let hybrid = estimate(EnergyInputs {
+            measured_gpu_power: 142.0,
+            ..base()
+        });
         assert!(!estimated.measured_gpu);
         assert!(hybrid.measured_gpu);
         assert_eq!(hybrid.gpu, 142.0);

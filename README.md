@@ -4,7 +4,7 @@
 [![Desktop releases](https://github.com/Benz-On/visor/actions/workflows/release.yml/badge.svg)](https://github.com/Benz-On/visor/actions/workflows/release.yml)
 [![Latest release](https://img.shields.io/github/v/release/Benz-On/visor?include_prereleases)](https://github.com/Benz-On/visor/releases)
 
-Current version: **0.6.0-beta.1**
+Current version: **0.6.0-beta.2**
 
 VISOR is a premium, local-first system monitor for Windows, macOS, and Linux.
 It combines high-density live telemetry, process control, energy modeling, and
@@ -51,7 +51,8 @@ See [platform support](docs/PLATFORMS.md) for detailed coverage and limitations.
 - Local native Tauri IPC; no external telemetry or analytics
 
 For cloud AI clients, VISOR reports only the CPU, GPU, RAM, VRAM, and modeled
-power consumed by their local processes. It cannot measure remote datacenter use.
+power consumed by their local processes. It cannot infer paid status, remote
+tokens, provider charges, or datacenter use. See [AI detection coverage](docs/AI-COVERAGE.md).
 
 ## Platform support
 
@@ -73,7 +74,7 @@ telemetry with fabricated values.
 
 Requirements:
 
-- Node.js 20 or newer
+- Node.js 20.19 or newer
 - Rust stable
 - Platform prerequisites from the [Tauri documentation](https://v2.tauri.app/start/prerequisites/)
 
@@ -135,11 +136,12 @@ See the [changelog](CHANGELOG.md) and [release documentation](docs/RELEASING.md)
 VISOR probes loopback-only runtime APIs and joins model evidence with the local
 process tree. An exact model name is shown only when a runtime reports it.
 
-- Ollama: installed models from `/api/tags`, active models from `/api/ps`
+- Ollama: installed models from offline manifests and `/api/tags`, active models from `/api/ps`
 - LM Studio: installed models and loaded instances from its local API
 - llama.cpp: loaded model metadata from `/props`
 - Jan: models from its local OpenAI-compatible API
 - ComfyUI: model files referenced by the active queue
+- GPT4All, vLLM, Text generation web UI and LocalAI-compatible loopback APIs
 - Known roots: GGUF, GGML, Safetensors, ONNX, and PyTorch weights
 - Custom roots: use the platform path separator in `VISOR_MODEL_PATHS`
 
@@ -165,8 +167,9 @@ agent accepts `VISOR_TARIFF_EUR_KWH` and `VISOR_CARBON_G_KWH` overrides.
 - Process mutation requires explicit confirmation and blocks critical processes.
 - Command arguments are passed directly to operating-system tools without shell interpolation.
 
-Read [PRIVACY.md](PRIVACY.md) and [SECURITY.md](SECURITY.md). Please do not report
-security vulnerabilities in public issues.
+Read [PRIVACY.md](PRIVACY.md), [SECURITY.md](SECURITY.md), and the
+[beta security audit](docs/SECURITY-AUDIT.md). Please do not report security
+vulnerabilities in public issues.
 
 ## Contributing
 
