@@ -1,9 +1,9 @@
 name: Publish desktop release
 
 on:
-  push:
-    tags:
-      - 'v*'
+  # Release assets are currently published from verified local builds.
+  # Keep the workflow available for a future return to hosted runners, but do
+  # not consume Actions capacity when a version tag is pushed.
   workflow_dispatch:
     inputs:
       tag:

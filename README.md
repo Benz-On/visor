@@ -1,7 +1,5 @@
 # VISOR
 
-[![CI](https://github.com/Benz-On/visor/actions/workflows/ci.yml/badge.svg)](https://github.com/Benz-On/visor/actions/workflows/ci.yml)
-[![Desktop releases](https://github.com/Benz-On/visor/actions/workflows/release.yml/badge.svg)](https://github.com/Benz-On/visor/actions/workflows/release.yml)
 [![Latest release](https://img.shields.io/github/v/release/Benz-On/visor?include_prereleases)](https://github.com/Benz-On/visor/releases)
 
 Current version: **0.6.0-beta.2**
@@ -17,13 +15,15 @@ local AI workload intelligence in a calm desktop interface.
 ## Download
 
 Download published builds from the [GitHub Releases page](https://github.com/Benz-On/visor/releases).
-Every release includes `SHA256SUMS.txt` and `release-manifest.json`.
+Every release includes `SHA256SUMS.txt` and `release-manifest.json`. Release
+assets are currently built, tested, and uploaded manually without GitHub Actions.
 
-| Platform | Portable | Installer/package |
-| --- | --- | --- |
-| Windows x64 / ARM64 | `VISOR-*-windows-*-portable.exe` | `VISOR-*-windows-*-setup.exe` |
-| macOS Intel / Apple Silicon | `VISOR-*-macos-*-portable.app.zip` | `VISOR-*-macos-*.dmg` |
-| Linux x64 / ARM64 | `VISOR-*-linux-*-portable.AppImage` | `VISOR-*-linux-*.deb` |
+| Platform | Portable | Installer/package | Status |
+| --- | --- | --- | --- |
+| Windows x64 | [Portable `.exe`](https://github.com/Benz-On/visor/releases/download/v0.6.0-beta.2/VISOR-0.6.0-beta.2-windows-x64-portable.exe) | [NSIS setup](https://github.com/Benz-On/visor/releases/download/v0.6.0-beta.2/VISOR-0.6.0-beta.2-windows-x64-setup.exe) | Published beta |
+| Windows ARM64 | `VISOR-*-windows-arm64-portable.exe` | `VISOR-*-windows-arm64-setup.exe` | Not published yet |
+| macOS Intel / Apple Silicon | `VISOR-*-macos-*-portable.app.zip` | `VISOR-*-macos-*.dmg` | Not published yet |
+| Linux x64 / ARM64 | `VISOR-*-linux-*-portable.AppImage` | `VISOR-*-linux-*.deb` | Not published yet |
 
 Windows and macOS prerelease artifacts are not yet production-signed. Windows
 may show an unknown-publisher warning. On macOS, use Control-click → Open for
