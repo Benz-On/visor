@@ -68,7 +68,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Check out release tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ env.RELEASE_TAG }}
           persist-credentials: false
@@ -158,7 +158,7 @@ jobs:
       contents: write
     steps:
       - name: Check out release metadata
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ env.RELEASE_TAG }}
           persist-credentials: false
