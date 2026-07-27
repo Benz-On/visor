@@ -1,15 +1,32 @@
 {
   "name": "visor-system-monitor",
   "private": true,
-  "version": "0.5.0-beta.1",
+  "version": "0.6.0-beta.1",
+  "description": "Premium local-first system and AI workload monitor for Windows, macOS, and Linux",
+  "author": "Benz Engineering",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Benz-On/visor.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Benz-On/visor/issues"
+  },
+  "homepage": "https://github.com/Benz-On/visor#readme",
+  "engines": {
+    "node": ">=20"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "agent": "node agent/server.mjs",
     "desktop": "tauri dev",
-    "desktop:build": "tauri build",
+    "desktop:build": "tauri build --no-bundle",
     "desktop:build:debug": "tauri build --debug --no-bundle",
+    "bundle:windows": "tauri build --bundles nsis",
+    "bundle:macos": "tauri build --bundles app,dmg",
+    "bundle:linux": "tauri build --bundles appimage,deb",
     "release:windows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1",
+    "smoke:windows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-windows-portable.ps1",
     "test:agent": "node --test tests/*.test.mjs",
     "build": "tsc -b && vite build",
     "lint": "eslint .",

@@ -1,0 +1,195 @@
+name: Publish desktop release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to build, for example v0.6.0-beta.1
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Windows x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            platform: windows
+            arch: x64
+            bundles: nsis
+          - label: Windows ARM64
+            os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            platform: windows
+            arch: arm64
+            bundles: nsis
+          - label: macOS Intel
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+            platform: macos
+            arch: x64
+            bundles: app,dmg
+          - label: macOS Apple Silicon
+            os: macos-14
+            target: aarch64-apple-darwin
+            platform: macos
+            arch: arm64
+            bundles: app,dmg
+          - label: Linux x64
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            platform: linux
+            arch: x64
+            bundles: appimage,deb
+          - label: Linux ARM64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            platform: linux
+            arch: arm64
+            bundles: appimage,deb
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Rust target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Verify release versions
+        run: node scripts/check-release-version.mjs "${{ env.RELEASE_TAG }}"
+
+      - name: Build native bundles
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && '-' || '' }}
+        run: npm exec tauri build -- --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --ci
+
+      - name: Collect Windows assets
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $version = (Get-Content -Raw package.json | ConvertFrom-Json).version
+          $root = "src-tauri/target/${{ matrix.target }}/release"
+          New-Item -ItemType Directory -Force release-assets | Out-Null
+          Copy-Item "$root/visor.exe" "release-assets/VISOR-$version-windows-${{ matrix.arch }}-portable.exe"
+          $setup = Get-ChildItem "$root/bundle/nsis" -Filter '*setup.exe' | Select-Object -First 1
+          if (-not $setup) { throw 'NSIS installer was not generated.' }
+          Copy-Item $setup.FullName "release-assets/VISOR-$version-windows-${{ matrix.arch }}-setup.exe"
+
+      - name: Collect macOS assets
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./package.json').version")
+          root="src-tauri/target/${{ matrix.target }}/release/bundle"
+          app=$(find "$root/macos" -maxdepth 1 -type d -name '*.app' -print -quit)
+          dmg=$(find "$root/dmg" -maxdepth 1 -type f -name '*.dmg' -print -quit)
+          test -n "$app" && test -n "$dmg"
+          mkdir -p release-assets
+          ditto -c -k --sequesterRsrc --keepParent "$app" "release-assets/VISOR-$version-macos-${{ matrix.arch }}-portable.app.zip"
+          cp "$dmg" "release-assets/VISOR-$version-macos-${{ matrix.arch }}.dmg"
+
+      - name: Collect Linux assets
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./package.json').version")
+          root="src-tauri/target/${{ matrix.target }}/release/bundle"
+          appimage=$(find "$root/appimage" -maxdepth 1 -type f -name '*.AppImage' -print -quit)
+          deb=$(find "$root/deb" -maxdepth 1 -type f -name '*.deb' -print -quit)
+          test -n "$appimage" && test -n "$deb"
+          mkdir -p release-assets
+          cp "$appimage" "release-assets/VISOR-$version-linux-${{ matrix.arch }}-portable.AppImage"
+          cp "$deb" "release-assets/VISOR-$version-linux-${{ matrix.arch }}.deb"
+
+      - name: Upload platform assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: visor-${{ matrix.platform }}-${{ matrix.arch }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Check out release metadata
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Download all platform assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: visor-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create checksums and release manifest
+        run: node scripts/create-release-manifest.mjs release-assets
+
+      - name: Publish assets on GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${RELEASE_TAG}"
+          version="${tag#v}"
+          prerelease=()
+          if [[ "$version" == *-* ]]; then prerelease+=(--prerelease); fi
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" release-assets/* --clobber
+          else
+            gh release create "$tag" release-assets/* --verify-tag --title "VISOR $version" --generate-notes "${prerelease[@]}"
+          fi

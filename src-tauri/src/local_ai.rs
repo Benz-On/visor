@@ -674,14 +674,31 @@ static FILE_INVENTORY: OnceLock<Mutex<FileInventory>> = OnceLock::new();
 
 fn candidate_model_roots() -> Vec<(PathBuf, String)> {
     let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
         .map(PathBuf::from)
         .unwrap_or_default();
-    let app_data = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join("AppData").join("Roaming"));
-    let local_app_data = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join("AppData").join("Local"));
+    let app_data = if cfg!(windows) {
+        std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join("AppData").join("Roaming"))
+    } else if cfg!(target_os = "macos") {
+        home.join("Library").join("Application Support")
+    } else {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".config"))
+    };
+    let local_app_data = if cfg!(windows) {
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join("AppData").join("Local"))
+    } else if cfg!(target_os = "macos") {
+        home.join("Library").join("Application Support")
+    } else {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".local").join("share"))
+    };
     let mut roots = vec![
         (
             home.join(".lmstudio").join("models"),
@@ -698,6 +715,10 @@ fn candidate_model_roots() -> Vec<(PathBuf, String)> {
         (
             home.join(".cache").join("llama.cpp"),
             "llama.cpp".to_string(),
+        ),
+        (
+            app_data.join("LM Studio").join("models"),
+            "LM Studio".to_string(),
         ),
         (
             home.join("Documents").join("GPT4All"),

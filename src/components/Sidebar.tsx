@@ -78,7 +78,7 @@ export function Sidebar({ active, collapsed, onNavigate, onCollapse, connection,
         <div className="collector-status">
           <span className="collector-pulse" />
           <div>
-            <strong>{connection === 'live' ? (collectorSource === 'tauri-native' ? 'Native collector' : 'Windows agent') : connection === 'connecting' ? 'Connecting…' : 'Demo fallback'}</strong>
+            <strong>{connection === 'live' ? (collectorSource === 'tauri-native' ? 'Native collector' : 'Development agent') : connection === 'connecting' ? 'Connecting…' : 'Demo fallback'}</strong>
             <span>{connection === 'live' ? (collectorSource === 'tauri-native' ? 'embedded · local · 1 sec' : 'loopback · local · 1 sec') : 'simulated telemetry'}</span>
           </div>
         </div>

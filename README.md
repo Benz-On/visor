@@ -1,202 +1,183 @@
 # VISOR
 
-Current version: **0.5.0-beta.1**
+[![CI](https://github.com/Benz-On/visor/actions/workflows/ci.yml/badge.svg)](https://github.com/Benz-On/visor/actions/workflows/ci.yml)
+[![Desktop releases](https://github.com/Benz-On/visor/actions/workflows/release.yml/badge.svg)](https://github.com/Benz-On/visor/actions/workflows/release.yml)
+[![Latest release](https://img.shields.io/github/v/release/Benz-On/visor?include_prereleases)](https://github.com/Benz-On/visor/releases)
 
-VISOR is a premium, local-first Windows system monitor for demanding
-workstations, AI workloads, games, and creative tools. It combines a calm,
-high-density interface with a local Windows agent that reads the machine and
-performs explicitly confirmed process actions.
+Current version: **0.6.0-beta.1**
 
-## What is working now
+VISOR is a premium, local-first system monitor for Windows, macOS, and Linux.
+It combines high-density live telemetry, process control, energy modeling, and
+local AI workload intelligence in a calm desktop interface.
 
-- Real-time CPU, GPU, RAM, VRAM, disk, network, thermal, and hardware telemetry
-- NVIDIA power, temperature, clocks, utilization, and VRAM through vendor telemetry
-- Full process explorer with live CPU, GPU, memory, VRAM, handles, and threads
-- Confirmed process termination plus efficiency and high-priority controls
-- Protected Windows critical-process denylist and PID confirmation on destructive actions
-- Energy Lens with live whole-PC watts, component model, session energy, cost,
-  carbon projection, confidence score, and per-process energy fingerprints
-- Installed and loaded local-model inventory through Ollama, LM Studio,
-  llama.cpp, Jan, ComfyUI, GGUF/GGML folders, and Transformers weight folders
-- Hardware-fit advisor with conservative memory and generation-speed ranges;
-  embedding workloads are identified separately from generative LLMs
-- Live AI-service attribution for Codex, ChatGPT, Claude Code, Kimi Code,
-  Copilot, Ollama, LM Studio, Jan, GPT4All, llama.cpp, and related runtimes
-- Model evidence including source, confidence, quantization, parameter count,
-  context capacity, RAM/VRAM allocation, consumer PID, and application power
-- Stateful sustained-load and thermal alert policies running inside the agent
-- Game-aware CPU/GPU load suppression while thermal and VRAM protection stay active
-- Self-hosted Geist and Geist Mono typography with tabular, legible live numbers
-- Four persistent, legible themes: Studio, Porcelain, Cyberdeck, and Retro Terminal
-- Dedicated overview, performance, AI workload, history, alerts, and settings views
-- 1.1 second live refresh, pause/resume, and command palette
-- Responsive desktop, compact, and mobile layouts
-- Local-only API bound to `127.0.0.1`; no telemetry leaves the device
-- Native Tauri desktop runtime with an embedded Rust collector and no Node.js
-  requirement for the compiled application
+> VISOR is beta software. Windows x64 currently has the deepest sensor coverage.
+> macOS, Linux, and ARM64 packages are public previews with honest capability
+> labels when a hardware or operating-system sensor is unavailable.
 
-When the local agent is unavailable, VISOR makes the fallback demo state
-explicit instead of presenting simulated values as real telemetry.
+## Download
 
-## Run locally
+Download published builds from the [GitHub Releases page](https://github.com/Benz-On/visor/releases).
+Every release includes `SHA256SUMS.txt` and `release-manifest.json`.
 
-Requirements: Windows and Node.js 20 or newer.
+| Platform | Portable | Installer/package |
+| --- | --- | --- |
+| Windows x64 / ARM64 | `VISOR-*-windows-*-portable.exe` | `VISOR-*-windows-*-setup.exe` |
+| macOS Intel / Apple Silicon | `VISOR-*-macos-*-portable.app.zip` | `VISOR-*-macos-*.dmg` |
+| Linux x64 / ARM64 | `VISOR-*-linux-*-portable.AppImage` | `VISOR-*-linux-*.deb` |
 
-Install once:
+Windows and macOS prerelease artifacts are not yet production-signed. Windows
+may show an unknown-publisher warning. On macOS, use Control-click → Open for
+the first launch of an unnotarized preview. Linux AppImages may need:
 
-```powershell
-npm.cmd install
+```bash
+chmod +x VISOR-*-portable.AppImage
 ```
 
-Start the local Windows agent in an **Administrator PowerShell** when you want
-to control processes owned by other users or by elevated applications:
+See [platform support](docs/PLATFORMS.md) for detailed coverage and limitations.
 
-```powershell
-npm.cmd run agent
+## Features
+
+- Live CPU, RAM, disk, network, process, and hardware telemetry
+- GPU utilization, temperature, power, clocks, and VRAM when vendor telemetry is available
+- Process explorer with termination and priority controls protected by PID confirmation
+- Energy Lens with component estimates, session energy, cost, carbon, and confidence
+- Sustained-load, thermal, and VRAM alerts with game-aware suppression
+- Installed and loaded model inventory for Ollama, LM Studio, llama.cpp, Jan,
+  ComfyUI, GGUF/GGML, Safetensors, ONNX, and PyTorch weight folders
+- Hardware-fit advisor with reserved-memory modeling and conservative tok/s ranges
+- Live local footprint for Codex, ChatGPT, Claude Code, Kimi Code, Copilot,
+  Ollama, LM Studio, Jan, GPT4All, llama.cpp, and related runtimes
+- Self-hosted Geist and Geist Mono typography with four persistent themes
+- Local native Tauri IPC; no external telemetry or analytics
+
+For cloud AI clients, VISOR reports only the CPU, GPU, RAM, VRAM, and modeled
+power consumed by their local processes. It cannot measure remote datacenter use.
+
+## Platform support
+
+| Capability | Windows | macOS | Linux |
+| --- | --- | --- | --- |
+| CPU, RAM, processes, disk, network | Beta | Preview | Preview |
+| Process termination | Yes | Yes | Yes |
+| Process priority | Yes | Yes, permission-dependent | Yes, permission-dependent |
+| NVIDIA system telemetry | Yes | Not applicable | Yes when `nvidia-smi` is available |
+| Per-process GPU attribution | Windows counters | Limited | Limited |
+| CPU / storage temperatures | WMI/provider-dependent | Limited | Limited |
+| Local runtime API probes | Yes | Yes | Yes |
+| Known local model folders | Yes | Yes | Yes |
+
+Missing sensors are displayed as unavailable. VISOR never replaces absent native
+telemetry with fabricated values.
+
+## Run from source
+
+Requirements:
+
+- Node.js 20 or newer
+- Rust stable
+- Platform prerequisites from the [Tauri documentation](https://v2.tauri.app/start/prerequisites/)
+
+```bash
+npm install
+npm run desktop
 ```
 
-In a second PowerShell window, start the interface:
+The compiled application embeds the Rust collector. The optional Node agent is
+only a browser-development fallback and currently targets Windows:
 
-```powershell
-npm.cmd run dev
+```bash
+npm run agent
+npm run dev
 ```
 
-Open [http://localhost:1420](http://localhost:1420).
+Open <http://localhost:1420>.
 
-## Run the native desktop beta
+## Build locally
 
-Requirements: Windows 10/11, Rust stable with the MSVC target, Visual Studio
-2022 Build Tools with the C++ workload, Node.js 20 or newer, and WebView2.
+Compile only the native executable for the current platform:
 
-```powershell
-npm.cmd install
-npm.cmd run desktop
+```bash
+npm run desktop:build
 ```
 
-The desktop runtime invokes the embedded Rust collector directly. The legacy
-loopback agent remains available for browser development, but it is not needed
-by the compiled desktop executable.
+Create platform bundles:
 
-Build a native executable without an installer:
-
-```powershell
-npm.cmd run desktop:build:debug
+```bash
+npm run bundle:windows
+npm run bundle:macos
+npm run bundle:linux
 ```
 
-The executable is written to `src-tauri/target/debug/visor.exe`.
-
-## Build Windows release artifacts
-
-The audited Windows pipeline produces both supported delivery modes:
+Only run the command matching the host operating system. Windows also retains
+the audited local release command:
 
 ```powershell
 npm.cmd run release:windows
+npm.cmd run smoke:windows
 ```
-
-Outputs are written to the ignored `artifacts/` directory:
-
-- `VISOR-<version>-windows-x64-portable.exe`
-- `VISOR-<version>-windows-x64-setup.exe`
-- `release-manifest.json`
-- `SHA256SUMS.txt`
-
-The installer carries the Microsoft WebView2 bootstrapper. The portable build
-uses the WebView2 runtime already distributed with supported Windows 10/11
-systems. Alpha and beta artifacts are currently unsigned and Windows will show
-the corresponding publisher warning until production code signing is enabled.
-
-The current beta targets Windows 10/11 x64. See [docs/BETA.md](docs/BETA.md)
-for the tested delivery matrix, known limits, and release acceptance criteria.
 
 ## Validate
 
-```powershell
-npm.cmd run lint
-npm.cmd run build
-npm.cmd run test:agent
-cargo test --manifest-path src-tauri/Cargo.toml
+```bash
+npm run lint
+npm run build
+npm run test:agent
+cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+cargo test --manifest-path src-tauri/Cargo.toml --locked
 ```
 
-The production web bundle is written to `dist/`.
+GitHub CI repeats native tests on Windows, macOS, and Linux. Version tags matching
+`v*` trigger six platform builds and publish their assets on one GitHub Release.
+See the [changelog](CHANGELOG.md) and [release documentation](docs/RELEASING.md).
 
 ## Local AI evidence
 
-VISOR probes loopback-only runtime APIs and joins their model evidence with the
-Windows process tree and GPU counters. An exact model name is only shown when a
-runtime reports it. A process-only detection is labeled as such.
+VISOR probes loopback-only runtime APIs and joins model evidence with the local
+process tree. An exact model name is shown only when a runtime reports it.
 
-- Ollama: installed models from `/api/tags` and active models from `/api/ps`
+- Ollama: installed models from `/api/tags`, active models from `/api/ps`
 - LM Studio: installed models and loaded instances from its local API
 - llama.cpp: loaded model metadata from `/props`
-- Jan: models exposed by its local OpenAI-compatible API
+- Jan: models from its local OpenAI-compatible API
 - ComfyUI: model files referenced by the active queue
-- Known local model roots: GGUF, GGML, Safetensors, ONNX, and PyTorch weights;
-  add custom roots with `VISOR_MODEL_PATHS`
+- Known roots: GGUF, GGML, Safetensors, ONNX, and PyTorch weights
+- Custom roots: use the platform path separator in `VISOR_MODEL_PATHS`
 
-The hardware advisor reserves memory for Windows and the runtime before deciding
-whether a model fits in VRAM, split VRAM/RAM, CPU RAM, or is too large. Token
-speed is explicitly presented as an engineering range, not a measured benchmark.
-
-Runtime probes have short timeouts and never leave `127.0.0.1`.
-
-## Thermal sensor coverage
-
-NVIDIA temperature is read through vendor telemetry. CPU and storage
-temperatures are read when Windows exposes Storage Reliability counters or when
-LibreHardwareMonitor/OpenHardwareMonitor publishes temperature sensors through
-its WMI namespace. If this PC exposes neither source, VISOR displays
-`Unavailable`; it never fabricates a temperature.
-
-## Smart alert policy
-
-The Windows agent tracks condition duration rather than notifying on short
-spikes. Defaults include sustained CPU/GPU load, CPU/GPU/SSD temperature, VRAM
-pressure, resolution history, and progress toward each alert threshold. When an
-active game process is detected, only sustained CPU/GPU load alerts are muted.
-Temperature and VRAM policies remain armed.
+The hardware advisor reserves operating-system and runtime memory before deciding
+whether a model fits in VRAM, split VRAM/RAM, CPU RAM, or is too large. Tok/s is
+an engineering range until a real benchmark is run. Embedding models are not
+misrepresented as text-generation models.
 
 ## Energy methodology
 
-VISOR does not claim false measurement precision. With a compatible NVIDIA GPU,
-GPU watts are measured by vendor telemetry while CPU, memory, storage, platform,
-and conversion losses are estimated from live utilization and detected hardware
-limits. The interface labels this as a **hybrid estimate** and exposes its
-confidence and methodology. Without a measured GPU power sensor, the entire
-figure is labeled **estimated**.
+VISOR does not claim false measurement precision. Compatible vendor telemetry is
+used when available; CPU, memory, storage, platform, conversion loss, and process
+shares remain labeled estimates. The interface exposes the method and confidence.
 
-Cost and carbon projections use configurable assumptions. Defaults are
-`0.25 EUR/kWh` and `56 gCO2e/kWh`; override them before starting the agent with
-`VISOR_TARIFF_EUR_KWH` and `VISOR_CARBON_G_KWH`.
+Default projections are `0.25 EUR/kWh` and `56 gCO2e/kWh`. The Windows development
+agent accepts `VISOR_TARIFF_EUR_KWH` and `VISOR_CARBON_G_KWH` overrides.
 
-## Security model
+## Privacy and security
 
-- The agent listens only on the IPv4 loopback interface.
-- Mutations accept only known VISOR origins and require an action header.
-- Process termination requires an exact PID confirmation in the request body.
-- Critical Windows processes, PID 0-4, and the agent itself cannot be terminated.
-- Command arguments are passed directly to Windows tools without shell interpolation.
+- Hardware, process, and model data remains on the device.
+- Native builds use Tauri IPC and do not start a telemetry web server.
+- Runtime API probes are loopback-only and time-bounded.
+- Process mutation requires explicit confirmation and blocks critical processes.
+- Command arguments are passed directly to operating-system tools without shell interpolation.
 
-## Native collector architecture
+Read [PRIVACY.md](PRIVACY.md) and [SECURITY.md](SECURITY.md). Please do not report
+security vulnerabilities in public issues.
 
-The Tauri 2 desktop build now embeds a Rust collector while keeping the browser
-agent as a development fallback. Collection remains layered so VISOR stays
-useful when a vendor-specific API is unavailable:
+## Contributing
 
-1. PDH and Windows performance counters for CPU, memory, disk, and network.
-2. DXGI and GPU engine counters for per-process GPU attribution.
-3. NVIDIA NVML first, followed by AMD and Intel adapters, for clocks, VRAM,
-   temperature, fan, power, and engine details.
-4. ETW sessions for high-fidelity process, disk, and network attribution.
-5. Signed Windows notifications and durable alert/history persistence.
+Issues and technical contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md)
+and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) first.
 
-The collector must poll asynchronously, batch updates into one snapshot, retain
-history in a bounded ring buffer, and expose its own CPU/memory overhead in the
-VISOR diagnostics view. No telemetry leaves the device.
+## License status
 
-## Product principles
+An open-source license has not yet been selected. Public visibility alone does
+not grant permission to copy, modify, or redistribute the source. A license must
+be chosen before the repository is presented as open source; see the
+[public-release checklist](docs/PUBLIC_RELEASE_CHECKLIST.md).
 
-- A user should understand system health in five seconds.
-- Every aggregate metric should lead to the processes responsible for it.
-- Missing sensors are shown honestly, never estimated without a label.
-- Alerts remain quiet until they are actionable.
-- VISOR's own monitoring overhead is a first-class metric.
+Third-party components retain their own licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

@@ -7,6 +7,8 @@ mod timed_command;
 use collector::Collector;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+#[cfg(unix)]
+use std::collections::HashSet;
 use std::process::Command;
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
@@ -46,7 +48,7 @@ fn kill_process(
         .and_then(Value::as_bool)
         .unwrap_or(true)
     {
-        return Err("VISOR protects this critical Windows process.".to_string());
+        return Err("VISOR protects this critical system process.".to_string());
     }
     #[cfg(windows)]
     {
@@ -74,10 +76,40 @@ fn kill_process(
         }
         Ok(json!({ "ok": true, "action": "kill", "pid": pid, "name": target.get("name") }))
     }
-    #[cfg(not(windows))]
+    #[cfg(all(not(windows), unix))]
+    {
+        if tree {
+            let mut children = find_descendants(&state, pid)?;
+            children.reverse();
+            for child in children {
+                let _ = timed_command::output(
+                    hidden_command("kill")
+                        .args([if force { "-KILL" } else { "-TERM" }, &child.to_string()]),
+                    None,
+                    Duration::from_secs(3),
+                );
+            }
+        }
+        let output = timed_command::output(
+            hidden_command("kill").args([if force { "-KILL" } else { "-TERM" }, &pid.to_string()]),
+            None,
+            Duration::from_secs(5),
+        )
+        .map_err(|error| error.to_string())?;
+        if !output.status.success() {
+            let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(if message.is_empty() {
+                "The operating system refused to terminate the process.".to_string()
+            } else {
+                message
+            });
+        }
+        Ok(json!({ "ok": true, "action": "kill", "pid": pid, "name": target.get("name") }))
+    }
+    #[cfg(not(any(windows, unix)))]
     {
         let _ = (tree, force, target);
-        Err("Process termination is not available on this platform build.".to_string())
+        Err("Process termination is not available on this platform.".to_string())
     }
 }
 
@@ -93,18 +125,19 @@ fn set_process_priority(
         .and_then(Value::as_bool)
         .unwrap_or(true)
     {
-        return Err("VISOR protects this critical Windows process.".to_string());
+        return Err("VISOR protects this critical system process.".to_string());
     }
-    let windows_class = match priority.as_str() {
-        "low" => "Idle",
-        "belowNormal" => "BelowNormal",
-        "normal" => "Normal",
-        "aboveNormal" => "AboveNormal",
-        "high" => "High",
+    let (windows_class, unix_nice) = match priority.as_str() {
+        "low" => ("Idle", "10"),
+        "belowNormal" => ("BelowNormal", "5"),
+        "normal" => ("Normal", "0"),
+        "aboveNormal" => ("AboveNormal", "-5"),
+        "high" => ("High", "-10"),
         _ => return Err("Unsupported priority class.".to_string()),
     };
     #[cfg(windows)]
     {
+        let _ = unix_nice;
         let script = "& { param([int]$TargetPid,[string]$Class) $p = Get-Process -Id $TargetPid -ErrorAction Stop; $p.PriorityClass = $Class }";
         let output = timed_command::output(
             hidden_command("powershell.exe").args([
@@ -136,10 +169,31 @@ fn set_process_priority(
             json!({ "ok": true, "action": "priority", "pid": pid, "name": target.get("name"), "priority": priority }),
         )
     }
-    #[cfg(not(windows))]
+    #[cfg(all(not(windows), unix))]
     {
-        let _ = (windows_class, target);
-        Err("Priority control is not available on this platform build.".to_string())
+        let _ = windows_class;
+        let output = timed_command::output(
+            hidden_command("renice").args([unix_nice, "-p", &pid.to_string()]),
+            None,
+            Duration::from_secs(5),
+        )
+        .map_err(|error| error.to_string())?;
+        if !output.status.success() {
+            let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(if message.is_empty() {
+                "The operating system refused the priority change. Elevated permission may be required.".to_string()
+            } else {
+                message
+            });
+        }
+        Ok(
+            json!({ "ok": true, "action": "priority", "pid": pid, "name": target.get("name"), "priority": priority }),
+        )
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = (windows_class, unix_nice, target);
+        Err("Priority control is not available on this platform.".to_string())
     }
 }
 
@@ -186,6 +240,42 @@ fn find_target(state: &RuntimeState, pid: u32) -> Result<Value, String> {
                 .cloned()
         })
         .ok_or_else(|| "The process is no longer running.".to_string())
+}
+
+#[cfg(unix)]
+fn find_descendants(state: &RuntimeState, root_pid: u32) -> Result<Vec<u32>, String> {
+    let guard = state
+        .latest
+        .read()
+        .map_err(|_| "VISOR telemetry state is unavailable.".to_string())?;
+    let processes = guard
+        .as_ref()
+        .and_then(|snapshot| snapshot.get("processes"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| "VISOR process inventory is unavailable.".to_string())?;
+    let mut descendants = Vec::new();
+    let mut known = HashSet::from([root_pid]);
+    loop {
+        let mut added = false;
+        for process in processes {
+            let id = process
+                .get("id")
+                .and_then(Value::as_u64)
+                .unwrap_or_default() as u32;
+            let parent = process
+                .get("parentId")
+                .and_then(Value::as_u64)
+                .unwrap_or_default() as u32;
+            if id > 4 && known.contains(&parent) && known.insert(id) {
+                descendants.push(id);
+                added = true;
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+    Ok(descendants)
 }
 
 fn start_collector(state: RuntimeState) {

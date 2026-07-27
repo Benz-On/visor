@@ -1,56 +1,48 @@
-# VISOR 0.5 beta
+# VISOR 0.6 beta
 
-VISOR 0.5.0-beta.1 adds the local-model advisor, installed-model inventory,
-per-service AI attribution, and the Geist numeric typography system. It is
-intended for real Windows workstation testing, not only interface preview.
+VISOR 0.6.0-beta.1 introduces the public multi-platform release pipeline and
+native preview packages for Windows, macOS, and Linux on x64 and ARM64.
 
-## Supported delivery
+## Delivery matrix
 
-| Target | Status | Notes |
+| Target | Status | Download |
 | --- | --- | --- |
-| Windows 10/11 x64 portable | Beta | One executable; requires the system WebView2 runtime |
-| Windows 10/11 x64 installer | Beta | Per-user NSIS install; WebView2 bootstrapper included |
-| Windows ARM64 | Roadmap | Native collector and packaging validation required |
-| Linux x64/ARM64 | Roadmap | Platform collectors and process controls required |
-| macOS Intel/Apple silicon | Roadmap | Native sensor entitlements and signing required |
+| Windows 10/11 x64 | Beta | Portable `.exe`, NSIS setup |
+| Windows 11 ARM64 | Preview | Portable `.exe`, NSIS setup |
+| macOS Intel | Preview | Portable `.app.zip`, DMG |
+| macOS Apple Silicon | Preview | Portable `.app.zip`, DMG |
+| Linux x64 | Preview | AppImage, Debian package |
+| Linux ARM64 | Preview | AppImage, Debian package |
 
-Windows x64 is deliberately the first supported beta target. A web shell can
-run elsewhere, but VISOR does not claim cross-platform monitoring until each
-native collector has equivalent coverage and has passed platform QA.
+All assets are built by GitHub Actions on native hosted runners and published
+to one GitHub Release with SHA-256 checksums and a machine-readable manifest.
 
 ## Beta guarantees
 
-- Hardware and process telemetry remains local to the PC.
-- The desktop build uses native Tauri IPC and does not start an HTTP telemetry server.
+- Hardware and process telemetry remains local to the device.
+- Native builds use Tauri IPC and do not start an HTTP telemetry server.
 - Missing sensors are shown as unavailable; VISOR does not substitute demo values.
-- Process termination requires an exact PID confirmation and blocks critical Windows processes.
-- External hardware probes are time-bounded so a stalled vendor tool cannot freeze telemetry forever.
-- The release pipeline runs lint, agent tests, Rust tests, and the production web build.
-- Portable and installer SHA-256 hashes are emitted in `artifacts/SHA256SUMS.txt`.
+- Process termination requires exact PID confirmation and blocks critical processes.
+- Runtime and hardware probes are time-bounded.
+- CI runs frontend tests plus native Rust tests on Windows, macOS, and Linux.
+- Release versions are rejected when package, Cargo, Tauri, and Git tag versions differ.
 
 ## Known limits before stable
 
-- Beta executables are unsigned, so Windows may display an unknown publisher warning.
-- The self-updater is disabled for pre-release artifacts.
-- NVIDIA exposes the richest GPU telemetry. Other vendors may report partial GPU data.
-- CPU and SSD temperature depend on Windows sensor availability or a compatible
-  LibreHardwareMonitor WMI provider; unavailable readings stay clearly labeled.
-- Whole-PC and per-process energy are engineering estimates unless a vendor power
-  sensor reports a measured component value. Confidence and source are displayed.
-- Some protected or elevated processes require VISOR itself to run elevated before
-  Windows permits a control action.
-- Model tok/s values are conservative estimates until a runtime benchmark is run;
-  model architecture, context size, backend, and offload settings affect real speed.
+- Windows and macOS binaries are not yet production-signed or notarized.
+- GPU and thermal telemetry is deepest on Windows with NVIDIA hardware.
+- macOS GPU, VRAM, energy, and thermal sensors currently report partial coverage.
+- Linux per-process GPU attribution and non-NVIDIA adapters remain limited.
+- Priority increases on macOS/Linux may require elevated permission.
+- Whole-device and per-process energy remain labeled engineering estimates unless
+  a compatible vendor power sensor reports measured values.
+- Model tok/s values remain conservative predictions until a local benchmark runs.
 
 ## Release acceptance
 
-A beta artifact is accepted only after:
-
-1. Frontend lint and production build pass.
-2. Windows agent and native Rust tests pass.
-3. Portable executable starts, remains responsive, and reports the expected version.
-4. Installer performs a silent per-user install, installed application smoke test,
-   and silent uninstall on a clean validation environment.
-5. Generated file hashes are recomputed and match the release manifest.
-6. A visual pass covers overview, processes, performance, local AI, themes, alerts,
-   settings, responsive layout, and browser console errors.
+1. Frontend lint, production build, and Node tests pass.
+2. Rust formatting and tests pass on Windows, macOS, and Linux CI.
+3. Each matrix runner produces both expected platform artifacts.
+4. Checksums match the generated release manifest.
+5. A portable build is smoke-tested on each supported operating-system family.
+6. The interface is checked for unavailable-sensor honesty and console errors.

@@ -1,0 +1,29 @@
+name: Feature request
+description: Suggest a focused VISOR improvement
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: Describe the user problem before proposing an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed experience
+    validations:
+      required: true
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Platform scope
+      options: [All platforms, Windows, macOS, Linux, Local AI, Interface only]
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

@@ -310,7 +310,7 @@ impl Collector {
         self.system.processes().iter().map(|(pid, process)| {
             let id = pid.as_u32();
             let raw_name = process.name().to_string_lossy().to_string();
-            let name = if raw_name.contains('.') || ["System", "Registry", "Idle"].contains(&raw_name.as_str()) { raw_name } else { format!("{raw_name}.exe") };
+            let name = if cfg!(windows) && !raw_name.contains('.') && !["System", "Registry", "Idle"].contains(&raw_name.as_str()) { format!("{raw_name}.exe") } else { raw_name };
             let path = process.exe().map(|value| value.to_string_lossy().to_string()).unwrap_or_default();
             let command = process.cmd().iter().map(|value| value.to_string_lossy()).collect::<Vec<_>>().join(" ");
             let haystack = format!("{name} {path} {command}").to_ascii_lowercase();
@@ -326,8 +326,9 @@ impl Collector {
             let protected = is_protected(id, &name);
             json!({
                 "id": id,
+                "parentId": process.parent().map(|value| value.as_u32()).unwrap_or_default(),
                 "name": name,
-                "subtitle": if let Some(value) = kind { value } else if path.is_empty() { "Windows process" } else { "Desktop application" },
+                "subtitle": if let Some(value) = kind { value } else if path.is_empty() { "System process" } else { "Desktop application" },
                 "icon": process.name().to_string_lossy().chars().next().unwrap_or('?').to_ascii_uppercase().to_string(),
                 "color": color(id),
                 "cpu": energy::round(cpu, 1),
@@ -375,10 +376,10 @@ impl Collector {
             })
             .collect();
         json!({
-            "system": { "manufacturer": "", "model": System::host_name().unwrap_or_else(|| "Windows PC".to_string()), "version": "" },
+            "system": { "manufacturer": "", "model": System::host_name().unwrap_or_else(|| "Local computer".to_string()), "version": "" },
             "os": {
                 "platform": std::env::consts::OS,
-                "distro": System::name().unwrap_or_else(|| "Windows".to_string()),
+                "distro": System::name().unwrap_or_else(|| std::env::consts::OS.to_string()),
                 "release": System::os_version().unwrap_or_default(),
                 "build": System::kernel_version().unwrap_or_default(),
                 "arch": std::env::consts::ARCH,
@@ -542,7 +543,12 @@ fn attribute_energy(
 fn read_nvidia() -> Option<GpuInfo> {
     let fields = "name,driver_version,utilization.gpu,memory.total,memory.used,temperature.gpu,power.draw,power.limit";
     let output = timed_command::output(
-        hidden_command("nvidia-smi.exe").args([
+        hidden_command(if cfg!(windows) {
+            "nvidia-smi.exe"
+        } else {
+            "nvidia-smi"
+        })
+        .args([
             format!("--query-gpu={fields}"),
             "--format=csv,noheader,nounits".to_string(),
         ]),
@@ -575,6 +581,7 @@ fn read_nvidia() -> Option<GpuInfo> {
     })
 }
 
+#[cfg(windows)]
 fn read_gpu_processes() -> HashMap<u32, Value> {
     run_powershell_json(GPU_COUNTER_SCRIPT)
         .and_then(|value| value.as_array().cloned())
@@ -588,6 +595,12 @@ fn read_gpu_processes() -> HashMap<u32, Value> {
         .collect()
 }
 
+#[cfg(not(windows))]
+fn read_gpu_processes() -> HashMap<u32, Value> {
+    HashMap::new()
+}
+
+#[cfg(windows)]
 fn run_powershell_json(script: &str) -> Option<Value> {
     let output = timed_command::output(
         hidden_command("powershell.exe").args([
@@ -608,6 +621,11 @@ fn run_powershell_json(script: &str) -> Option<Value> {
     serde_json::from_slice(&output.stdout).ok()
 }
 
+#[cfg(not(windows))]
+fn run_powershell_json(_script: &str) -> Option<Value> {
+    None
+}
+
 fn hidden_command(program: &str) -> Command {
     let mut command = Command::new(program);
     #[cfg(windows)]
@@ -623,7 +641,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn protects_windows_critical_processes() {
+    fn protects_critical_system_processes() {
         assert!(is_protected(4, "System"));
         assert!(is_protected(200, "lsass.exe"));
         assert!(!is_protected(20_000, "notepad.exe"));

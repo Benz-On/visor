@@ -99,7 +99,7 @@ export function useVisorData(paused: boolean) {
     });
     const result = await response.json() as { ok?: boolean; error?: string };
     if (!response.ok || !result.ok) {
-      const message = result.error || 'The Windows action failed.';
+      const message = result.error || 'The operating system action failed.';
       setActionError(message);
       throw new Error(message);
     }

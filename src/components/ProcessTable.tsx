@@ -177,7 +177,7 @@ export function ProcessTable({
           <div className="process-control-energy"><Zap size={15} /><span>Attributed now</span><strong>~{(selectedProcess.energyWatts || 0).toFixed(1)} W</strong></div>
           <div className="process-control-actions">
             {selectedProcess.protected ? (
-              <span className="protected-process"><Shield size={14} /> Windows protected</span>
+              <span className="protected-process"><Shield size={14} /> System protected</span>
             ) : (
               <>
                 <button className="ghost-button" disabled={!live || busy} onClick={() => void changePriority('belowNormal')}>Efficiency mode</button>

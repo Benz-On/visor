@@ -196,7 +196,7 @@ function App() {
           {activeView === 'energy' && <EnergyView energy={visor.snapshot?.energy} processes={visor.processes} agent={visor.snapshot?.agent} />}
           {activeView === 'history' && <HistoryView metrics={metrics} energy={visor.snapshot?.energy} agent={visor.snapshot?.agent} />}
           {activeView === 'alerts' && <AlertsView alerts={visor.snapshot?.alerts} live={visor.connection === 'live'} onToggle={visor.setAlertRule} />}
-          {activeView === 'settings' && <SettingsView theme={theme} setTheme={setTheme} metrics={metrics} agent={visor.snapshot?.agent} source={visor.snapshot?.source} />}
+          {activeView === 'settings' && <SettingsView theme={theme} setTheme={setTheme} metrics={metrics} hardware={visor.snapshot?.hardware} agent={visor.snapshot?.agent} source={visor.snapshot?.source} />}
         </div>
       </main>
 
@@ -392,7 +392,7 @@ function EfficiencyCard({ metrics, energy }: MetricsProps & { energy?: EnergyEst
       </div>
       <div className="score-row"><strong>{score}</strong><span>/ 100</span><em>{rating}</em></div>
       <div className="score-track"><span style={{ width: `${score}%` }} /></div>
-      <p>{energy ? `${energy.confidenceScore}% confidence · ${energy.sessionWh.toFixed(2)} Wh this session` : 'Start the Windows agent for a real-time wall-power estimate.'}</p>
+      <p>{energy ? `${energy.confidenceScore}% confidence · ${energy.sessionWh.toFixed(2)} Wh this session` : 'Start the native collector or development agent for a real-time power estimate.'}</p>
     </article>
   );
 }
@@ -535,7 +535,7 @@ function AIWorkloads({ metrics, localAI, hardware }: MetricsProps & { localAI?: 
           <div><span>Quantization</span><strong>{model?.quantization || 'Not reported'}</strong></div>
           <div><span>Context capacity</span><strong>{model?.contextLength ? `${model.contextLength.toLocaleString()} tokens` : 'Not reported'}</strong></div>
         </div>
-        <div className="inference-chart-head"><div><strong>System GPU activity</strong><span>Live context while this runtime is present — not claimed as token throughput.</span></div><span className="source-chip">{model?.source || 'Windows process counters'}</span></div>
+        <div className="inference-chart-head"><div><strong>System GPU activity</strong><span>Live context while this runtime is present — not claimed as token throughput.</span></div><span className="source-chip">{model?.source || 'Operating system process counters'}</span></div>
         <div className="inference-chart"><LineChart values={metrics.history.gpu} tone="violet" height={180} /></div>
       </section>
       <aside className="ai-side-column">
@@ -640,7 +640,7 @@ function HistoryView({ metrics, energy, agent }: MetricsProps & { energy?: Energ
         <PeakCard label="Peak memory" value={`${peak(metrics.history.ram).toFixed(1)}%`} time="Rolling buffer" icon={<MemoryStick />} />
         <PeakCard label="Energy used" value={energy ? `${energy.sessionWh.toFixed(2)} Wh` : '—'} time="Agent session" icon={<Zap />} />
       </section>
-      <section className="panel session-card"><div><div className="session-icon"><Clock3 /></div><div><p className="eyebrow">CURRENT AGENT SESSION</p><h3>{agent ? `${Math.floor(uptimeMinutes / 60)}h ${uptimeMinutes % 60}m monitored` : 'Windows agent unavailable'}</h3><span>{history.length} live samples in the interface buffer · no fabricated history</span></div></div><span className="source-chip">LOCAL ONLY</span></section>
+      <section className="panel session-card"><div><div className="session-icon"><Clock3 /></div><div><p className="eyebrow">CURRENT COLLECTOR SESSION</p><h3>{agent ? `${Math.floor(uptimeMinutes / 60)}h ${uptimeMinutes % 60}m monitored` : 'Local collector unavailable'}</h3><span>{history.length} live samples in the interface buffer · no fabricated history</span></div></div><span className="source-chip">LOCAL ONLY</span></section>
     </div>
   );
 }
@@ -686,7 +686,8 @@ function AlertsView({ alerts, live, onToggle }: { alerts?: AlertsSnapshot; live:
   );
 }
 
-function SettingsView({ theme, setTheme, metrics, agent, source }: { theme: ThemeId; setTheme: (theme: ThemeId) => void; metrics: MetricsProps['metrics']; agent?: AgentInfo; source?: 'windows-agent' | 'tauri-native' }) {
+function SettingsView({ theme, setTheme, metrics, hardware, agent, source }: { theme: ThemeId; setTheme: (theme: ThemeId) => void; metrics: MetricsProps['metrics']; hardware?: HardwareInfo; agent?: AgentInfo; source?: 'windows-agent' | 'tauri-native' }) {
+  const platform = hardware?.os.platform || 'operating system';
   const themes: Array<{ id: ThemeId; name: string; description: string; icon: React.ReactNode }> = [
     { id: 'studio', name: 'Studio', description: 'Graphite glass, restrained color', icon: <Sparkles size={15} /> },
     { id: 'porcelain', name: 'Porcelain', description: 'Bright, soft and editorial', icon: <Sun size={15} /> },
@@ -696,7 +697,7 @@ function SettingsView({ theme, setTheme, metrics, agent, source }: { theme: Them
   return (
     <div className="settings-grid">
       <section className="panel settings-card appearance-card"><div className="settings-heading"><span><Palette /></span><div><h2>Appearance</h2><p>Four distinct art directions. The information hierarchy and contrast stay consistent.</p></div></div><div className="theme-choices">{themes.map((item) => <button key={item.id} aria-pressed={theme === item.id} className={theme === item.id ? 'active' : ''} onClick={() => setTheme(item.id)}><span className={`theme-preview theme-${item.id}`}><i /><b /><em /></span><strong>{item.icon}{item.name}</strong><small>{item.description}</small></button>)}</div></section>
-      <section className="panel settings-card"><div className="settings-heading"><span><Activity /></span><div><h2>Live data sources</h2><p>VISOR exposes coverage honestly. Missing hardware sensors are never replaced with invented values.</p></div></div><SettingStatus label="Collector runtime" detail="One batched local snapshot every second" value={agent ? (source === 'tauri-native' ? 'NATIVE' : 'LOOPBACK') : 'OFFLINE'} tone={agent ? 'live' : 'off'} /><SettingStatus label="Collector overhead" detail={agent ? `${agent.sampleDurationMs} ms last sample · PID ${agent.pid}` : 'Waiting for collector diagnostics'} value={agent ? `${agent.cpuPercent.toFixed(1)}% · ${agent.memoryMb.toFixed(0)} MB` : 'UNAVAILABLE'} tone={agent ? 'live' : 'off'} /><SettingStatus label="Per-process GPU attribution" detail="Windows GPU engine counters and dedicated memory" value={agent?.gpuAttributionAvailable ? 'AVAILABLE' : 'UNAVAILABLE'} tone={agent?.gpuAttributionAvailable ? 'live' : 'off'} /><SettingStatus label="CPU temperature" detail={metrics.sensorSources?.cpu || 'Install or run a LibreHardwareMonitor WMI source to expose this sensor'} value={metrics.cpuTemp > 0 ? `${Math.round(metrics.cpuTemp)}°C` : 'UNAVAILABLE'} tone={metrics.cpuTemp > 0 ? 'live' : 'off'} /><SettingStatus label="SSD temperature" detail={metrics.storageTemperatures?.[0]?.source || 'Windows Storage Reliability or a hardware monitor is required'} value={(metrics.ssdTemp || 0) > 0 ? `${Math.round(metrics.ssdTemp || 0)}°C` : 'UNAVAILABLE'} tone={(metrics.ssdTemp || 0) > 0 ? 'live' : 'off'} /></section>
+      <section className="panel settings-card"><div className="settings-heading"><span><Activity /></span><div><h2>Live data sources</h2><p>VISOR exposes coverage honestly. Missing hardware sensors are never replaced with invented values.</p></div></div><SettingStatus label="Collector runtime" detail={`One batched ${platform} snapshot every second`} value={agent ? (source === 'tauri-native' ? 'NATIVE' : 'LOOPBACK') : 'OFFLINE'} tone={agent ? 'live' : 'off'} /><SettingStatus label="Collector overhead" detail={agent ? `${agent.sampleDurationMs} ms last sample · PID ${agent.pid}` : 'Waiting for collector diagnostics'} value={agent ? `${agent.cpuPercent.toFixed(1)}% · ${agent.memoryMb.toFixed(0)} MB` : 'UNAVAILABLE'} tone={agent ? 'live' : 'off'} /><SettingStatus label="Per-process GPU attribution" detail={`Vendor and ${platform} GPU counters when available`} value={agent?.gpuAttributionAvailable ? 'AVAILABLE' : 'UNAVAILABLE'} tone={agent?.gpuAttributionAvailable ? 'live' : 'off'} /><SettingStatus label="CPU temperature" detail={metrics.sensorSources?.cpu || 'No compatible native hardware sensor is exposed on this system'} value={metrics.cpuTemp > 0 ? `${Math.round(metrics.cpuTemp)}°C` : 'UNAVAILABLE'} tone={metrics.cpuTemp > 0 ? 'live' : 'off'} /><SettingStatus label="SSD temperature" detail={metrics.storageTemperatures?.[0]?.source || 'No compatible storage temperature sensor is exposed on this system'} value={(metrics.ssdTemp || 0) > 0 ? `${Math.round(metrics.ssdTemp || 0)}°C` : 'UNAVAILABLE'} tone={(metrics.ssdTemp || 0) > 0 ? 'live' : 'off'} /></section>
       <section className="panel settings-card"><div className="settings-heading"><span><ShieldCheck /></span><div><h2>Privacy and trust</h2><p>Telemetry and runtime probes stay on this PC.</p></div></div><SettingStatus label="Network boundary" detail={source === 'tauri-native' ? 'Native IPC; no telemetry HTTP server is started' : 'Browser agent bound to IPv4 loopback only'} value={source === 'tauri-native' ? 'IPC ONLY' : '127.0.0.1'} tone="live" /><SettingStatus label="External telemetry" detail="VISOR sends no hardware or model data to a remote service" value="OFF" tone="live" /></section>
     </div>
   );
