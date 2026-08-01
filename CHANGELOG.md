@@ -3,6 +3,30 @@
 All notable VISOR changes are documented here. Versions follow Semantic
 Versioning while the product remains in beta.
 
+## [0.7.0-beta.1] - 2026-08-01
+
+### Added
+
+- Dedicated Hardware Intelligence view with motherboard, BIOS, CPU socket and
+  cache, GPU adapters, DIMM topology, storage health, network, and display inventory.
+- HWiNFO-style sensor console covering temperature, load, clock, fan, voltage,
+  power, and throughput values with source and evidence labels.
+- Windows memory-manager snapshot with cache, commit, kernel pools, paging
+  activity, and an explicit RAM/process refresh control.
+- Per-process working set, private and virtual memory, handles, threads, disk
+  throughput, uptime, responsiveness, executable path, priority, and task control.
+- Detection for Cursor, Windsurf, Amazon Q Developer, Perplexity, Continue,
+  Cline, and Roo Code plus a 23-provider cloud API signal catalog.
+
+### Changed
+
+- Native collector failures no longer fall back to fabricated demo values.
+- Temperature values retain one-decimal precision and explicit hardware,
+  graphics-driver, firmware-zone, OS-counter, or modeled provenance.
+- Manual refresh now invalidates the native process, RAM, hardware, thermal,
+  GPU, and AI caches for a complete verified resample.
+- Process and critical hardware values use a denser, more legible premium hierarchy.
+
 ## [0.6.0-beta.2] - 2026-07-27
 
 ### Added
@@ -55,6 +79,7 @@ Versioning while the product remains in beta.
 - Premium Geist typography, four themes, thermal emphasis, and sustained-load
   alerts with gaming-aware suppression.
 
+[0.7.0-beta.1]: https://github.com/Benz-On/visor/compare/v0.6.0-beta.2...v0.7.0-beta.1
 [0.6.0-beta.2]: https://github.com/Benz-On/visor/compare/v0.6.0-beta.1...v0.6.0-beta.2
 [0.6.0-beta.1]: https://github.com/Benz-On/visor/compare/v0.5.0-beta.1...v0.6.0-beta.1
 [0.5.0-beta.1]: https://github.com/Benz-On/visor/releases/tag/v0.5.0-beta.1

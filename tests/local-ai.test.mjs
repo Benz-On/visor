@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildLocalAiSnapshot, detectAiApplication, parseComfyQueuePayload, parseLlamaCppPayload, parseLmStudioPayload, parseOllamaManifest, parseOllamaPayload, parseOllamaTagsPayload } from '../agent/local-ai.mjs';
+import { buildCloudProviderCatalog, buildLocalAiSnapshot, detectAiApplication, parseComfyQueuePayload, parseLlamaCppPayload, parseLmStudioPayload, parseOllamaManifest, parseOllamaPayload, parseOllamaTagsPayload } from '../agent/local-ai.mjs';
 
 test('Ollama adapter keeps the exact model identity and allocation', () => {
   const [model] = parseOllamaPayload({
@@ -83,6 +83,10 @@ test('expanded service catalog separates cloud, hybrid and local execution', () 
     [{ name: 'llamafile.exe', path: 'C:\\Models\\llamafile.exe' }, 'llamafile', 'local'],
     [{ name: 'python.exe', command: 'python -m mlx_lm.server --model qwen' }, 'MLX LM', 'local'],
     [{ name: 'tabby.exe', path: 'C:\\TabbyML\\tabby.exe' }, 'Tabby', 'local'],
+    [{ name: 'cursor.exe', path: 'C:\\Users\\me\\AppData\\Local\\Programs\\Cursor\\Cursor.exe' }, 'Cursor', 'hybrid'],
+    [{ name: 'windsurf.exe', path: 'C:\\Program Files\\Windsurf\\Windsurf.exe' }, 'Windsurf', 'cloud'],
+    [{ name: 'perplexity.exe', path: 'C:\\Program Files\\Perplexity\\Perplexity.exe' }, 'Perplexity', 'cloud'],
+    [{ name: 'node.exe', command: 'node extension.js --extensionDevelopmentPath=continue.continue' }, 'Continue', 'hybrid'],
   ];
   for (const [processData, application, execution] of cases) {
     const detected = detectAiApplication(processData);
@@ -106,6 +110,19 @@ test('service totals expose live resource attribution per AI provider', () => {
   assert.equal(snapshot.serviceCount, 2);
   assert.equal(snapshot.applications.find((item) => item.application === 'Codex').execution, 'cloud');
   assert.equal(snapshot.applications.find((item) => item.application === 'Ollama').energyWatts, 74);
+  assert.equal(snapshot.cloudProviders.length, 23);
+  assert.equal(snapshot.cloudProviders.find((item) => item.id === 'openai').localProcessCount, 1);
+});
+
+test('cloud provider catalog reports credential presence without reading secret values', () => {
+  const catalog = buildCloudProviderCatalog([], { OPENAI_API_KEY: 'must-never-be-returned', GEMINI_API_KEY: '' });
+  const openai = catalog.find((item) => item.id === 'openai');
+  const google = catalog.find((item) => item.id === 'google');
+  assert.equal(openai.detected, true);
+  assert.deepEqual(openai.credentialSignals, ['OPENAI_API_KEY']);
+  assert.equal(JSON.stringify(catalog).includes('must-never-be-returned'), false);
+  assert.equal(google.credentialConfigured, true);
+  assert.equal(openai.billingVisible, false);
 });
 
 test('ComfyUI adapter extracts model files from the active queue', () => {

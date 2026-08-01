@@ -7,6 +7,7 @@ import {
   Check,
   ChevronDown,
   CircleGauge,
+  CircuitBoard,
   Clock3,
   Command,
   Cpu,
@@ -17,10 +18,12 @@ import {
   Leaf,
   Maximize2,
   MemoryStick,
+  Monitor,
   Network,
   Palette,
   Pause,
   Play,
+  RefreshCw,
   Search,
   Server,
   ShieldCheck,
@@ -36,7 +39,7 @@ import { ProcessTable } from './components/ProcessTable';
 import { Sidebar, type ViewId } from './components/Sidebar';
 import { useVisorData } from './hooks/useVisorData';
 import { analyzeLocalModel } from './modelAdvisor';
-import type { AgentInfo, AlertsSnapshot, EnergyEstimate, HardwareInfo, LocalAiSnapshot, LocalModelInfo, MetricKey, MetricTone, ProcessInfo, ThemeId } from './types';
+import type { AgentInfo, AlertsSnapshot, EnergyEstimate, HardwareInfo, LocalAiSnapshot, LocalModelInfo, MetricKey, MetricTone, ProcessInfo, TemperatureReading, ThemeId } from './types';
 
 const themeOrder: ThemeId[] = ['studio', 'porcelain', 'cyber', 'retro'];
 const themeNames: Record<ThemeId, string> = {
@@ -51,6 +54,11 @@ const viewTitles: Record<ViewId, { eyebrow: string; title: string; description: 
     eyebrow: 'SYSTEM OVERVIEW',
     title: 'Your system, clearly understood.',
     description: 'Live hardware, processes and energy in one calm view.',
+  },
+  hardware: {
+    eyebrow: 'HARDWARE INTELLIGENCE',
+    title: 'Every component. Every trustworthy sensor.',
+    description: 'A complete local inventory with live values, provenance and no invented precision.',
   },
   processes: {
     eyebrow: 'PROCESS EXPLORER',
@@ -156,6 +164,9 @@ function App() {
               <span className={paused ? 'paused-dot' : 'live-dot'} />
               {paused ? 'Paused' : 'Live'}
             </div>
+            <button className="icon-button" disabled={visor.refreshing} onClick={() => void visor.refresh()} aria-label="Refresh all system telemetry" title="Refresh processes, RAM, temperatures and AI services now">
+              <RefreshCw className={visor.refreshing ? 'spin' : ''} size={17} />
+            </button>
             <button className="icon-button" onClick={() => setPaused((value) => !value)} aria-label={paused ? 'Resume monitoring' : 'Pause monitoring'}>
               {paused ? <Play size={17} /> : <Pause size={17} />}
             </button>
@@ -171,6 +182,16 @@ function App() {
         </header>
 
         <div className="content-wrap">
+          {(visor.connection === 'error' || visor.connection === 'connecting') && (
+            <section className={`telemetry-banner telemetry-${visor.connection}`} role="status">
+              <ShieldAlert size={19} />
+              <div>
+                <strong>{visor.connection === 'error' ? 'Native telemetry is temporarily unavailable' : 'Connecting to the native collector'}</strong>
+                <span>{visor.connectionError || 'VISOR is waiting for the first verified system snapshot. No simulated values are shown.'}</span>
+              </div>
+              <button className="ghost-button" disabled={visor.refreshing} onClick={() => void visor.refresh()}><RefreshCw className={visor.refreshing ? 'spin' : ''} size={15} /> Retry</button>
+            </section>
+          )}
           <section className="page-heading">
             <div>
               <p className="eyebrow">{title.eyebrow}</p>
@@ -189,10 +210,11 @@ function App() {
             )}
           </section>
 
-          {activeView === 'overview' && <Overview metrics={metrics} energy={visor.snapshot?.energy} hardware={visor.snapshot?.hardware} localAI={visor.snapshot?.localAI} processes={visor.processes} live={visor.connection === 'live'} onKill={visor.killProcess} onPriority={visor.setProcessPriority} />}
-          {activeView === 'processes' && <ProcessExplorer metrics={metrics} processes={visor.processes} counts={visor.snapshot?.processCounts} live={visor.connection === 'live'} onKill={visor.killProcess} onPriority={visor.setProcessPriority} />}
-          {activeView === 'performance' && <Performance metrics={metrics} hardware={visor.snapshot?.hardware} />}
-          {activeView === 'ai' && <AIWorkloads metrics={metrics} localAI={visor.snapshot?.localAI} hardware={visor.snapshot?.hardware} />}
+          {activeView === 'overview' && <Overview metrics={metrics} energy={visor.snapshot?.energy} hardware={visor.snapshot?.hardware} localAI={visor.snapshot?.localAI} processes={visor.processes} live={visor.connection === 'live'} refreshing={visor.refreshing} onRefresh={visor.refresh} onViewProcesses={() => setActiveView('processes')} onKill={visor.killProcess} onPriority={visor.setProcessPriority} />}
+          {activeView === 'hardware' && <HardwareView metrics={metrics} hardware={visor.snapshot?.hardware} refreshing={visor.refreshing} onRefresh={visor.refresh} />}
+          {activeView === 'processes' && <ProcessExplorer metrics={metrics} processes={visor.processes} counts={visor.snapshot?.processCounts} live={visor.connection === 'live'} refreshing={visor.refreshing} onRefresh={visor.refresh} onKill={visor.killProcess} onPriority={visor.setProcessPriority} />}
+          {activeView === 'performance' && <Performance metrics={metrics} hardware={visor.snapshot?.hardware} refreshing={visor.refreshing} onRefresh={visor.refresh} />}
+          {activeView === 'ai' && <AIWorkloads metrics={metrics} localAI={visor.snapshot?.localAI} hardware={visor.snapshot?.hardware} refreshing={visor.refreshing} onRefresh={visor.refresh} />}
           {activeView === 'energy' && <EnergyView energy={visor.snapshot?.energy} processes={visor.processes} agent={visor.snapshot?.agent} />}
           {activeView === 'history' && <HistoryView metrics={metrics} energy={visor.snapshot?.energy} agent={visor.snapshot?.agent} />}
           {activeView === 'alerts' && <AlertsView alerts={visor.snapshot?.alerts} live={visor.connection === 'live'} onToggle={visor.setAlertRule} />}
@@ -209,7 +231,12 @@ interface MetricsProps {
   metrics: ReturnType<typeof useVisorData>['metrics'];
 }
 
-interface ProcessActions {
+interface RefreshControls {
+  refreshing: boolean;
+  onRefresh: () => Promise<unknown>;
+}
+
+interface ProcessActions extends RefreshControls {
   processes: ProcessInfo[];
   live: boolean;
   onKill: (pid: number) => Promise<unknown>;
@@ -220,12 +247,16 @@ interface OverviewProps extends MetricsProps, ProcessActions {
   energy?: EnergyEstimate;
   hardware?: HardwareInfo;
   localAI?: LocalAiSnapshot;
+  onViewProcesses: () => void;
 }
 
 const bytesToGb = (bytes = 0) => bytes / 1024 ** 3;
-const sensorValue = (value: number, suffix: string) => value > 0 ? `${Math.round(value)}${suffix}` : 'Unavailable';
+const formatBytes = (bytes = 0) => bytes >= 1024 ** 3
+  ? `${bytesToGb(bytes).toFixed(2)} GB`
+  : `${(bytes / 1024 ** 2).toFixed(bytes >= 100 * 1024 ** 2 ? 0 : 1)} MB`;
+const sensorValue = (value: number, suffix: string) => value > 0 ? `${value.toFixed(1)}${suffix}` : 'Unavailable';
 
-function Overview({ metrics, energy, hardware, localAI, processes, live, onKill, onPriority }: OverviewProps) {
+function Overview({ metrics, energy, hardware, localAI, processes, live, refreshing, onRefresh, onViewProcesses, onKill, onPriority }: OverviewProps) {
   const memoryUsed = bytesToGb(metrics.memory?.usedBytes);
   const memoryTotal = bytesToGb(metrics.memory?.totalBytes || hardware?.memory.totalBytes);
   const vramUsed = bytesToGb(metrics.gpuMemory?.usedBytes);
@@ -294,7 +325,7 @@ function Overview({ metrics, energy, hardware, localAI, processes, live, onKill,
         />
       </section>
 
-      <ProcessTable processes={processes} live={live} onKillProcess={onKill} onSetPriority={onPriority} />
+      <ProcessTable processes={processes} live={live} refreshing={refreshing} onRefresh={onRefresh} onViewAll={onViewProcesses} onKillProcess={onKill} onSetPriority={onPriority} />
 
       <section className="insight-row">
         <AIInsight processes={processes} localAI={localAI} />
@@ -398,7 +429,8 @@ function EfficiencyCard({ metrics, energy }: MetricsProps & { energy?: EnergyEst
 }
 
 function ThermalCard({ metrics }: MetricsProps) {
-  const sensedTemperatures = [metrics.cpuTemp, metrics.gpuTemp].filter((value) => value > 0);
+  const sensedTemperatures = (metrics.temperatureReadings || []).map((reading) => reading.value).filter((value) => value > 0);
+  if (!sensedTemperatures.length) sensedTemperatures.push(...[metrics.cpuTemp, metrics.gpuTemp, metrics.ssdTemp || 0].filter((value) => value > 0));
   const hottestTemperature = sensedTemperatures.length ? Math.max(...sensedTemperatures) : 0;
   const thermalStatus = !hottestTemperature
     ? 'Sensors unavailable'
@@ -407,10 +439,11 @@ function ThermalCard({ metrics }: MetricsProps) {
       : hottestTemperature >= 80
         ? 'Running warm'
         : 'Within range';
+  const preferredReading = (component: 'CPU' | 'GPU' | 'Storage') => metrics.temperatureReadings?.find((reading) => reading.component === component);
   const thermalReadings = [
-    { label: 'CPU', value: metrics.cpuTemp, source: metrics.sensorSources?.cpu },
-    { label: 'GPU', value: metrics.gpuTemp, source: metrics.sensorSources?.gpu },
-    { label: 'SSD', value: metrics.ssdTemp || 0, source: metrics.storageTemperatures?.[0]?.name },
+    { label: 'CPU', value: preferredReading('CPU')?.value || metrics.cpuTemp, source: preferredReading('CPU')?.source || metrics.sensorSources?.cpu },
+    { label: 'GPU', value: preferredReading('GPU')?.value || metrics.gpuTemp, source: preferredReading('GPU')?.source || metrics.sensorSources?.gpu },
+    { label: 'SSD', value: preferredReading('Storage')?.value || metrics.ssdTemp || 0, source: preferredReading('Storage')?.source || metrics.storageTemperatures?.[0]?.name },
   ];
   return (
     <article className="panel insight-card thermal-card">
@@ -419,13 +452,42 @@ function ThermalCard({ metrics }: MetricsProps) {
         <div><span>THERMALS</span><strong>{thermalStatus}</strong></div>
       </div>
       <div className="thermal-readings">
-        {thermalReadings.map((reading) => <div className={`thermal-sensor ${reading.value <= 0 ? 'sensor-unavailable' : reading.value >= 86 ? 'sensor-hot' : ''}`} key={reading.label}><span>{reading.label}<small>{reading.source || 'Sensor unavailable'}</small></span><strong>{reading.value > 0 ? `${Math.round(reading.value)}°C` : '—'}</strong><i><b style={{ width: `${Math.min(100, reading.value)}%` }} /></i></div>)}
+        {thermalReadings.map((reading) => <div className={`thermal-sensor ${reading.value <= 0 ? 'sensor-unavailable' : reading.value >= 86 ? 'sensor-hot' : ''}`} key={reading.label}><span>{reading.label}<small>{reading.source || 'Sensor unavailable'}</small></span><strong>{reading.value > 0 ? `${reading.value.toFixed(1)}°C` : '—'}</strong><i><b style={{ width: `${Math.min(100, reading.value)}%` }} /></i></div>)}
       </div>
     </article>
   );
 }
 
-function ProcessExplorer({ metrics, processes, counts, live, onKill, onPriority }: MetricsProps & ProcessActions & { counts?: { all: number; running: number } }) {
+function MemoryCommandCenter({ metrics, processes, live, refreshing, onRefresh }: MetricsProps & Pick<ProcessActions, 'processes' | 'live' | 'refreshing' | 'onRefresh'>) {
+  const memory = metrics.memory;
+  const topConsumers = [...processes].sort((a, b) => (b.workingSetBytes || b.memory * 1024 ** 3) - (a.workingSetBytes || a.memory * 1024 ** 3)).slice(0, 5);
+  const commitPercent = memory?.commitLimitBytes ? (memory.committedBytes || 0) / memory.commitLimitBytes * 100 : 0;
+  return (
+    <section className="panel memory-command-center">
+      <div className="panel-header">
+        <div><p className="eyebrow">MEMORY COMMAND CENTER</p><h2>Physical RAM, commit and top consumers</h2></div>
+        <button className="ghost-button refresh-button" disabled={!live || refreshing} onClick={() => void onRefresh()}><RefreshCw className={refreshing ? 'spin' : ''} size={15} />{refreshing ? 'Sampling…' : 'Refresh RAM data'}</button>
+      </div>
+      <div className="memory-command-body">
+        <div className="memory-breakdown">
+          <div><span>In use</span><strong>{formatBytes(memory?.usedBytes)}</strong><small>{metrics.ram.toFixed(1)}% of physical RAM</small></div>
+          <div><span>Available</span><strong>{formatBytes(memory?.availableBytes)}</strong><small>Immediately reusable</small></div>
+          <div><span>Cached</span><strong>{formatBytes(memory?.cachedBytes)}</strong><small>Standby + system cache</small></div>
+          <div><span>Committed</span><strong>{formatBytes(memory?.committedBytes)}</strong><small>{commitPercent.toFixed(1)}% of {formatBytes(memory?.commitLimitBytes)}</small></div>
+          <div><span>Kernel pools</span><strong>{formatBytes((memory?.pagedPoolBytes || 0) + (memory?.nonPagedPoolBytes || 0))}</strong><small>{formatBytes(memory?.nonPagedPoolBytes)} non-paged</small></div>
+          <div><span>Paging activity</span><strong>{(memory?.pagesPerSecond || 0).toFixed(0)} p/s</strong><small>{memory?.source || 'Operating system counters'}</small></div>
+        </div>
+        <div className="memory-consumers">
+          <div className="memory-consumers-head"><span>Process</span><span>Working set</span><span>Private</span></div>
+          {topConsumers.map((process) => <div key={process.id}><span><i style={{ background: process.color }}>{process.icon}</i><strong>{process.name}</strong><small>PID {process.id}</small></span><strong>{formatBytes(process.workingSetBytes || process.memory * 1024 ** 3)}</strong><em>{formatBytes(process.privateBytes)}</em></div>)}
+        </div>
+      </div>
+      <p className="memory-command-note"><Info size={14} /> Refresh requests a new Windows memory and process sample. It does not force working-set purges, which usually reduce performance and make free-RAM numbers misleading.</p>
+    </section>
+  );
+}
+
+function ProcessExplorer({ metrics, processes, counts, live, refreshing, onRefresh, onKill, onPriority }: MetricsProps & ProcessActions & { counts?: { all: number; running: number } }) {
   const totalThreads = processes.reduce((sum, process) => sum + (process.threads || 0), 0);
   const powerHungry = processes.filter((process) => (process.energyWatts || 0) >= 10);
   return (
@@ -436,7 +498,8 @@ function ProcessExplorer({ metrics, processes, counts, live, onKill, onPriority 
         <SummaryItem icon={<MemoryStick />} label="Memory" value={`${bytesToGb(metrics.memory?.usedBytes).toFixed(1)} GB`} detail={`${bytesToGb(metrics.memory?.availableBytes).toFixed(1)} GB available`} />
         <SummaryItem icon={<Zap />} label="Power hungry" value={String(powerHungry.length)} detail={powerHungry[0]?.name || 'None detected'} warning />
       </section>
-      <ProcessTable expanded processes={processes} live={live} onKillProcess={onKill} onSetPriority={onPriority} />
+      <MemoryCommandCenter metrics={metrics} processes={processes} live={live} refreshing={refreshing} onRefresh={onRefresh} />
+      <ProcessTable expanded processes={processes} live={live} refreshing={refreshing} onRefresh={onRefresh} onKillProcess={onKill} onSetPriority={onPriority} />
     </div>
   );
 }
@@ -445,18 +508,133 @@ function SummaryItem({ icon, label, value, detail, warning = false }: { icon: Re
   return <article className="panel summary-item"><span className={warning ? 'summary-warning' : ''}>{icon}</span><div><p>{label}</p><strong>{value}</strong><small>{detail}</small></div></article>;
 }
 
-function Performance({ metrics, hardware }: MetricsProps & { hardware?: HardwareInfo }) {
+const present = (value?: string | number | null) => value === undefined || value === null || value === '' || value === 0 ? 'Unavailable' : String(value);
+const formatLinkSpeed = (bits = 0) => bits > 0 ? bits >= 1_000_000_000 ? `${(bits / 1_000_000_000).toFixed(1)} Gbps` : `${(bits / 1_000_000).toFixed(0)} Mbps` : 'Speed unavailable';
+
+function HardwareFact({ label, value, detail }: { label: string; value?: string | number | null; detail?: string }) {
+  return <div className="hardware-fact"><span>{label}</span><strong>{present(value)}</strong>{detail && <small>{detail}</small>}</div>;
+}
+
+function HardwareView({ metrics, hardware, refreshing, onRefresh }: MetricsProps & { hardware?: HardwareInfo } & RefreshControls) {
+  const [sensorFilter, setSensorFilter] = useState('All');
+  const [sensorQuery, setSensorQuery] = useState('');
+  const sensors = metrics.hardwareSensors || [];
+  const sensorTypes = ['All', ...Array.from(new Set(sensors.map((sensor) => sensor.sensorType))).sort()];
+  const visibleSensors = sensors.filter((sensor) => (sensorFilter === 'All' || sensor.sensorType === sensorFilter) && `${sensor.component} ${sensor.name} ${sensor.source}`.toLowerCase().includes(sensorQuery.toLowerCase())).slice(0, 160);
+  const gpus = hardware?.gpus?.length ? hardware.gpus : hardware?.gpu ? [hardware.gpu] : [];
+  const memoryModules = hardware?.memory.modules || [];
+  const totalStorage = (hardware?.storage || []).reduce((total, disk) => total + disk.sizeBytes, 0);
+  const measuredSensorCount = sensors.filter((sensor) => sensor.accuracy !== 'modeled-estimate').length;
+  return (
+    <div className="hardware-page-grid">
+      <section className="panel hardware-identity-hero">
+        <div className="hardware-machine-mark"><CircuitBoard size={28} /></div>
+        <div><p className="eyebrow">LOCAL HARDWARE PROFILE</p><h2>{hardware?.system.model || 'Waiting for hardware inventory'}</h2><span>{[hardware?.system.manufacturer, hardware?.motherboard?.model, hardware?.os.distro].filter(Boolean).join(' · ') || 'The native collector is building a verified local inventory.'}</span></div>
+        <div className="hardware-coverage"><strong>{measuredSensorCount}</strong><span>live counters</span><small>{hardware?.collectedAt ? `Inventory ${new Date(hardware.collectedAt).toLocaleString()}` : 'Inventory pending'}</small></div>
+        <button className="ghost-button" disabled={refreshing} onClick={() => void onRefresh()}><RefreshCw className={refreshing ? 'spin' : ''} size={15} /> Rescan hardware</button>
+      </section>
+
+      <section className="hardware-summary-grid">
+        <article className="panel hardware-summary-card tone-cyan"><span><Cpu /></span><div><p>Processor</p><strong>{hardware?.cpu.brand || 'Unavailable'}</strong><small>{hardware ? `${hardware.cpu.physicalCores} cores · ${hardware.cpu.cores} threads · ${hardware.cpu.speedMax.toFixed(2)} GHz max` : 'Waiting for inventory'}</small></div><em>{metrics.cpu.toFixed(1)}%</em></article>
+        <article className="panel hardware-summary-card tone-violet"><span><Gauge /></span><div><p>Graphics</p><strong>{hardware?.gpu?.model || gpus[0]?.model || 'Unavailable'}</strong><small>{hardware?.gpu?.vramBytes ? `${bytesToGb(hardware.gpu.vramBytes).toFixed(1)} GB VRAM · driver ${hardware.gpu.driverVersion}` : `${gpus.length} adapter${gpus.length === 1 ? '' : 's'} inventoried`}</small></div><em>{metrics.gpu.toFixed(1)}%</em></article>
+        <article className="panel hardware-summary-card tone-mint"><span><MemoryStick /></span><div><p>Physical memory</p><strong>{formatBytes(hardware?.memory.totalBytes)}</strong><small>{memoryModules.length ? `${memoryModules.length} installed module${memoryModules.length === 1 ? '' : 's'}` : 'Module topology unavailable'}</small></div><em>{metrics.ram.toFixed(1)}%</em></article>
+        <article className="panel hardware-summary-card tone-amber"><span><HardDrive /></span><div><p>Storage</p><strong>{formatBytes(totalStorage)}</strong><small>{hardware?.storage.length || 0} physical drive{hardware?.storage.length === 1 ? '' : 's'}</small></div><em>{(metrics.diskActivity || 0).toFixed(1)}%</em></article>
+      </section>
+
+      <section className="panel hardware-details-card cpu-hardware-card">
+        <div className="panel-header"><div><p className="eyebrow">CPU & PLATFORM</p><h2>{hardware?.cpu.brand || 'Processor details'}</h2></div><span className="hardware-source-chip">SMBIOS + OS</span></div>
+        <div className="hardware-fact-grid">
+          <HardwareFact label="Socket" value={hardware?.cpu.socket} />
+          <HardwareFact label="Physical / logical" value={hardware ? `${hardware.cpu.physicalCores} / ${hardware.cpu.cores}` : null} />
+          <HardwareFact label="Current clock" value={metrics.cpuSpeedGhz ? `${metrics.cpuSpeedGhz.toFixed(2)} GHz` : null} detail={`${hardware?.cpu.speedMax.toFixed(2) || '—'} GHz maximum`} />
+          <HardwareFact label="L2 cache" value={hardware?.cpu.l2CacheBytes ? formatBytes(hardware.cpu.l2CacheBytes) : null} />
+          <HardwareFact label="L3 cache" value={hardware?.cpu.l3CacheBytes ? formatBytes(hardware.cpu.l3CacheBytes) : null} />
+          <HardwareFact label="Virtualization" value={hardware ? hardware.cpu.virtualization ? 'Firmware enabled' : 'Not reported' : null} />
+          <HardwareFact label="Motherboard" value={hardware?.motherboard?.model} detail={hardware?.motherboard?.manufacturer} />
+          <HardwareFact label="BIOS / UEFI" value={hardware?.bios?.version} detail={[hardware?.bios?.vendor, hardware?.bios?.date].filter(Boolean).join(' · ')} />
+        </div>
+      </section>
+
+      <section className="panel hardware-details-card gpu-hardware-card">
+        <div className="panel-header"><div><p className="eyebrow">GRAPHICS ADAPTERS</p><h2>{gpus.length} adapter{gpus.length === 1 ? '' : 's'} detected</h2></div><span className="hardware-source-chip">DRIVER + SMBIOS</span></div>
+        <div className="hardware-device-list">
+          {gpus.map((gpu, index) => <article key={`${gpu.model}-${index}`}><span className="hardware-device-index">GPU {index}</span><div><strong>{gpu.model}</strong><small>{gpu.vendor || 'Vendor unavailable'} · {gpu.status || 'status not reported'}</small></div><HardwareFact label="VRAM" value={gpu.vramBytes ? formatBytes(gpu.vramBytes) : null} /><HardwareFact label="Driver" value={gpu.driverVersion} /><HardwareFact label="Display mode" value={gpu.resolution || gpu.videoMode} detail={gpu.refreshRate ? `${gpu.refreshRate} Hz` : undefined} /></article>)}
+          {!gpus.length && <div className="hardware-empty-row">No graphics inventory is available yet.</div>}
+        </div>
+      </section>
+
+      <section className="panel hardware-details-card memory-hardware-card">
+        <div className="panel-header"><div><p className="eyebrow">MEMORY TOPOLOGY</p><h2>Installed RAM modules</h2></div><span className="hardware-source-chip">SMBIOS</span></div>
+        <div className="memory-module-grid">
+          {memoryModules.map((module, index) => <article key={`${module.slot}-${index}`}><span>DIMM {index + 1}</span><strong>{formatBytes(module.sizeBytes)}</strong><small>{module.type} · {module.clockMhz || module.ratedClockMhz || 0} MHz</small><dl><div><dt>Slot</dt><dd>{present(module.slot || module.bank)}</dd></div><div><dt>Maker</dt><dd>{present(module.manufacturer)}</dd></div><div><dt>Part</dt><dd>{present(module.partNumber)}</dd></div></dl></article>)}
+          {!memoryModules.length && <div className="hardware-empty-row">The operating system did not expose the DIMM topology. Total RAM remains monitored live.</div>}
+        </div>
+      </section>
+
+      <section className="panel hardware-details-card storage-hardware-card">
+        <div className="panel-header"><div><p className="eyebrow">STORAGE HEALTH</p><h2>Physical drives</h2></div><span className="hardware-source-chip">SMART + WINDOWS</span></div>
+        <div className="hardware-device-list storage-device-list">
+          {(hardware?.storage || []).map((disk, index) => <article key={`${disk.name}-${index}`}><span className="hardware-device-index">DISK {index}</span><div><strong>{disk.name}</strong><small>{[disk.busType, disk.type, disk.firmware && `FW ${disk.firmware}`].filter(Boolean).join(' · ')}</small></div><HardwareFact label="Capacity" value={formatBytes(disk.sizeBytes)} /><HardwareFact label="Health" value={disk.smartStatus} /><HardwareFact label="Temperature" value={disk.temperature ? `${disk.temperature.toFixed(1)}°C` : null} detail={disk.temperatureSource || undefined} /></article>)}
+        </div>
+      </section>
+
+      <section className="panel hardware-details-card io-hardware-card">
+        <div className="panel-header"><div><p className="eyebrow">CONNECTIVITY & DISPLAYS</p><h2>Physical I/O inventory</h2></div><span className="hardware-source-chip">LOCAL ONLY</span></div>
+        <div className="io-inventory-grid">
+          <div><h3><Network size={16} /> Network adapters</h3>{(hardware?.networks || []).map((adapter, index) => <article key={`${adapter.name}-${index}`}><strong>{adapter.connection || adapter.name}</strong><span>{adapter.name}</span><small>{formatLinkSpeed(adapter.speedBits)} · {adapter.type || adapter.status}</small></article>)}{!hardware?.networks?.length && <p>No physical network adapter details exposed.</p>}</div>
+          <div><h3><Monitor size={16} /> Connected displays</h3>{(hardware?.displays || []).map((display, index) => <article key={`${display.model}-${index}`}><strong>{display.model}</strong><span>{display.resolution || 'Resolution unavailable'}</span><small>{display.refreshRate ? `${display.refreshRate} Hz` : 'Refresh rate unavailable'}</small></article>)}{!hardware?.displays.length && <p>No display identity exposed by the driver.</p>}</div>
+        </div>
+      </section>
+
+      <section className="panel sensor-console">
+        <div className="panel-header sensor-console-header"><div><p className="eyebrow">LIVE SENSOR CONSOLE</p><h2>Measured counters with source and precision</h2></div><label className="inline-search"><Search size={15} /><input value={sensorQuery} onChange={(event) => setSensorQuery(event.target.value)} placeholder="Find a sensor" aria-label="Find a hardware sensor" /></label></div>
+        <div className="sensor-filter-bar">{sensorTypes.map((type) => <button className={sensorFilter === type ? 'active' : ''} key={type} onClick={() => setSensorFilter(type)}>{type}</button>)}</div>
+        <div className="sensor-table-wrap"><table className="sensor-table"><thead><tr><th>Component / sensor</th><th>Current</th><th>Minimum</th><th>Maximum</th><th>Source</th></tr></thead><tbody>{visibleSensors.map((sensor, index) => <tr key={`${sensor.component}-${sensor.name}-${sensor.sensorType}-${index}`}><td><span>{sensor.component}</span><strong>{sensor.name}</strong><small>{sensor.sensorType}</small></td><td className="sensor-current">{sensor.value.toFixed(sensor.unit === '%' || sensor.unit === '°C' ? 1 : 2)} <small>{sensor.unit}</small></td><td>{sensor.min !== null ? sensor.min.toFixed(1) : '—'}</td><td>{sensor.max !== null ? sensor.max.toFixed(1) : '—'}</td><td><span className={`sensor-source sensor-source-${sensor.accuracy}`}>{sensor.accuracy.replace(/-/g, ' ')}</span><small>{sensor.source}</small></td></tr>)}{!visibleSensors.length && <tr><td colSpan={5} className="hardware-empty-row">No sensor matches this filter. Hardware-monitor-only values appear when the firmware or LibreHardwareMonitor exposes them.</td></tr>}</tbody></table></div>
+        <p className="thermal-trust-note"><ShieldCheck size={14} /> OS counters, graphics-driver readings, hardware-monitor values and modeled estimates keep separate provenance labels.</p>
+      </section>
+    </div>
+  );
+}
+
+function ThermalMatrix({ metrics, refreshing, onRefresh }: MetricsProps & RefreshControls) {
+  const readings = metrics.temperatureReadings?.filter((reading) => reading.value > 0) || [];
+  const fallbackReadings: TemperatureReading[] = [
+    { component: 'CPU' as const, name: 'CPU package', value: metrics.cpuTemp, min: null, max: null, source: metrics.sensorSources?.cpu || 'Hardware monitor', accuracy: 'hardware-monitor' },
+    { component: 'GPU' as const, name: 'GPU core', value: metrics.gpuTemp, min: null, max: null, source: metrics.sensorSources?.gpu || 'Graphics driver', accuracy: 'graphics-driver' },
+    { component: 'Storage' as const, name: metrics.storageTemperatures?.[0]?.name || 'Primary storage', value: metrics.ssdTemp || 0, min: null, max: null, source: metrics.storageTemperatures?.[0]?.source || 'Storage health', accuracy: 'storage-health' },
+  ].filter((reading) => reading.value > 0);
+  const visibleReadings: TemperatureReading[] = readings.length ? readings : fallbackReadings;
+  return (
+    <section className="panel thermal-matrix">
+      <div className="panel-header">
+        <div><p className="eyebrow">THERMAL SENSOR MATRIX</p><h2>Every temperature the hardware actually exposes</h2></div>
+        <div className="thermal-matrix-actions"><span>{visibleReadings.length} verified reading{visibleReadings.length === 1 ? '' : 's'}</span><button className="ghost-button" disabled={refreshing} onClick={() => void onRefresh()}><RefreshCw className={refreshing ? 'spin' : ''} size={15} /> Rescan sensors</button></div>
+      </div>
+      {visibleReadings.length > 0 ? (
+        <div className="thermal-grid">
+          {visibleReadings.map((reading, index) => {
+            const state = reading.value >= 90 ? 'critical' : reading.value >= 80 ? 'warm' : 'normal';
+            return <article className={`temperature-row temperature-${state}`} key={`${reading.component}-${reading.name}-${index}`}><div className="temperature-component"><span>{reading.component}</span><strong>{reading.name}</strong><small>{reading.source || 'Operating system sensor'}</small></div><div className="temperature-value"><strong>{reading.value.toFixed(1)}</strong><span>°C</span></div><div className="temperature-range"><span>Observed range</span><strong>{reading.min !== null ? `${reading.min.toFixed(1)}°` : '—'} / {reading.max !== null ? `${reading.max.toFixed(1)}°` : '—'}</strong></div><em>{reading.accuracy.replace(/-/g, ' ')}</em></article>;
+          })}
+        </div>
+      ) : <div className="thermal-empty"><Thermometer size={24} /><div><strong>No trustworthy temperature sensor is currently exposed</strong><span>{metrics.sensorGuidance || 'VISOR will never substitute an ACPI thermal zone for an exact CPU package temperature.'}</span></div></div>}
+      <p className="thermal-trust-note"><ShieldCheck size={14} /> Values keep their original source and one-decimal precision. Firmware zones are labeled as system sensors, never as exact CPU or SSD temperatures.</p>
+    </section>
+  );
+}
+
+function Performance({ metrics, hardware, refreshing, onRefresh }: MetricsProps & { hardware?: HardwareInfo } & RefreshControls) {
   const memoryUsed = bytesToGb(metrics.memory?.usedBytes);
   const memoryTotal = bytesToGb(metrics.memory?.totalBytes || hardware?.memory.totalBytes);
   const vramUsed = bytesToGb(metrics.gpuMemory?.usedBytes);
   const vramTotal = bytesToGb(metrics.gpuMemory?.totalBytes || hardware?.gpu?.vramBytes);
   const coreCount = hardware?.cpu.physicalCores || hardware?.cpu.cores;
   const cards: Array<{ key: MetricKey | 'network' | 'disk'; label: string; value: string; detail: string; tone: MetricTone; icon: React.ReactNode }> = [
-    { key: 'cpu', label: hardware?.cpu.brand.trim() || 'Processor', value: `${Math.round(metrics.cpu)}%`, detail: `${metrics.cpuSpeedGhz ? `${metrics.cpuSpeedGhz.toFixed(2)} GHz` : 'Clock unavailable'} · ${coreCount ? `${coreCount} cores` : 'Core count unavailable'}`, tone: 'cyan', icon: <Cpu /> },
+    { key: 'cpu', label: hardware?.cpu.brand.trim() || 'Processor', value: `${metrics.cpu.toFixed(1)}%`, detail: `${sensorValue(metrics.cpuTemp, '°C')} · ${metrics.cpuSpeedGhz ? `${metrics.cpuSpeedGhz.toFixed(2)} GHz` : 'Clock unavailable'} · ${coreCount ? `${coreCount} cores` : 'Core count unavailable'}`, tone: 'cyan', icon: <Cpu /> },
     { key: 'gpu', label: hardware?.gpu?.model || 'Graphics', value: `${Math.round(metrics.gpu)}%`, detail: `${sensorValue(metrics.gpuTemp, '°C')} · ${Math.round(metrics.gpuPower)} W`, tone: 'violet', icon: <Gauge /> },
     { key: 'ram', label: 'Memory', value: `${Math.round(metrics.ram)}%`, detail: memoryTotal ? `${memoryUsed.toFixed(1)} / ${memoryTotal.toFixed(1)} GB` : 'Capacity unavailable', tone: 'mint', icon: <MemoryStick /> },
     { key: 'vram', label: 'Video memory', value: `${Math.round(metrics.vram)}%`, detail: vramTotal ? `${vramUsed.toFixed(1)} / ${vramTotal.toFixed(1)} GB` : 'Capacity unavailable', tone: 'amber', icon: <CircleGauge /> },
-    { key: 'disk', label: hardware?.storage[0]?.name || 'Storage', value: `${metrics.diskRead.toFixed(1)} MB/s`, detail: `${metrics.diskWrite.toFixed(1)} MB/s write`, tone: 'rose', icon: <HardDrive /> },
+    { key: 'disk', label: hardware?.storage[0]?.name || 'Storage', value: `${metrics.diskRead.toFixed(1)} MB/s`, detail: `${sensorValue(metrics.ssdTemp || 0, '°C')} · ${metrics.diskWrite.toFixed(1)} MB/s write`, tone: 'rose', icon: <HardDrive /> },
     { key: 'network', label: 'Network', value: `${metrics.download.toFixed(1)} Mbps`, detail: `${metrics.upload.toFixed(1)} Mbps upload`, tone: 'cyan', icon: <Network /> },
   ];
   return (
@@ -468,6 +646,7 @@ function Performance({ metrics, hardware }: MetricsProps & { hardware?: Hardware
           <div className="chart-axis"><span>60 seconds ago</span><span>Now</span></div>
         </article>
       ))}
+      <ThermalMatrix metrics={metrics} refreshing={refreshing} onRefresh={onRefresh} />
     </div>
   );
 }
@@ -486,7 +665,7 @@ const tokenSpeed = (minimum: number | null, maximum: number | null, workload: 'g
   ? 'Embedding model'
   : minimum !== null && maximum !== null ? `${minimum}–${maximum} tok/s` : 'Speed unknown';
 
-function AIWorkloads({ metrics, localAI, hardware }: MetricsProps & { localAI?: LocalAiSnapshot; hardware?: HardwareInfo }) {
+function AIWorkloads({ metrics, localAI, hardware, refreshing, onRefresh }: MetricsProps & { localAI?: LocalAiSnapshot; hardware?: HardwareInfo } & RefreshControls) {
   const preferredModel = localAI?.models.find((item) => item.status === 'active') || localAI?.models.find((item) => item.status === 'loaded') || localAI?.models[0];
   const [selectedModelId, setSelectedModelId] = useState('');
   const model = localAI?.models.find((item) => item.id === selectedModelId) || preferredModel;
@@ -501,6 +680,8 @@ function AIWorkloads({ metrics, localAI, hardware }: MetricsProps & { localAI?: 
   const selectedModelSize = model ? modelSizeParts(model) : null;
   const installedModels = localAI?.models || [];
   const services = localAI?.applications || [];
+  const cloudProviders = localAI?.cloudProviders || [];
+  const detectedProviderCount = cloudProviders.filter((provider) => provider.detected).length;
   return (
     <div className="ai-page-grid">
       <section className="panel ai-model-card">
@@ -560,6 +741,15 @@ function AIWorkloads({ metrics, localAI, hardware }: MetricsProps & { localAI?: 
           {services.length === 0 && <div className="ai-empty-state"><Cloud size={20} /><div><strong>No AI service process detected</strong><span>VISOR watches local runtimes, desktop clients and coding agents without reading prompts.</span></div></div>}
           {services.map((service) => <div className="ai-service-row" key={service.id}><div><span className={`service-mode service-${service.execution || 'unknown'}`}>{service.execution === 'local' ? <Server size={13} /> : <Cloud size={13} />}</span><span><strong>{service.application}</strong><small>{service.provider || service.runtime} · {service.processes.length} process{service.processes.length === 1 ? '' : 'es'}</small></span><em>{service.execution || 'unknown'}</em></div><strong>{service.cpu.toFixed(1)}%</strong><strong>{service.gpu.toFixed(1)}%</strong><strong>{service.memoryGb.toFixed(2)} GB</strong><strong>{service.vramGb.toFixed(2)} GB</strong><strong className="service-power">{service.energyWatts.toFixed(1)} W</strong></div>)}
         </div>
+      </section>
+      <section className="panel ai-provider-card">
+        <div className="panel-header"><div><p className="eyebrow">CLOUD API & CLIENT CHECKER</p><h2>Provider signals visible on this device</h2></div><div className="provider-header-actions"><span>{detectedProviderCount} of {cloudProviders.length} providers detected</span><button className="ghost-button" disabled={refreshing} onClick={() => void onRefresh()}><RefreshCw className={refreshing ? 'spin' : ''} size={15} /> Rescan AI</button></div></div>
+        <div className="provider-privacy-note"><ShieldCheck size={16} /><span>VISOR checks process identity and whether known environment variables exist. Secret values, prompts and network payloads are never read or stored.</span></div>
+        <div className="provider-catalog">
+          {cloudProviders.map((provider) => <article className={provider.detected ? 'provider-detected' : ''} key={provider.id}><div className="provider-identity"><span>{provider.detected ? <Check size={15} /> : <X size={15} />}</span><div><strong>{provider.name}</strong><small>{provider.provider}</small></div></div><div className="provider-signals"><span className={provider.credentialConfigured ? 'signal-positive' : ''}>{provider.credentialConfigured ? 'Credential signal present' : 'No credential signal'}</span><small>{provider.credentialSignals.length ? provider.credentialSignals.join(' · ') : 'No known environment variable found'}</small></div><div className="provider-footprint"><strong>{provider.localProcessCount}</strong><span>local process{provider.localProcessCount === 1 ? '' : 'es'}</span><small>{provider.localProcessCount ? `${provider.cpu.toFixed(1)}% CPU · ${provider.memoryGb.toFixed(2)} GB RAM · ~${provider.energyWatts.toFixed(1)} W` : 'No client footprint'}</small></div><em>Billing unavailable</em></article>)}
+          {cloudProviders.length === 0 && <div className="ai-empty-state"><Cloud size={20} /><div><strong>Provider catalog is waiting for the native collector</strong><span>Refresh after the collector connects to inventory local clients and safe credential-presence signals.</span></div></div>}
+        </div>
+        <p className="advisor-disclaimer">A local credential signal does not prove recent paid usage. Accurate tokens, quotas and cost require a future opt-in, read-only connector for each provider; VISOR does not infer billing from encrypted traffic.</p>
       </section>
     </div>
   );

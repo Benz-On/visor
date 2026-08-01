@@ -2,7 +2,7 @@
 
 [![Latest release](https://img.shields.io/github/v/release/Benz-On/visor?include_prereleases)](https://github.com/Benz-On/visor/releases)
 
-Current version: **0.6.0-beta.2**
+Current version: **0.7.0-beta.1**
 
 VISOR is a premium, local-first system monitor for Windows, macOS, and Linux.
 It combines high-density live telemetry, process control, energy modeling, and
@@ -20,7 +20,7 @@ assets are currently built, tested, and uploaded manually without GitHub Actions
 
 | Platform | Portable | Installer/package | Status |
 | --- | --- | --- | --- |
-| Windows x64 | [Portable `.exe`](https://github.com/Benz-On/visor/releases/download/v0.6.0-beta.2/VISOR-0.6.0-beta.2-windows-x64-portable.exe) | [NSIS setup](https://github.com/Benz-On/visor/releases/download/v0.6.0-beta.2/VISOR-0.6.0-beta.2-windows-x64-setup.exe) | Published beta |
+| Windows x64 | [Portable `.exe`](https://github.com/Benz-On/visor/releases/download/v0.7.0-beta.1/VISOR-0.7.0-beta.1-windows-x64-portable.exe) | [NSIS setup](https://github.com/Benz-On/visor/releases/download/v0.7.0-beta.1/VISOR-0.7.0-beta.1-windows-x64-setup.exe) | Published beta |
 | Windows ARM64 | `VISOR-*-windows-arm64-portable.exe` | `VISOR-*-windows-arm64-setup.exe` | Not published yet |
 | macOS Intel / Apple Silicon | `VISOR-*-macos-*-portable.app.zip` | `VISOR-*-macos-*.dmg` | Not published yet |
 | Linux x64 / ARM64 | `VISOR-*-linux-*-portable.AppImage` | `VISOR-*-linux-*.deb` | Not published yet |
@@ -38,15 +38,23 @@ See [platform support](docs/PLATFORMS.md) for detailed coverage and limitations.
 ## Features
 
 - Live CPU, RAM, disk, network, process, and hardware telemetry
+- HWiNFO-style hardware inventory for motherboard, BIOS, CPU caches/socket,
+  GPU adapters, DIMMs, storage health, physical network adapters, and displays
+- Unified sensor console for temperatures, loads, clocks, fans, voltages,
+  power, and throughput with per-reading source and evidence labels
 - GPU utilization, temperature, power, clocks, and VRAM when vendor telemetry is available
-- Process explorer with termination and priority controls protected by PID confirmation
+- Process explorer with working set, private/virtual RAM, handles, threads,
+  disk throughput, executable path, termination, and priority controls
 - Energy Lens with component estimates, session energy, cost, carbon, and confidence
 - Sustained-load, thermal, and VRAM alerts with game-aware suppression
 - Installed and loaded model inventory for Ollama, LM Studio, llama.cpp, Jan,
   ComfyUI, GGUF/GGML, Safetensors, ONNX, and PyTorch weight folders
 - Hardware-fit advisor with reserved-memory modeling and conservative tok/s ranges
 - Live local footprint for Codex, ChatGPT, Claude Code, Kimi Code, Copilot,
-  Ollama, LM Studio, Jan, GPT4All, llama.cpp, and related runtimes
+  Cursor, Windsurf, Continue, Cline, Roo Code, Ollama, LM Studio, Jan, GPT4All,
+  llama.cpp, and related runtimes
+- Safe credential-presence inventory for 23 major cloud AI providers; secret
+  values are never read and billing remains explicitly unavailable
 - Self-hosted Geist and Geist Mono typography with four persistent themes
 - Local native Tauri IPC; no external telemetry or analytics
 
@@ -63,7 +71,7 @@ tokens, provider charges, or datacenter use. See [AI detection coverage](docs/AI
 | Process priority | Yes | Yes, permission-dependent | Yes, permission-dependent |
 | NVIDIA system telemetry | Yes | Not applicable | Yes when `nvidia-smi` is available |
 | Per-process GPU attribution | Windows counters | Limited | Limited |
-| CPU / storage temperatures | WMI/provider-dependent | Limited | Limited |
+| Hardware inventory and CPU / storage sensors | Deep SMBIOS/WMI coverage; optional LibreHardwareMonitor | Limited | Limited |
 | Local runtime API probes | Yes | Yes | Yes |
 | Known local model folders | Yes | Yes | Yes |
 

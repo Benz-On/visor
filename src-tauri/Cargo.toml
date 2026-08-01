@@ -1,6 +1,6 @@
 [package]
 name = "visor"
-version = "0.6.0-beta.2"
+version = "0.7.0-beta.1"
 description = "VISOR premium local system monitor"
 authors = ["Benz Engineering"]
 edition = "2021"

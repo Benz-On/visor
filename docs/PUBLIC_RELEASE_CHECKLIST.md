@@ -29,9 +29,9 @@ Suggested topics: `system-monitor`, `tauri`, `rust`, `react`, `windows`, `macos`
 
 ## Release readiness
 
-- [ ] Run CI successfully on Windows, macOS, and Linux.
-- [ ] Run `Publish desktop release` for the current tag and verify all twelve
-      platform files plus checksums and manifest.
+- [ ] Restore hosted-runner CI when GitHub Actions quota becomes available.
+- [ ] Build each published target manually on its native host and verify every
+      platform file plus checksums and manifest.
 - [ ] Smoke-test one package per operating system and architecture family.
 - [ ] Configure Windows signing and Apple notarization before declaring stable.
 - [ ] Publish release notes that clearly label preview sensor limitations.
