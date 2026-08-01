@@ -56,8 +56,16 @@ future signed adapter or user-supplied detection rule.
 ## Cloud clients and paid APIs
 
 VISOR recognizes identifiable local processes for Codex, ChatGPT, Claude,
-Claude Code, Kimi Code, GitHub Copilot, Gemini CLI, OpenCode and Aider. For these
+Claude Code, Kimi Code, GitHub Copilot, Gemini CLI, Cursor, Windsurf, Amazon Q
+Developer, Perplexity, Continue, Cline, Roo Code, OpenCode and Aider. For these
 services it reports only resource consumption on the current device.
+
+The provider checker reports local client processes and the **presence only**
+of known environment variables for 23 providers, including OpenAI, Azure OpenAI,
+Anthropic, Gemini, Vertex AI, Mistral, Groq, Cohere, Together, Fireworks,
+OpenRouter, DeepSeek, xAI, Perplexity, Moonshot, GitHub Copilot, Amazon Bedrock,
+Hugging Face, Replicate, Cerebras, SambaNova, Cloudflare Workers AI, and NVIDIA
+NIM. VISOR never returns, logs, or persists the variable values.
 
 VISOR does **not** currently determine whether the account is free or paid, read
 subscription limits, intercept HTTPS traffic, inspect prompts, count remote

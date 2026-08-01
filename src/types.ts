@@ -13,6 +13,9 @@ export interface LiveMetrics {
   gpuTemp: number;
   ssdTemp?: number;
   storageTemperatures?: StorageTemperature[];
+  temperatureReadings?: TemperatureReading[];
+  hardwareSensors?: HardwareSensorReading[];
+  sensorGuidance?: string | null;
   sensorSources?: { cpu: string | null; gpu: string | null; storage: string[] };
   cpuPower: number;
   gpuPower: number;
@@ -28,6 +31,12 @@ export interface LiveMetrics {
     usedBytes: number;
     availableBytes: number;
     cachedBytes: number;
+    committedBytes?: number;
+    commitLimitBytes?: number;
+    pagedPoolBytes?: number;
+    nonPagedPoolBytes?: number;
+    pagesPerSecond?: number;
+    source?: string;
     swapTotalBytes: number;
     swapUsedBytes: number;
   };
@@ -44,8 +53,16 @@ export interface ProcessInfo {
   cpu: number;
   gpu: number;
   memory: number;
+  memoryPercent?: number;
+  workingSetBytes?: number;
+  privateBytes?: number;
+  virtualBytes?: number;
   vram: number;
   disk: number;
+  diskRead?: number;
+  diskWrite?: number;
+  diskReadTotalBytes?: number;
+  diskWriteTotalBytes?: number;
   network: number;
   power: 'Very low' | 'Low' | 'Moderate' | 'High';
   kind?: 'AI' | 'Game' | 'Creative';
@@ -56,10 +73,37 @@ export interface ProcessInfo {
   path?: string;
   handles?: number;
   threads?: number;
+  parentId?: number;
+  command?: string;
+  startedAt?: string | null;
+  uptimeSeconds?: number;
+  responding?: boolean | null;
   gpuEngines?: Record<string, number>;
   aiApplication?: string;
   aiRuntime?: string;
   aiRole?: string;
+}
+
+export interface TemperatureReading {
+  component: 'CPU' | 'GPU' | 'Storage' | 'System' | 'Other';
+  name: string;
+  value: number;
+  min: number | null;
+  max: number | null;
+  source: string;
+  accuracy: 'hardware-monitor' | 'graphics-driver' | 'firmware-zone' | string;
+}
+
+export interface HardwareSensorReading {
+  component: 'CPU' | 'GPU' | 'Memory' | 'Storage' | 'Network' | 'System' | 'Other' | string;
+  name: string;
+  sensorType: 'Temperature' | 'Load' | 'Clock' | 'Fan' | 'Voltage' | 'Current' | 'Power' | 'Energy' | 'Throughput' | 'Data' | string;
+  value: number;
+  min: number | null;
+  max: number | null;
+  unit: string;
+  source: string;
+  accuracy: 'hardware-monitor' | 'graphics-driver' | 'os-counter' | 'modeled-estimate' | string;
 }
 
 export interface StorageTemperature {
@@ -136,6 +180,22 @@ export interface LocalAiSnapshot {
   loadedModelCount: number;
   installedModelCount?: number;
   serviceCount?: number;
+  cloudProviders?: CloudProviderStatus[];
+}
+
+export interface CloudProviderStatus {
+  id: string;
+  name: string;
+  provider: string;
+  detected: boolean;
+  credentialConfigured: boolean;
+  credentialSignals: string[];
+  localProcessCount: number;
+  cpu: number;
+  gpu: number;
+  memoryGb: number;
+  energyWatts: number;
+  billingVisible: false;
 }
 
 export interface ModelCompatibility {
@@ -206,7 +266,10 @@ export interface EnergyEstimate {
 }
 
 export interface HardwareInfo {
+  collectedAt?: string | null;
   system: { manufacturer: string; model: string; version: string };
+  motherboard?: { manufacturer: string; model: string; version: string };
+  bios?: { vendor: string; version: string; date: string; smbiosVersion: string };
   os: { platform: string; distro: string; release: string; build: string; arch: string; hostname: string };
   cpu: {
     manufacturer: string;
@@ -215,6 +278,10 @@ export interface HardwareInfo {
     physicalCores: number;
     speed: number;
     speedMax: number;
+    socket?: string;
+    l2CacheBytes?: number;
+    l3CacheBytes?: number;
+    virtualization?: boolean;
     estimatedTdp: number;
   };
   gpu: null | {
@@ -223,9 +290,16 @@ export interface HardwareInfo {
     vramBytes: number;
     driverVersion: string;
     powerLimit: number;
+    driverDate?: string;
+    videoMode?: string;
+    resolution?: string;
+    refreshRate?: number;
+    status?: string;
   };
-  memory: { totalBytes: number; modules: Array<{ sizeBytes: number; type: string; clockMhz: number }> };
-  storage: Array<{ name: string; type: string; sizeBytes: number; smartStatus: string; temperature?: number; temperatureSource?: string | null }>;
+  gpus?: Array<NonNullable<HardwareInfo['gpu']>>;
+  memory: { totalBytes: number; modules: Array<{ sizeBytes: number; type: string; clockMhz: number; ratedClockMhz?: number; manufacturer?: string; partNumber?: string; bank?: string; slot?: string; formFactor?: number }> };
+  storage: Array<{ name: string; type: string; sizeBytes: number; smartStatus: string; busType?: string; firmware?: string; partitions?: number; temperature?: number; temperatureSource?: string | null }>;
+  networks?: Array<{ name: string; manufacturer: string; type: string; speedBits: number; connection: string; status: string }>;
   displays: Array<{ model: string; main: boolean; resolution: string; refreshRate: number }>;
 }
 

@@ -12,6 +12,9 @@ const GIB: f64 = 1_073_741_824.0;
 const MIB: f64 = 1_048_576.0;
 const SENSOR_SCRIPT: &str = include_str!("../../agent/sensors.ps1");
 const GPU_COUNTER_SCRIPT: &str = include_str!("../../agent/gpu-counters.ps1");
+const PROCESS_SNAPSHOT_SCRIPT: &str = include_str!("../../agent/process-snapshot.ps1");
+const MEMORY_SNAPSHOT_SCRIPT: &str = include_str!("../../agent/memory-snapshot.ps1");
+const HARDWARE_SNAPSHOT_SCRIPT: &str = include_str!("../../agent/hardware-snapshot.ps1");
 
 #[derive(Clone, Default)]
 struct GpuInfo {
@@ -35,11 +38,17 @@ pub struct Collector {
     session_wh: f64,
     gpu: GpuInfo,
     gpu_processes: HashMap<u32, Value>,
+    process_details: HashMap<u32, Value>,
     sensors: Value,
+    memory_details: Value,
+    hardware_details: Value,
     local_ai: Value,
     last_gpu: Option<Instant>,
     last_gpu_processes: Option<Instant>,
+    last_process_details: Option<Instant>,
     last_sensors: Option<Instant>,
+    last_memory_details: Option<Instant>,
+    last_hardware_details: Option<Instant>,
     last_local_ai: Option<Instant>,
 }
 
@@ -55,17 +64,33 @@ impl Collector {
             session_wh: 0.0,
             gpu: GpuInfo::default(),
             gpu_processes: HashMap::new(),
+            process_details: HashMap::new(),
             sensors: json!({ "cpuTemperature": 0, "cpuSource": null, "storage": [], "hardwareMonitorAvailable": false }),
+            memory_details: json!({}),
+            hardware_details: json!({}),
             local_ai: json!({ "scannedAt": null, "adapters": [], "models": [], "applications": [], "activeModelCount": 0, "loadedModelCount": 0 }),
             last_gpu: None,
             last_gpu_processes: None,
+            last_process_details: None,
             last_sensors: None,
+            last_memory_details: None,
+            last_hardware_details: None,
             last_local_ai: None,
         }
     }
 
     pub fn set_alert_rule(&mut self, id: &str, enabled: bool) -> bool {
         self.alert_engine.set_enabled(id, enabled)
+    }
+
+    pub fn force_refresh(&mut self) {
+        self.last_gpu = None;
+        self.last_gpu_processes = None;
+        self.last_process_details = None;
+        self.last_sensors = None;
+        self.last_memory_details = None;
+        self.last_hardware_details = None;
+        self.last_local_ai = None;
     }
 
     pub fn collect(&mut self) -> Value {
@@ -87,11 +112,39 @@ impl Collector {
             self.gpu_processes = read_gpu_processes();
             self.last_gpu_processes = Some(now);
         }
+        if stale(self.last_process_details, now, Duration::from_secs(2)) {
+            if let Some(details) = run_powershell_json(PROCESS_SNAPSHOT_SCRIPT) {
+                self.process_details = details
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|item| {
+                        item.get("pid")
+                            .and_then(Value::as_u64)
+                            .map(|pid| (pid as u32, item))
+                    })
+                    .collect();
+            }
+            self.last_process_details = Some(now);
+        }
         if stale(self.last_sensors, now, Duration::from_secs(12)) {
             if let Some(sensors) = run_powershell_json(SENSOR_SCRIPT) {
                 self.sensors = sensors;
             }
             self.last_sensors = Some(now);
+        }
+        if stale(self.last_memory_details, now, Duration::from_secs(2)) {
+            if let Some(memory) = run_powershell_json(MEMORY_SNAPSHOT_SCRIPT) {
+                self.memory_details = memory;
+            }
+            self.last_memory_details = Some(now);
+        }
+        if stale(self.last_hardware_details, now, Duration::from_secs(300)) {
+            if let Some(hardware) = run_powershell_json(HARDWARE_SNAPSHOT_SCRIPT) {
+                self.hardware_details = hardware;
+            }
+            self.last_hardware_details = Some(now);
         }
 
         let logical_cores = self.system.cpus().len().max(1) as f64;
@@ -124,9 +177,19 @@ impl Collector {
             .max()
             .unwrap_or_default() as f64
             / 1000.0;
-        let memory_total = self.system.total_memory() as f64;
-        let memory_used = self.system.used_memory() as f64;
-        let memory_available = self.system.available_memory() as f64;
+        let native_memory_total = number(&self.memory_details, "totalBytes");
+        let native_memory_available = number(&self.memory_details, "availableBytes");
+        let memory_total = if native_memory_total > 0.0 {
+            native_memory_total
+        } else {
+            self.system.total_memory() as f64
+        };
+        let memory_available = if native_memory_available > 0.0 {
+            native_memory_available
+        } else {
+            self.system.available_memory() as f64
+        };
+        let memory_used = (memory_total - memory_available).max(0.0);
 
         let (received, transmitted) =
             self.networks
@@ -232,6 +295,157 @@ impl Collector {
             .get("storage")
             .cloned()
             .unwrap_or_else(|| json!([]));
+        let mut temperature_readings = self
+            .sensors
+            .get("readings")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if self.gpu.temperature > 0.0 {
+            temperature_readings.push(json!({
+                "component": "GPU",
+                "name": "GPU Core",
+                "value": energy::round(self.gpu.temperature, 1),
+                "min": null,
+                "max": null,
+                "source": "nvidia-smi",
+                "accuracy": "graphics-driver"
+            }));
+        }
+        let mut hardware_sensors = self
+            .sensors
+            .get("sensors")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        hardware_sensors.push(sensor_row(
+            "CPU",
+            "CPU Total",
+            "Load",
+            cpu,
+            "%",
+            "sysinfo",
+            "os-counter",
+        ));
+        hardware_sensors.push(sensor_row(
+            "CPU",
+            "Average clock",
+            "Clock",
+            cpu_speed,
+            "GHz",
+            "sysinfo",
+            "os-counter",
+        ));
+        for (index, load) in core_loads.iter().enumerate() {
+            hardware_sensors.push(sensor_row(
+                "CPU",
+                &format!("Logical CPU {index}"),
+                "Load",
+                *load,
+                "%",
+                "sysinfo",
+                "os-counter",
+            ));
+        }
+        hardware_sensors.push(sensor_row(
+            "Memory",
+            "Physical memory",
+            "Load",
+            if memory_total > 0.0 {
+                memory_used / memory_total * 100.0
+            } else {
+                0.0
+            },
+            "%",
+            "sysinfo",
+            "os-counter",
+        ));
+        hardware_sensors.push(sensor_row(
+            "Storage",
+            "Disk activity",
+            "Load",
+            disk_activity,
+            "%",
+            "sysinfo",
+            "os-counter",
+        ));
+        hardware_sensors.push(sensor_row(
+            "Storage",
+            "Disk read",
+            "Throughput",
+            disk_read,
+            "MB/s",
+            "sysinfo",
+            "os-counter",
+        ));
+        hardware_sensors.push(sensor_row(
+            "Storage",
+            "Disk write",
+            "Throughput",
+            disk_write,
+            "MB/s",
+            "sysinfo",
+            "os-counter",
+        ));
+        hardware_sensors.push(sensor_row(
+            "Network",
+            "Download",
+            "Throughput",
+            download,
+            "Mbps",
+            "sysinfo",
+            "os-counter",
+        ));
+        hardware_sensors.push(sensor_row(
+            "Network",
+            "Upload",
+            "Throughput",
+            upload,
+            "Mbps",
+            "sysinfo",
+            "os-counter",
+        ));
+        if !self.gpu.model.is_empty() {
+            hardware_sensors.push(sensor_row(
+                "GPU",
+                "GPU Core",
+                "Load",
+                self.gpu.utilization,
+                "%",
+                "nvidia-smi",
+                "graphics-driver",
+            ));
+            hardware_sensors.push(sensor_row(
+                "GPU",
+                "GPU memory",
+                "Load",
+                if self.gpu.total_bytes > 0.0 {
+                    self.gpu.used_bytes / self.gpu.total_bytes * 100.0
+                } else {
+                    0.0
+                },
+                "%",
+                "nvidia-smi",
+                "graphics-driver",
+            ));
+            hardware_sensors.push(sensor_row(
+                "GPU",
+                "Board power",
+                "Power",
+                energy_estimate.gpu,
+                "W",
+                if self.gpu.power > 0.0 {
+                    "nvidia-smi"
+                } else {
+                    "VISOR Energy Lens"
+                },
+                if self.gpu.power > 0.0 {
+                    "graphics-driver"
+                } else {
+                    "modeled-estimate"
+                },
+            ));
+        }
         let metrics = json!({
             "cpu": energy::round(cpu, 1),
             "gpu": energy::round(self.gpu.utilization, 1),
@@ -241,6 +455,9 @@ impl Collector {
             "gpuTemp": energy::round(self.gpu.temperature, 1),
             "ssdTemp": energy::round(ssd_temp, 1),
             "storageTemperatures": storage_temperatures,
+            "temperatureReadings": temperature_readings,
+            "hardwareSensors": hardware_sensors,
+            "sensorGuidance": self.sensors.get("cpuSensorGuidance").cloned().unwrap_or(Value::Null),
             "sensorSources": {
                 "cpu": self.sensors.get("cpuSource").cloned().unwrap_or(Value::Null),
                 "gpu": if self.gpu.temperature > 0.0 { json!("nvidia-smi") } else { Value::Null },
@@ -259,7 +476,13 @@ impl Collector {
                 "totalBytes": memory_total,
                 "usedBytes": memory_used,
                 "availableBytes": memory_available,
-                "cachedBytes": 0,
+                "cachedBytes": number(&self.memory_details, "cachedBytes"),
+                "committedBytes": number(&self.memory_details, "committedBytes"),
+                "commitLimitBytes": number(&self.memory_details, "commitLimitBytes"),
+                "pagedPoolBytes": number(&self.memory_details, "pagedPoolBytes"),
+                "nonPagedPoolBytes": number(&self.memory_details, "nonPagedPoolBytes"),
+                "pagesPerSecond": number(&self.memory_details, "pagesPerSecond"),
+                "source": if native_memory_total > 0.0 { self.memory_details.get("source").cloned().unwrap_or_else(|| json!("Windows memory manager")) } else { json!("sysinfo") },
                 "swapTotalBytes": self.system.total_swap(),
                 "swapUsedBytes": self.system.used_swap()
             },
@@ -309,6 +532,7 @@ impl Collector {
     fn build_processes(&self, logical_cores: f64, elapsed: f64) -> Vec<Value> {
         self.system.processes().iter().map(|(pid, process)| {
             let id = pid.as_u32();
+            let details = self.process_details.get(&id);
             let raw_name = process.name().to_string_lossy().to_string();
             let name = if cfg!(windows) && !raw_name.contains('.') && !["System", "Registry", "Idle"].contains(&raw_name.as_str()) { format!("{raw_name}.exe") } else { raw_name };
             let path = process.exe().map(|value| value.to_string_lossy().to_string()).unwrap_or_default();
@@ -318,11 +542,19 @@ impl Collector {
             let gpu = self.gpu_processes.get(&id).and_then(|item| item.get("gpu")).and_then(Value::as_f64).unwrap_or_default().min(100.0);
             let vram_bytes = self.gpu_processes.get(&id).and_then(|item| item.get("dedicatedBytes")).and_then(Value::as_f64).unwrap_or_default();
             let cpu = (process.cpu_usage() as f64 / logical_cores).min(100.0);
-            let memory = process.memory() as f64 / GIB;
-            let disk = {
-                let usage = process.disk_usage();
-                (usage.read_bytes + usage.written_bytes) as f64 / elapsed / MIB
-            };
+            let working_set_bytes = details
+                .map(|item| number(item, "workingSetBytes"))
+                .filter(|value| *value > 0.0)
+                .unwrap_or(process.memory() as f64);
+            let private_bytes = details
+                .map(|item| number(item, "privateBytes"))
+                .unwrap_or_default();
+            let virtual_bytes = process.virtual_memory() as f64;
+            let memory = working_set_bytes / GIB;
+            let usage = process.disk_usage();
+            let disk_read = usage.read_bytes as f64 / elapsed / MIB;
+            let disk_write = usage.written_bytes as f64 / elapsed / MIB;
+            let disk = disk_read + disk_write;
             let protected = is_protected(id, &name);
             json!({
                 "id": id,
@@ -334,19 +566,30 @@ impl Collector {
                 "cpu": energy::round(cpu, 1),
                 "gpu": energy::round(gpu, 1),
                 "memory": energy::round(memory, 2),
+                "memoryPercent": energy::round(if self.system.total_memory() > 0 { working_set_bytes / self.system.total_memory() as f64 * 100.0 } else { 0.0 }, 2),
+                "workingSetBytes": working_set_bytes,
+                "privateBytes": private_bytes,
+                "virtualBytes": virtual_bytes,
                 "vram": energy::round(vram_bytes / GIB, 2),
                 "disk": energy::round(disk, 2),
+                "diskRead": energy::round(disk_read, 2),
+                "diskWrite": energy::round(disk_write, 2),
+                "diskReadTotalBytes": usage.total_read_bytes,
+                "diskWriteTotalBytes": usage.total_written_bytes,
                 "network": 0,
                 "power": "Very low",
                 "kind": kind,
                 "energyWatts": 0,
                 "protected": protected,
-                "priority": 0,
+                "priority": details.map(|item| number(item, "priority") as i64).unwrap_or_default(),
                 "state": format!("{:?}", process.status()),
                 "path": path,
                 "command": command,
-                "handles": 0,
-                "threads": 0,
+                "handles": details.map(|item| number(item, "handles") as u64).unwrap_or_default(),
+                "threads": details.map(|item| number(item, "threads") as u64).unwrap_or_default(),
+                "startedAt": details.and_then(|item| item.get("started")).cloned().unwrap_or(Value::Null),
+                "uptimeSeconds": process.run_time(),
+                "responding": details.and_then(|item| item.get("responding")).and_then(Value::as_bool),
                 "gpuEngines": self.gpu_processes.get(&id).and_then(|item| item.get("engines")).cloned().unwrap_or_else(|| json!({}))
             })
         }).collect()
@@ -360,7 +603,7 @@ impl Collector {
         speed_max: f64,
         tdp: f64,
     ) -> Value {
-        let storage: Vec<Value> = self
+        let fallback_storage = self
             .disks
             .list()
             .iter()
@@ -370,40 +613,120 @@ impl Collector {
                     "type": format!("{:?}", disk.kind()),
                     "sizeBytes": disk.total_space(),
                     "smartStatus": "",
+                    "busType": "",
+                    "firmware": "",
+                    "partitions": 0,
                     "temperature": 0,
                     "temperatureSource": null
                 })
             })
-            .collect();
-        json!({
-            "system": { "manufacturer": "", "model": System::host_name().unwrap_or_else(|| "Local computer".to_string()), "version": "" },
-            "os": {
-                "platform": std::env::consts::OS,
-                "distro": System::name().unwrap_or_else(|| std::env::consts::OS.to_string()),
-                "release": System::os_version().unwrap_or_default(),
-                "build": System::kernel_version().unwrap_or_default(),
-                "arch": std::env::consts::ARCH,
-                "hostname": System::host_name().unwrap_or_default()
-            },
-            "cpu": {
-                "manufacturer": cpu_brand.split_whitespace().next().unwrap_or("Unknown"),
-                "brand": cpu_brand,
-                "cores": self.system.cpus().len(),
-                "physicalCores": physical_cores,
-                "speed": speed,
-                "speedMax": speed_max,
-                "estimatedTdp": tdp
-            },
-            "gpu": if self.gpu.model.is_empty() { Value::Null } else { json!({
-                "vendor": "NVIDIA",
+            .collect::<Vec<_>>();
+        let mut storage = array_or(&self.hardware_details, "storage", fallback_storage);
+        let temperature_sensors = self
+            .sensors
+            .get("storage")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for (index, disk) in storage.iter_mut().enumerate() {
+            let disk_name = string(disk, "name").to_ascii_lowercase();
+            let sensor = temperature_sensors
+                .iter()
+                .find(|sensor| {
+                    let sensor_name = string(sensor, "name").to_ascii_lowercase();
+                    !sensor_name.is_empty()
+                        && !disk_name.is_empty()
+                        && (sensor_name.contains(&disk_name) || disk_name.contains(&sensor_name))
+                })
+                .or_else(|| temperature_sensors.get(index));
+            if let Some(sensor) = sensor {
+                disk["temperature"] = json!(number(sensor, "temperature"));
+                disk["temperatureSource"] = sensor.get("source").cloned().unwrap_or(Value::Null);
+            }
+        }
+
+        let details_cpu = self.hardware_details.get("cpu").unwrap_or(&Value::Null);
+        let details_memory = self.hardware_details.get("memory").unwrap_or(&Value::Null);
+        let detail_gpus = array_or(&self.hardware_details, "gpus", Vec::new());
+        let mut primary_gpu = detail_gpus.first().cloned().unwrap_or(Value::Null);
+        if !self.gpu.model.is_empty() {
+            let vendor = if self.gpu.model.to_ascii_lowercase().contains("amd") {
+                "AMD"
+            } else if self.gpu.model.to_ascii_lowercase().contains("intel") {
+                "Intel"
+            } else {
+                "NVIDIA"
+            };
+            primary_gpu = json!({
+                "vendor": vendor,
                 "model": self.gpu.model,
                 "vramBytes": self.gpu.total_bytes,
                 "driverVersion": self.gpu.driver,
+                "driverDate": "",
+                "videoMode": "",
+                "resolution": "",
+                "refreshRate": 0,
+                "status": "OK",
                 "powerLimit": self.gpu.power_limit
-            }) },
-            "memory": { "totalBytes": self.system.total_memory(), "modules": [] },
+            });
+        }
+        let fallback_networks = self
+            .networks
+            .iter()
+            .map(|(name, _)| {
+                json!({ "name": name, "manufacturer": "", "type": "Network interface", "speedBits": 0, "connection": name, "status": "Connected" })
+            })
+            .collect::<Vec<_>>();
+
+        let system_details = self
+            .hardware_details
+            .get("system")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let os_details = self
+            .hardware_details
+            .get("os")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        json!({
+            "collectedAt": self.hardware_details.get("collectedAt").cloned().unwrap_or(Value::Null),
+            "system": {
+                "manufacturer": text_or(&system_details, "manufacturer", "Unknown"),
+                "model": text_or(&system_details, "model", &System::host_name().unwrap_or_else(|| "Local computer".to_string())),
+                "version": string(&system_details, "version")
+            },
+            "motherboard": self.hardware_details.get("motherboard").cloned().unwrap_or_else(|| json!({ "manufacturer": "", "model": "", "version": "" })),
+            "bios": self.hardware_details.get("bios").cloned().unwrap_or_else(|| json!({ "vendor": "", "version": "", "date": "", "smbiosVersion": "" })),
+            "os": {
+                "platform": text_or(&os_details, "platform", std::env::consts::OS),
+                "distro": text_or(&os_details, "distro", &System::name().unwrap_or_else(|| std::env::consts::OS.to_string())),
+                "release": text_or(&os_details, "release", &System::os_version().unwrap_or_default()),
+                "build": text_or(&os_details, "build", &System::kernel_version().unwrap_or_default()),
+                "arch": text_or(&os_details, "arch", std::env::consts::ARCH),
+                "hostname": text_or(&os_details, "hostname", &System::host_name().unwrap_or_default())
+            },
+            "cpu": {
+                "manufacturer": text_or(details_cpu, "manufacturer", cpu_brand.split_whitespace().next().unwrap_or("Unknown")),
+                "brand": text_or(details_cpu, "brand", cpu_brand),
+                "cores": positive_or(number(details_cpu, "cores"), self.system.cpus().len() as f64),
+                "physicalCores": positive_or(number(details_cpu, "physicalCores"), physical_cores as f64),
+                "socket": string(details_cpu, "socket"),
+                "speed": positive_or(number(details_cpu, "speed"), speed),
+                "speedMax": positive_or(number(details_cpu, "speedMax"), speed_max),
+                "l2CacheBytes": number(details_cpu, "l2CacheBytes"),
+                "l3CacheBytes": number(details_cpu, "l3CacheBytes"),
+                "virtualization": details_cpu.get("virtualization").and_then(Value::as_bool).unwrap_or(false),
+                "estimatedTdp": tdp
+            },
+            "gpu": primary_gpu,
+            "gpus": detail_gpus,
+            "memory": {
+                "totalBytes": positive_or(number(details_memory, "totalBytes"), self.system.total_memory() as f64),
+                "modules": details_memory.get("modules").and_then(Value::as_array).cloned().unwrap_or_default()
+            },
             "storage": storage,
-            "displays": []
+            "networks": array_or(&self.hardware_details, "networks", fallback_networks),
+            "displays": array_or(&self.hardware_details, "displays", Vec::new())
         })
     }
 }
@@ -423,6 +746,54 @@ fn string(value: &Value, field: &str) -> String {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string()
+}
+
+fn text_or(value: &Value, field: &str, fallback: &str) -> String {
+    let current = string(value, field);
+    if current.trim().is_empty() {
+        fallback.to_string()
+    } else {
+        current
+    }
+}
+
+fn positive_or(value: f64, fallback: f64) -> f64 {
+    if value > 0.0 {
+        value
+    } else {
+        fallback
+    }
+}
+
+fn array_or(value: &Value, field: &str, fallback: Vec<Value>) -> Vec<Value> {
+    value
+        .get(field)
+        .and_then(Value::as_array)
+        .filter(|items| !items.is_empty())
+        .cloned()
+        .unwrap_or(fallback)
+}
+
+fn sensor_row(
+    component: &str,
+    name: &str,
+    sensor_type: &str,
+    value: f64,
+    unit: &str,
+    source: &str,
+    accuracy: &str,
+) -> Value {
+    json!({
+        "component": component,
+        "name": name,
+        "sensorType": sensor_type,
+        "value": energy::round(value, 2),
+        "min": null,
+        "max": null,
+        "unit": unit,
+        "source": source,
+        "accuracy": accuracy
+    })
 }
 
 fn color(pid: u32) -> &'static str {

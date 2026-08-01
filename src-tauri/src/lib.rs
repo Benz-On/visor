@@ -19,6 +19,7 @@ use tauri::State;
 struct RuntimeState {
     latest: Arc<RwLock<Option<Value>>>,
     alert_settings: Arc<Mutex<HashMap<String, bool>>>,
+    collector: Arc<Mutex<Collector>>,
 }
 
 #[tauri::command]
@@ -29,6 +30,16 @@ fn get_system_snapshot(state: State<'_, RuntimeState>) -> Result<Value, String> 
         .map_err(|_| "VISOR telemetry state is unavailable.".to_string())?
         .clone()
         .ok_or_else(|| "VISOR native telemetry is starting.".to_string())
+}
+
+#[tauri::command]
+fn refresh_system_snapshot(state: State<'_, RuntimeState>) -> Result<Value, String> {
+    let snapshot = collect_snapshot(&state, true)?;
+    *state
+        .latest
+        .write()
+        .map_err(|_| "VISOR telemetry state is unavailable.".to_string())? = Some(snapshot.clone());
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -281,22 +292,34 @@ fn find_descendants(state: &RuntimeState, root_pid: u32) -> Result<Vec<u32>, Str
 fn start_collector(state: RuntimeState) {
     thread::Builder::new()
         .name("visor-collector".to_string())
-        .spawn(move || {
-            let mut collector = Collector::new();
-            loop {
-                if let Ok(settings) = state.alert_settings.lock() {
-                    for (id, enabled) in settings.iter() {
-                        collector.set_alert_rule(id, *enabled);
-                    }
-                }
-                let snapshot = collector.collect();
+        .spawn(move || loop {
+            if let Ok(snapshot) = collect_snapshot(&state, false) {
                 if let Ok(mut latest) = state.latest.write() {
                     *latest = Some(snapshot);
                 }
-                thread::sleep(Duration::from_millis(1100));
             }
+            thread::sleep(Duration::from_millis(1100));
         })
         .expect("failed to start VISOR collector");
+}
+
+fn collect_snapshot(state: &RuntimeState, force: bool) -> Result<Value, String> {
+    let settings = state
+        .alert_settings
+        .lock()
+        .map_err(|_| "VISOR alert settings are unavailable.".to_string())?
+        .clone();
+    let mut collector = state
+        .collector
+        .lock()
+        .map_err(|_| "VISOR native collector is unavailable.".to_string())?;
+    if force {
+        collector.force_refresh();
+    }
+    for (id, enabled) in settings {
+        collector.set_alert_rule(&id, enabled);
+    }
+    Ok(collector.collect())
 }
 
 fn hidden_command(program: &str) -> Command {
@@ -314,12 +337,14 @@ pub fn run() {
     let state = RuntimeState {
         latest: Arc::new(RwLock::new(None)),
         alert_settings: Arc::new(Mutex::new(HashMap::new())),
+        collector: Arc::new(Mutex::new(Collector::new())),
     };
     start_collector(state.clone());
     tauri::Builder::default()
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             get_system_snapshot,
+            refresh_system_snapshot,
             kill_process,
             set_process_priority,
             set_alert_rule

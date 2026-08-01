@@ -4,25 +4,92 @@ $cpuTemperature = $null
 $cpuSource = $null
 $storageSensors = @()
 $hardwareSensors = @()
+$temperatureReadings = @()
 
 foreach ($namespace in @('root\LibreHardwareMonitor', 'root\OpenHardwareMonitor')) {
     try {
-        $rows = @(Get-CimInstance -Namespace $namespace -ClassName Sensor | Where-Object {
-            $_.SensorType -eq 'Temperature' -and [double]$_.Value -gt 0
-        })
+        $rows = @(Get-CimInstance -Namespace $namespace -ClassName Sensor | Where-Object { $null -ne $_.Value })
         foreach ($row in $rows) {
+            $sensorType = [string]$row.SensorType
+            $unit = switch ($sensorType) {
+                'Temperature' { '°C' }
+                'Load' { '%' }
+                'Control' { '%' }
+                'Clock' { 'MHz' }
+                'Fan' { 'RPM' }
+                'Voltage' { 'V' }
+                'Current' { 'A' }
+                'Power' { 'W' }
+                'Energy' { 'mWh' }
+                'Data' { 'GB' }
+                'SmallData' { 'MB' }
+                'Throughput' { 'MB/s' }
+                'Level' { '%' }
+                'Factor' { '' }
+                default { '' }
+            }
             $hardwareSensors += [pscustomobject]@{
                 name = [string]$row.Name
                 value = [double]$row.Value
+                min = if ($null -ne $row.Min) { [double]$row.Min } else { $null }
+                max = if ($null -ne $row.Max) { [double]$row.Max } else { $null }
                 identifier = [string]$row.Identifier
+                sensorType = $sensorType
+                unit = $unit
                 source = $namespace
             }
         }
     } catch {}
 }
 
+foreach ($sensor in $hardwareSensors) {
+    $component = if ($sensor.identifier -match '/cpu/' -or $sensor.name -match 'CPU|Core|Tctl|Tdie') {
+        'CPU'
+    } elseif ($sensor.identifier -match '/gpu/' -or $sensor.name -match 'GPU|Hot Spot|Memory Junction') {
+        'GPU'
+    } elseif ($sensor.identifier -match '/nvme/|/hdd/' -or $sensor.name -match 'NVMe|SSD|Drive') {
+        'Storage'
+    } elseif ($sensor.name -match 'Motherboard|Mainboard|System') {
+        'System'
+    } else {
+        'Other'
+    }
+    $sensor | Add-Member -NotePropertyName component -NotePropertyValue $component -Force
+    $sensor | Add-Member -NotePropertyName accuracy -NotePropertyValue 'hardware-monitor' -Force
+    if ($sensor.sensorType -eq 'Temperature' -and [double]$sensor.value -gt 0) {
+        $temperatureReadings += [pscustomobject]@{
+            component = $component
+            name = [string]$sensor.name
+            value = [double]$sensor.value
+            min = $sensor.min
+            max = $sensor.max
+            source = [string]$sensor.source
+            accuracy = 'hardware-monitor'
+        }
+    }
+}
+
+# ACPI thermal zones are useful as a firmware/system reading, but they are not
+# mislabeled as CPU package temperature because many PCs expose a different zone.
+try {
+    foreach ($zone in @(Get-CimInstance -Namespace 'root\wmi' -ClassName MSAcpi_ThermalZoneTemperature)) {
+        $value = ([double]$zone.CurrentTemperature / 10.0) - 273.15
+        if ($value -gt 0 -and $value -lt 150) {
+            $temperatureReadings += [pscustomobject]@{
+                component = 'System'
+                name = if ($zone.InstanceName) { [string]$zone.InstanceName } else { 'ACPI thermal zone' }
+                value = [math]::Round($value, 1)
+                min = $null
+                max = $null
+                source = 'Windows ACPI firmware'
+                accuracy = 'firmware-zone'
+            }
+        }
+    }
+} catch {}
+
 $cpuCandidates = @($hardwareSensors | Where-Object {
-    $_.name -match 'CPU Package|CPU \(Tctl/Tdie\)|CPU Tctl|Core Average|CPU Die'
+    $_.sensorType -eq 'Temperature' -and $_.name -match 'CPU Package|CPU \(Tctl/Tdie\)|CPU Tctl|Core Average|CPU Die'
 } | Sort-Object {
     if ($_.name -match 'CPU Package|Tctl/Tdie') { 0 } else { 1 }
 })
@@ -33,7 +100,7 @@ if ($cpuCandidates.Count -gt 0) {
 }
 
 $storageFromHardware = @($hardwareSensors | Where-Object {
-    $_.identifier -match '/nvme/|/hdd/' -or $_.name -match 'NVMe|SSD|Drive'
+    $_.sensorType -eq 'Temperature' -and ($_.identifier -match '/nvme/|/hdd/' -or $_.name -match 'NVMe|SSD|Drive')
 })
 foreach ($sensor in $storageFromHardware) {
     $storageSensors += [pscustomobject]@{
@@ -69,5 +136,8 @@ try {
     cpuTemperature = $cpuTemperature
     cpuSource = $cpuSource
     storage = @($storageSensors)
+    readings = @($temperatureReadings | Sort-Object component, name -Unique)
+    sensors = @($hardwareSensors | Sort-Object component, sensorType, name -Unique)
     hardwareMonitorAvailable = $hardwareSensors.Count -gt 0
+    cpuSensorGuidance = if ($null -eq $cpuTemperature) { 'Start LibreHardwareMonitor or OpenHardwareMonitor as administrator to expose an exact CPU package sensor.' } else { $null }
 } | ConvertTo-Json -Compress -Depth 5

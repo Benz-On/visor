@@ -1,7 +1,7 @@
 {
   "name": "visor-system-monitor",
   "private": true,
-  "version": "0.6.0-beta.2",
+  "version": "0.7.0-beta.1",
   "description": "Premium local-first system and AI workload monitor for Windows, macOS, and Linux",
   "author": "Benz Engineering",
   "repository": {

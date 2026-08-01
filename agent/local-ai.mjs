@@ -61,6 +61,23 @@ export function detectAiApplication(processData = {}) {
   if (['aider', 'aider.exe'].includes(name) || (/python/.test(name) && /(?:^|\s)-m\s+aider(?:\s|$)|[\\/]aider(?:-chat)?[\\/]/.test(command))) {
     return identity('Aider', 'Configured AI provider', 'coding-agent', 'coding-agent', 'hybrid', 'Aider');
   }
+  if (['cursor', 'cursor.exe'].includes(name) || /[\\/]cursor[\\/]/.test(path)) {
+    return identity('Cursor', 'Configured cloud/local provider', 'coding-client', 'coding-agent', 'hybrid', 'Cursor');
+  }
+  if (['windsurf', 'windsurf.exe'].includes(name) || /[\\/]windsurf[\\/]|codeium/.test(path)) {
+    return identity('Windsurf', 'Codeium cloud', 'coding-client', 'coding-agent', 'cloud', 'Codeium');
+  }
+  if (['q', 'q.exe', 'q-desktop', 'q-desktop.exe'].includes(name) && /amazon|amazon q|q developer/.test(`${path} ${command}`)) {
+    return identity('Amazon Q Developer', 'AWS cloud', 'coding-agent', 'coding-agent', 'cloud', 'AWS');
+  }
+  if (['perplexity', 'perplexity.exe'].includes(name) || /[\\/]perplexity[\\/]/.test(path)) {
+    return identity('Perplexity', 'Perplexity cloud', 'application', 'cloud-client', 'cloud', 'Perplexity');
+  }
+  if (nodeHost && /continue\.continue|saoudrizwan\.claude-dev|rooveterinaryinc\.roo-cline/.test(command)) {
+    if (/roo-cline/.test(command)) return identity('Roo Code', 'Configured cloud/local provider', 'agent-helper', 'coding-agent', 'hybrid', 'Configured provider');
+    if (/claude-dev/.test(command)) return identity('Cline', 'Configured cloud/local provider', 'agent-helper', 'coding-agent', 'hybrid', 'Configured provider');
+    return identity('Continue', 'Configured cloud/local provider', 'agent-helper', 'coding-agent', 'hybrid', 'Configured provider');
+  }
 
   if (name.includes('msedgewebview2') && /ollama app\.exe/.test(haystack)) {
     return identity('Ollama Desktop', 'WebView UI', 'ui-helper', 'local-runtime', 'local', 'Ollama');
@@ -618,15 +635,77 @@ export function buildLocalAiSnapshot(processes = [], discovery = { adapters: [],
     };
   });
 
+  const cloudProviders = buildCloudProviderCatalog(applications);
+
   return {
     scannedAt: discovery.scannedAt || null,
     adapters: discovery.adapters || [],
     modelRoots: discovery.modelRoots || [],
     models,
     applications,
+    cloudProviders,
     activeModelCount: models.filter((model) => model.status === 'active').length,
     loadedModelCount: models.filter((model) => model.status === 'active' || model.status === 'loaded').length,
     installedModelCount: models.filter((model) => model.installed).length,
     serviceCount: applications.length,
   };
+}
+
+export function buildCloudProviderCatalog(applications = [], environment = process.env) {
+  const providers = [
+    ['openai', 'OpenAI', ['OPENAI_API_KEY']],
+    ['azure-openai', 'Azure OpenAI', ['AZURE_OPENAI_API_KEY']],
+    ['anthropic', 'Anthropic', ['ANTHROPIC_API_KEY']],
+    ['google', 'Google Gemini', ['GEMINI_API_KEY', 'GOOGLE_API_KEY']],
+    ['mistral', 'Mistral AI', ['MISTRAL_API_KEY']],
+    ['groq', 'Groq', ['GROQ_API_KEY']],
+    ['cohere', 'Cohere', ['COHERE_API_KEY']],
+    ['together', 'Together AI', ['TOGETHER_API_KEY']],
+    ['fireworks', 'Fireworks AI', ['FIREWORKS_API_KEY']],
+    ['openrouter', 'OpenRouter', ['OPENROUTER_API_KEY']],
+    ['deepseek', 'DeepSeek', ['DEEPSEEK_API_KEY']],
+    ['xai', 'xAI', ['XAI_API_KEY']],
+    ['perplexity', 'Perplexity', ['PERPLEXITY_API_KEY']],
+    ['moonshot', 'Moonshot AI', ['MOONSHOT_API_KEY']],
+    ['github-copilot', 'GitHub Copilot', []],
+    ['aws-bedrock', 'Amazon Bedrock', ['AWS_ACCESS_KEY_ID', 'AWS_PROFILE']],
+    ['vertex-ai', 'Google Vertex AI', ['GOOGLE_APPLICATION_CREDENTIALS']],
+    ['huggingface', 'Hugging Face', ['HF_TOKEN', 'HUGGING_FACE_HUB_TOKEN']],
+    ['replicate', 'Replicate', ['REPLICATE_API_TOKEN']],
+    ['cerebras', 'Cerebras', ['CEREBRAS_API_KEY']],
+    ['sambanova', 'SambaNova', ['SAMBANOVA_API_KEY']],
+    ['cloudflare-ai', 'Cloudflare Workers AI', ['CLOUDFLARE_API_TOKEN']],
+    ['nvidia-nim', 'NVIDIA NIM', ['NVIDIA_API_KEY', 'NGC_API_KEY']],
+  ];
+  return providers.map(([id, name, environmentKeys]) => {
+    const matching = applications.filter((application) => {
+      const provider = String(application.provider || '').toLowerCase();
+      const applicationName = String(application.application || '').toLowerCase();
+      if (id === 'openai') return provider === 'openai';
+      if (id === 'anthropic') return provider === 'anthropic';
+      if (id === 'google') return provider === 'google';
+      if (id === 'perplexity') return provider === 'perplexity';
+      if (id === 'github-copilot') return provider === 'github';
+      if (id === 'aws-bedrock') return provider === 'aws';
+      if (id === 'vertex-ai' || id === 'nvidia-nim') return false;
+      return provider.includes(id) || applicationName.includes(id);
+    });
+    const credentialSignals = environmentKeys.filter((key) => environment[key] !== undefined);
+    const sum = (field) => round(matching.reduce((total, application) => total + finite(application[field]), 0), field === 'memoryGb' ? 2 : 1);
+    const localProcessCount = matching.reduce((total, application) => total + (application.processes?.length || 0), 0);
+    return {
+      id,
+      name,
+      provider: name,
+      detected: localProcessCount > 0 || credentialSignals.length > 0,
+      credentialConfigured: credentialSignals.length > 0,
+      credentialSignals,
+      localProcessCount,
+      cpu: sum('cpu'),
+      gpu: sum('gpu'),
+      memoryGb: sum('memoryGb'),
+      energyWatts: sum('energyWatts'),
+      billingVisible: false,
+    };
+  });
 }

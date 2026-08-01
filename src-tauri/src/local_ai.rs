@@ -201,6 +201,81 @@ fn detect(process: &Value) -> Option<Identity> {
             "Aider",
         ));
     }
+    if matches!(name.as_str(), "cursor" | "cursor.exe")
+        || path.contains("/cursor/")
+        || path.contains("\\cursor\\")
+    {
+        return Some(identity(
+            "Cursor",
+            "Configured cloud/local provider",
+            "coding-client",
+            "coding-agent",
+            "hybrid",
+            "Cursor",
+        ));
+    }
+    if matches!(name.as_str(), "windsurf" | "windsurf.exe")
+        || path.contains("/windsurf/")
+        || path.contains("\\windsurf\\")
+        || path.contains("codeium")
+    {
+        return Some(identity(
+            "Windsurf",
+            "Codeium cloud",
+            "coding-client",
+            "coding-agent",
+            "cloud",
+            "Codeium",
+        ));
+    }
+    if matches!(name.as_str(), "q" | "q.exe" | "q-desktop" | "q-desktop.exe")
+        && (path.contains("amazon")
+            || command.contains("amazon q")
+            || command.contains("q developer"))
+    {
+        return Some(identity(
+            "Amazon Q Developer",
+            "AWS cloud",
+            "coding-agent",
+            "coding-agent",
+            "cloud",
+            "AWS",
+        ));
+    }
+    if matches!(name.as_str(), "perplexity" | "perplexity.exe")
+        || path.contains("/perplexity/")
+        || path.contains("\\perplexity\\")
+    {
+        return Some(identity(
+            "Perplexity",
+            "Perplexity cloud",
+            "application",
+            "cloud-client",
+            "cloud",
+            "Perplexity",
+        ));
+    }
+    if node_host
+        && (command.contains("continue.continue")
+            || command.contains("saoudrizwan.claude-dev")
+            || command.contains("rooveterinaryinc.roo-cline"))
+    {
+        let (application, provider) = if command.contains("roo-cline") {
+            ("Roo Code", "Configured provider")
+        } else if command.contains("claude-dev") {
+            ("Cline", "Configured provider")
+        } else {
+            ("Continue", "Configured provider")
+        };
+        return Some(identity(
+            application,
+            "Configured cloud/local provider",
+            "agent-helper",
+            "coding-agent",
+            "hybrid",
+            provider,
+        ));
+    }
 
     if name.contains("msedgewebview2") && haystack.contains("ollama app.exe") {
         return Some(identity(
@@ -1301,6 +1376,116 @@ fn merge_models(collections: Vec<Vec<Value>>) -> Vec<Value> {
     models
 }
 
+fn cloud_provider_catalog(applications: &[Value]) -> Vec<Value> {
+    let providers: [(&str, &str, &[&str]); 23] = [
+        ("openai", "OpenAI", &["OPENAI_API_KEY"]),
+        ("azure-openai", "Azure OpenAI", &["AZURE_OPENAI_API_KEY"]),
+        ("anthropic", "Anthropic", &["ANTHROPIC_API_KEY"]),
+        (
+            "google",
+            "Google Gemini",
+            &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        ),
+        ("mistral", "Mistral AI", &["MISTRAL_API_KEY"]),
+        ("groq", "Groq", &["GROQ_API_KEY"]),
+        ("cohere", "Cohere", &["COHERE_API_KEY"]),
+        ("together", "Together AI", &["TOGETHER_API_KEY"]),
+        ("fireworks", "Fireworks AI", &["FIREWORKS_API_KEY"]),
+        ("openrouter", "OpenRouter", &["OPENROUTER_API_KEY"]),
+        ("deepseek", "DeepSeek", &["DEEPSEEK_API_KEY"]),
+        ("xai", "xAI", &["XAI_API_KEY"]),
+        ("perplexity", "Perplexity", &["PERPLEXITY_API_KEY"]),
+        ("moonshot", "Moonshot AI", &["MOONSHOT_API_KEY"]),
+        ("github-copilot", "GitHub Copilot", &[]),
+        (
+            "aws-bedrock",
+            "Amazon Bedrock",
+            &["AWS_ACCESS_KEY_ID", "AWS_PROFILE"],
+        ),
+        (
+            "vertex-ai",
+            "Google Vertex AI",
+            &["GOOGLE_APPLICATION_CREDENTIALS"],
+        ),
+        (
+            "huggingface",
+            "Hugging Face",
+            &["HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"],
+        ),
+        ("replicate", "Replicate", &["REPLICATE_API_TOKEN"]),
+        ("cerebras", "Cerebras", &["CEREBRAS_API_KEY"]),
+        ("sambanova", "SambaNova", &["SAMBANOVA_API_KEY"]),
+        (
+            "cloudflare-ai",
+            "Cloudflare Workers AI",
+            &["CLOUDFLARE_API_TOKEN"],
+        ),
+        (
+            "nvidia-nim",
+            "NVIDIA NIM",
+            &["NVIDIA_API_KEY", "NGC_API_KEY"],
+        ),
+    ];
+    providers
+        .into_iter()
+        .map(|(id, name, environment_keys)| {
+            let matching = applications
+                .iter()
+                .filter(|application| {
+                    let provider = string(application.get("provider")).to_ascii_lowercase();
+                    let application_name =
+                        string(application.get("application")).to_ascii_lowercase();
+                    match id {
+                        "openai" => provider == "openai",
+                        "anthropic" => provider == "anthropic",
+                        "google" => provider == "google",
+                        "perplexity" => provider == "perplexity",
+                        "github-copilot" => provider == "github",
+                        "aws-bedrock" => provider == "aws",
+                        "vertex-ai" | "nvidia-nim" => false,
+                        _ => provider.contains(id) || application_name.contains(id),
+                    }
+                })
+                .collect::<Vec<_>>();
+            let credential_signals = environment_keys
+                .iter()
+                .filter(|key| std::env::var_os(key).is_some())
+                .copied()
+                .collect::<Vec<_>>();
+            let process_count = matching
+                .iter()
+                .map(|application| {
+                    application
+                        .get("processes")
+                        .and_then(Value::as_array)
+                        .map(Vec::len)
+                        .unwrap_or_default()
+                })
+                .sum::<usize>();
+            let sum = |field: &str| {
+                matching
+                    .iter()
+                    .map(|item| number(item.get(field)))
+                    .sum::<f64>()
+            };
+            json!({
+                "id": id,
+                "name": name,
+                "provider": name,
+                "detected": process_count > 0 || !credential_signals.is_empty(),
+                "credentialConfigured": !credential_signals.is_empty(),
+                "credentialSignals": credential_signals,
+                "localProcessCount": process_count,
+                "cpu": sum("cpu"),
+                "gpu": sum("gpu"),
+                "memoryGb": sum("memoryGb"),
+                "energyWatts": sum("energyWatts"),
+                "billingVisible": false
+            })
+        })
+        .collect()
+}
+
 pub fn build(processes: &[Value]) -> Value {
     let mut groups: BTreeMap<String, Value> = BTreeMap::new();
     for process in processes {
@@ -1542,6 +1727,7 @@ pub fn build(processes: &[Value]) -> Value {
                 .unwrap_or(false)
         })
         .count();
+    let cloud_providers = cloud_provider_catalog(&applications);
     json!({
         "scannedAt": chrono::Utc::now().to_rfc3339(),
         "adapters": [
@@ -1558,6 +1744,7 @@ pub fn build(processes: &[Value]) -> Value {
         "modelRoots": model_roots,
         "models": models,
         "applications": applications,
+        "cloudProviders": cloud_providers,
         "activeModelCount": active_count,
         "loadedModelCount": loaded_count,
         "installedModelCount": installed_count,
@@ -1642,6 +1829,21 @@ mod tests {
                 "Tabby",
                 "local",
             ),
+            (
+                json!({ "name": "cursor.exe", "path": "C:\\Users\\me\\AppData\\Local\\Programs\\Cursor\\Cursor.exe" }),
+                "Cursor",
+                "hybrid",
+            ),
+            (
+                json!({ "name": "windsurf.exe", "path": "C:\\Program Files\\Windsurf\\Windsurf.exe" }),
+                "Windsurf",
+                "cloud",
+            ),
+            (
+                json!({ "name": "perplexity.exe", "path": "C:\\Program Files\\Perplexity\\Perplexity.exe" }),
+                "Perplexity",
+                "cloud",
+            ),
         ];
         for (process, application, execution) in cases {
             let detected = detect(&process).expect("service should be detected");
@@ -1664,5 +1866,27 @@ mod tests {
             "command": "Write-Output 'Gemini OpenCode Aider Open WebUI llamafile Claude Code Kimi Copilot'"
         });
         assert!(detect(&expanded).is_none());
+    }
+
+    #[test]
+    fn cloud_provider_catalog_exposes_footprint_without_claiming_billing() {
+        let snapshot = build(&[json!({
+            "id": 42,
+            "name": "codex.exe",
+            "path": "C:\\Program Files\\OpenAI.Codex\\codex.exe",
+            "cpu": 3.0,
+            "gpu": 1.0,
+            "memory": 0.4,
+            "vram": 0.0,
+            "energyWatts": 8.0
+        })]);
+        let providers = snapshot["cloudProviders"].as_array().unwrap();
+        assert_eq!(providers.len(), 23);
+        let openai = providers
+            .iter()
+            .find(|item| item["id"] == "openai")
+            .unwrap();
+        assert_eq!(openai["localProcessCount"], 1);
+        assert_eq!(openai["billingVisible"], false);
     }
 }
