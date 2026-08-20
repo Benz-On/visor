@@ -668,6 +668,7 @@ const tokenSpeed = (minimum: number | null, maximum: number | null, workload: 'g
 function AIWorkloads({ metrics, localAI, hardware, refreshing, onRefresh }: MetricsProps & { localAI?: LocalAiSnapshot; hardware?: HardwareInfo } & RefreshControls) {
   const preferredModel = localAI?.models.find((item) => item.status === 'active') || localAI?.models.find((item) => item.status === 'loaded') || localAI?.models[0];
   const [selectedModelId, setSelectedModelId] = useState('');
+  const [plannerContext, setPlannerContext] = useState(4096);
   const model = localAI?.models.find((item) => item.id === selectedModelId) || preferredModel;
   const application = localAI?.applications.find((item) => item.application === model?.application) || (!model ? localAI?.applications[0] : undefined);
   const runtimeProcess = model?.process || application?.processes.find((item) => item.role === 'model-runner' || item.role === 'runtime') || application?.processes[0];
@@ -676,7 +677,7 @@ function AIWorkloads({ metrics, localAI, hardware, refreshing, onRefresh }: Metr
   const totalVramGb = bytesToGb(metrics.gpuMemory?.totalBytes);
   const appEnergy = model?.applicationEnergyWatts ?? application?.energyWatts ?? 0;
   const exactModel = Boolean(model);
-  const compatibility = model ? analyzeLocalModel(model, hardware) : null;
+  const compatibility = model ? analyzeLocalModel(model, hardware, { contextTokens: plannerContext }) : null;
   const selectedModelSize = model ? modelSizeParts(model) : null;
   const installedModels = localAI?.models || [];
   const services = localAI?.applications || [];
@@ -695,12 +696,30 @@ function AIWorkloads({ metrics, localAI, hardware, refreshing, onRefresh }: Metr
           <div><span>RUNTIME</span><strong>{model?.runtime || application?.runtime || '—'}</strong></div><em>→</em>
           <div><span>MODEL</span><strong>{model?.model || 'Not reported'}</strong></div>
         </div>
-        {compatibility && <div className={`compatibility-banner fit-${compatibility.state}`}><div><span>HARDWARE FIT</span><strong>{compatibility.label}</strong><small>{compatibility.requiredMemoryGb.toFixed(1)} GB estimated · {compatibility.mode.toUpperCase()}</small></div><div><span>{compatibility.workload === 'embedding' ? 'EMBEDDING WORKLOAD' : 'ESTIMATED GENERATION'}</span><strong>{tokenSpeed(compatibility.estimatedTpsMin, compatibility.estimatedTpsMax, compatibility.workload)}</strong><small>{compatibility.workload === 'embedding' ? 'generation tok/s does not apply' : `${compatibility.confidence} confidence · not a benchmark`}</small></div></div>}
+        {compatibility && <>
+          <div className={`compatibility-banner fit-${compatibility.state}`}>
+            <div><span>HARDWARE FIT</span><strong>{compatibility.label}</strong><small>{compatibility.requiredMemoryGb.toFixed(1)} GB required · {compatibility.mode.toUpperCase()}</small></div>
+            <div><span>{compatibility.workload === 'embedding' ? 'EMBEDDING WORKLOAD' : 'ESTIMATED GENERATION'}</span><strong>{tokenSpeed(compatibility.estimatedTpsMin, compatibility.estimatedTpsMax, compatibility.workload)}</strong><small>{compatibility.workload === 'embedding' ? 'generation tok/s does not apply' : `${compatibility.estimatedTpsCenter ?? '—'} tok/s center · ${compatibility.confidenceScore}% input confidence`}</small></div>
+            <div><span>PRIMARY BOTTLENECK</span><strong>{compatibility.bottleneck}</strong><small>{compatibility.gpuOffloadPercent.toFixed(0)}% GPU offload · {compatibility.effectiveBandwidthGbps?.toFixed(1) || '—'} effective GB/s</small></div>
+          </div>
+          <section className="inference-planner" aria-label="Inference memory and context planner">
+            <div className="planner-header"><div><span>INFERENCE PLANNER</span><strong>RAM + VRAM capacity model</strong></div><div className="context-presets" aria-label="Assumed context length">{[2048, 4096, 8192, 16384, 32768].map((tokens) => <button key={tokens} className={plannerContext === tokens ? 'active' : ''} onClick={() => setPlannerContext(tokens)}>{tokens / 1024}K</button>)}</div></div>
+            <div className="memory-equation">
+              <div><span>Model weights</span><strong>{compatibility.modelWeightGb.toFixed(1)} GB</strong></div><em>+</em>
+              <div><span>KV cache · {(compatibility.assumedContextTokens / 1024).toFixed(compatibility.assumedContextTokens % 1024 ? 1 : 0)}K</span><strong>{compatibility.kvCacheGb.toFixed(2)} GB</strong></div><em>+</em>
+              <div><span>Runtime</span><strong>{compatibility.runtimeOverheadGb.toFixed(1)} GB</strong></div><em>=</em>
+              <div className="memory-total"><span>Required</span><strong>{compatibility.requiredMemoryGb.toFixed(1)} GB</strong></div>
+            </div>
+            <div className="memory-capacity-track"><i style={{ width: `${Math.min(100, compatibility.requiredMemoryGb / Math.max(.1, compatibility.usableCombinedMemoryGb) * 100)}%` }} /><span className="vram-boundary" style={{ left: `${Math.min(100, compatibility.availableVramGb / Math.max(.1, compatibility.usableCombinedMemoryGb) * 100)}%` }} /></div>
+            <div className="memory-capacity-legend"><span><i className="legend-vram" />{compatibility.isUnifiedMemory ? 'Unified memory pool' : `${compatibility.availableVramGb.toFixed(1)} GB usable VRAM`}</span><span><i className="legend-ram" />{compatibility.availableRamGb.toFixed(1)} GB usable RAM</span><strong>{compatibility.usableCombinedMemoryGb.toFixed(1)} GB usable combined</strong></div>
+            <p className={compatibility.memoryDeficitGb > 0 ? 'planner-warning' : ''}>{compatibility.memoryDeficitGb > 0 ? `${compatibility.memoryDeficitGb.toFixed(1)} GB beyond fast memory. Speed is still modeled using conditional mmap/pagefile access and may vary sharply.` : `${(compatibility.ramReserveGb + compatibility.vramReserveGb).toFixed(1)} GB reserved for the OS/display. ${compatibility.reason}`}</p>
+          </section>
+        </>}
         <div className="ai-primary-stats">
           {model?.status === 'detected' ? <>
             <div><span>Installed model size</span><strong>{selectedModelSize?.value || '—'}</strong><small>{selectedModelSize?.unit === 'size unavailable' ? selectedModelSize.unit : `${selectedModelSize?.unit} on disk`}</small></div>
             <div><span>Estimated memory need</span><strong>{compatibility?.requiredMemoryGb.toFixed(1) || '—'}</strong><small>GB including runtime overhead</small></div>
-            <div><span>{compatibility?.workload === 'embedding' ? 'Workload type' : 'Estimated generation'}</span><strong>{compatibility?.workload === 'embedding' ? 'EMBED' : compatibility?.estimatedTpsMax ?? '—'}</strong><small>{compatibility?.workload === 'embedding' ? 'generation speed is not applicable' : 'tok/s upper range · not loaded'}</small></div>
+            <div><span>{compatibility?.workload === 'embedding' ? 'Workload type' : 'Estimated generation'}</span><strong>{compatibility?.workload === 'embedding' ? 'EMBED' : compatibility?.estimatedTpsCenter ?? '—'}</strong><small>{compatibility?.workload === 'embedding' ? 'generation speed is not applicable' : 'tok/s modeled center · not loaded'}</small></div>
           </> : <>
             <div><span>Model VRAM allocation</span><strong>{modelVramGb.toFixed(2)}</strong><small>GB reported by {model?.application || 'process counters'}</small></div>
             <div><span>Model RAM allocation</span><strong>{allocatedRamGb.toFixed(2)}</strong><small>GB outside VRAM</small></div>
@@ -723,15 +742,15 @@ function AIWorkloads({ metrics, localAI, hardware, refreshing, onRefresh }: Metr
       </aside>
       <section className="panel ai-inventory-card">
         <div className="panel-header"><div><p className="eyebrow">LOCAL MODEL CHECKER</p><h2>What this machine can actually run</h2></div><span>{localAI?.installedModelCount || installedModels.length} models inventoried</span></div>
-        <div className="inventory-hardware-strip"><span><Server size={15} /><strong>{hardware?.gpu?.model || 'GPU unavailable'}</strong><small>{bytesToGb(hardware?.gpu?.vramBytes).toFixed(1)} GB VRAM</small></span><span><Cpu size={15} /><strong>{hardware?.cpu.brand || 'CPU unavailable'}</strong><small>{hardware?.cpu.physicalCores || hardware?.cpu.cores || 0} physical cores</small></span><span><MemoryStick size={15} /><strong>{bytesToGb(hardware?.memory.totalBytes).toFixed(1)} GB RAM</strong><small>OS reserve included in every verdict</small></span></div>
+        <div className="inventory-hardware-strip"><span><Server size={15} /><strong>{hardware?.gpu?.model || 'GPU unavailable'}</strong><small>{bytesToGb(hardware?.gpu?.vramBytes).toFixed(1)} GB VRAM</small></span><span><Cpu size={15} /><strong>{hardware?.cpu.brand || 'CPU unavailable'}</strong><small>{hardware?.cpu.physicalCores || hardware?.cpu.cores || 0} physical cores</small></span><span><MemoryStick size={15} /><strong>{compatibility?.totalCombinedMemoryGb.toFixed(1) || bytesToGb(hardware?.memory.totalBytes).toFixed(1)} GB combined</strong><small>{compatibility?.isUnifiedMemory ? 'shared unified pool · counted once' : `${compatibility?.totalRamGb.toFixed(1) || '—'} RAM + ${compatibility?.totalVramGb.toFixed(1) || '—'} VRAM`}</small></span></div>
         <div className="model-inventory-list">
           {installedModels.length === 0 && <div className="ai-empty-state"><Bot size={20} /><div><strong>No local model found yet</strong><span>VISOR checked nine loopback adapters, Ollama manifests, common model libraries and known weight formats.</span></div></div>}
           {installedModels.map((item) => {
-            const fit = analyzeLocalModel(item, hardware);
+            const fit = analyzeLocalModel(item, hardware, { contextTokens: plannerContext });
             return <button key={item.id} className={item.id === model?.id ? 'selected' : ''} onClick={() => setSelectedModelId(item.id)}><div className="model-inventory-name"><strong>{item.model}</strong><span>{item.application} · {item.quantization || item.format?.toUpperCase() || 'metadata partial'}</span></div><span className="model-size-cell">{modelSize(item)}<small>{item.status}</small></span><span className={`fit-badge fit-${fit.state}`}>{fit.label}<small>{fit.mode}</small></span><span className="speed-cell">{tokenSpeed(fit.estimatedTpsMin, fit.estimatedTpsMax, fit.workload)}<small>{fit.workload === 'embedding' ? 'no generation tok/s' : `${fit.confidence} confidence`}</small></span></button>;
           })}
         </div>
-        <p className="advisor-disclaimer">Predictions are conservative engineering ranges based on model weight, quantization, usable VRAM/RAM, CPU class and execution mode. Run a benchmark to replace the estimate with measured throughput.</p>
+        <p className="advisor-disclaimer">Generation ranges model weight streaming, KV context, detected RAM topology, GPU memory bandwidth, quantization and offload mode. Models beyond RAM + VRAM still receive a conditional paging estimate. A local benchmark remains the authoritative measurement.</p>
       </section>
       <section className="panel ai-services-card">
         <div className="panel-header"><div><p className="eyebrow">AI SERVICE ATTRIBUTION</p><h2>Detected local runtimes and cloud clients</h2></div><span>{services.length} services · live process totals</span></div>

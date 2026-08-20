@@ -3,6 +3,26 @@
 All notable VISOR changes are documented here. Versions follow Semantic
 Versioning while the product remains in beta.
 
+## [0.8.0-beta.1] - Unreleased
+
+### Added
+
+- Interactive 2K–32K context planner with a transparent weights + KV cache +
+  runtime memory equation, combined RAM/VRAM budget, reserves, deficit, and GPU
+  offload visualization.
+- Bandwidth-oriented generation estimator with device profiles, detected DDR
+  topology, MoE active-parameter handling, context penalties, and an explicit
+  confidence score and bottleneck.
+- Conditional tok/s forecasts for models beyond usable RAM + VRAM instead of
+  hiding speed behind an unavailable verdict.
+
+### Changed
+
+- Unified-memory systems are counted once; dedicated systems now use RAM + VRAM
+  directly for capacity planning while keeping OS and display reserves visible.
+- Hybrid speed is calculated from serial GPU/CPU layer time, so slow system RAM
+  can no longer be masked by a fast GPU coefficient.
+
 ## [0.7.0-beta.1] - 2026-08-01
 
 ### Added
@@ -79,6 +99,7 @@ Versioning while the product remains in beta.
 - Premium Geist typography, four themes, thermal emphasis, and sustained-load
   alerts with gaming-aware suppression.
 
+[0.8.0-beta.1]: https://github.com/Benz-On/visor/compare/v0.7.0-beta.1...main
 [0.7.0-beta.1]: https://github.com/Benz-On/visor/compare/v0.6.0-beta.2...v0.7.0-beta.1
 [0.6.0-beta.2]: https://github.com/Benz-On/visor/compare/v0.6.0-beta.1...v0.6.0-beta.2
 [0.6.0-beta.1]: https://github.com/Benz-On/visor/compare/v0.5.0-beta.1...v0.6.0-beta.1

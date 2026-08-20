@@ -660,6 +660,11 @@ fn parse_ollama(payload: &Value) -> Vec<Value> {
         .map(|row| {
             let model = string(row.get("name")).or_else(|| string(row.get("model")));
             let digest = string(row.get("digest"));
+            let display_model = if model.is_empty() {
+                "Unknown Ollama model".to_string()
+            } else {
+                model.clone()
+            };
             let mut item = model_base(ModelBaseInput {
                 id: format!(
                     "ollama:{}",
@@ -667,21 +672,33 @@ fn parse_ollama(payload: &Value) -> Vec<Value> {
                 ),
                 application: "Ollama",
                 runtime: "Ollama engine",
-                model: if model.is_empty() {
-                    "Unknown Ollama model".to_string()
-                } else {
-                    model
-                },
+                model: display_model.clone(),
                 status: "loaded",
                 source: "Ollama /api/ps",
                 confidence: 100,
-                size_bytes: number(row.get("size")),
+                // `/api/ps.size` is the live allocation, which can include a
+                // large KV context. Weight bytes come from `/api/tags`/manifests.
+                size_bytes: 0.0,
                 location: "Ollama library".to_string(),
             });
             let details = row.get("details").unwrap_or(&Value::Null);
+            let parameters = string(details.get("parameter_size"));
+            let quantization = string(details.get("quantization_level"));
             item["family"] = Value::String(string(details.get("family")));
-            item["parameters"] = Value::String(string(details.get("parameter_size")));
-            item["quantization"] = Value::String(string(details.get("quantization_level")));
+            item["parameters"] = Value::String(
+                if parameters.is_empty() || parameters.eq_ignore_ascii_case("unknown") {
+                    infer_parameters(&display_model)
+                } else {
+                    parameters
+                },
+            );
+            item["quantization"] = Value::String(
+                if quantization.is_empty() || quantization.eq_ignore_ascii_case("unknown") {
+                    infer_quantization(&display_model)
+                } else {
+                    quantization
+                },
+            );
             item["format"] = Value::String(string(details.get("format")));
             item["contextLength"] = json!(number(row.get("context_length")));
             item["allocatedBytes"] = json!(number(row.get("size")));
@@ -701,6 +718,11 @@ fn parse_ollama_tags(payload: &Value) -> Vec<Value> {
         .map(|row| {
             let model = string(row.get("name")).or_else(|| string(row.get("model")));
             let digest = string(row.get("digest"));
+            let display_model = if model.is_empty() {
+                "Unknown Ollama model".to_string()
+            } else {
+                model.clone()
+            };
             let mut item = model_base(ModelBaseInput {
                 id: format!(
                     "ollama:{}",
@@ -708,11 +730,7 @@ fn parse_ollama_tags(payload: &Value) -> Vec<Value> {
                 ),
                 application: "Ollama",
                 runtime: "Ollama engine",
-                model: if model.is_empty() {
-                    "Unknown Ollama model".to_string()
-                } else {
-                    model
-                },
+                model: display_model.clone(),
                 status: "detected",
                 source: "Ollama /api/tags",
                 confidence: 100,
@@ -720,9 +738,23 @@ fn parse_ollama_tags(payload: &Value) -> Vec<Value> {
                 location: "Ollama library".to_string(),
             });
             let details = row.get("details").unwrap_or(&Value::Null);
+            let parameters = string(details.get("parameter_size"));
+            let quantization = string(details.get("quantization_level"));
             item["family"] = Value::String(string(details.get("family")));
-            item["parameters"] = Value::String(string(details.get("parameter_size")));
-            item["quantization"] = Value::String(string(details.get("quantization_level")));
+            item["parameters"] = Value::String(
+                if parameters.is_empty() || parameters.eq_ignore_ascii_case("unknown") {
+                    infer_parameters(&display_model)
+                } else {
+                    parameters
+                },
+            );
+            item["quantization"] = Value::String(
+                if quantization.is_empty() || quantization.eq_ignore_ascii_case("unknown") {
+                    infer_quantization(&display_model)
+                } else {
+                    quantization
+                },
+            );
             item["format"] = Value::String(string(details.get("format")));
             item
         })
@@ -1019,21 +1051,21 @@ fn candidate_model_roots() -> Vec<(PathBuf, String)> {
 }
 
 fn infer_quantization(name: &str) -> String {
-    name.split(['-', '_', '.'])
-        .map(str::to_ascii_uppercase)
+    name.split(['-', '.', ':', '/', '\\'])
+        .map(|part| part.trim_matches('_').to_ascii_uppercase())
         .find(|part| {
-            part.starts_with('Q')
+            (part.starts_with('Q')
                 && part[1..]
                     .chars()
                     .next()
-                    .is_some_and(|ch| ch.is_ascii_digit())
+                    .is_some_and(|ch| ch.is_ascii_digit()))
                 || matches!(part.as_str(), "F16" | "F32" | "BF16")
         })
         .unwrap_or_default()
 }
 
 fn infer_parameters(name: &str) -> String {
-    name.split(['-', '_', '.'])
+    name.split(['-', '_', '.', ':', '/', '\\'])
         .find_map(|part| {
             let upper = part.to_ascii_uppercase();
             let value = upper.strip_suffix('B')?;
@@ -1777,6 +1809,16 @@ mod tests {
         assert_eq!(models[0]["status"], "detected");
         assert_eq!(models[0]["parameters"], "8B");
         assert_eq!(models[0]["sizeBytes"], 5_000_000_000_f64);
+    }
+
+    #[test]
+    fn ollama_tag_metadata_falls_back_to_name() {
+        let models = parse_ollama_tags(&json!({ "models": [{
+            "name": "org/Qwen3.6-35B-A3B:Q6_K_P", "size": 29_000_000_000_f64,
+            "details": { "parameter_size": "unknown", "quantization_level": "unknown", "format": "gguf" }
+        }] }));
+        assert_eq!(models[0]["parameters"], "35B");
+        assert_eq!(models[0]["quantization"], "Q6_K_P");
     }
 
     #[test]

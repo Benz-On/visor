@@ -202,13 +202,30 @@ export interface ModelCompatibility {
   workload: 'generation' | 'embedding';
   state: 'excellent' | 'good' | 'limited' | 'too-large' | 'unknown';
   label: string;
-  mode: 'gpu' | 'hybrid' | 'cpu' | 'unavailable';
+  mode: 'gpu' | 'hybrid' | 'cpu' | 'paging' | 'unavailable';
   requiredMemoryGb: number;
+  modelWeightGb: number;
+  runtimeOverheadGb: number;
+  kvCacheGb: number;
+  totalRamGb: number;
+  totalVramGb: number;
+  totalCombinedMemoryGb: number;
   availableVramGb: number;
   availableRamGb: number;
+  usableCombinedMemoryGb: number;
+  ramReserveGb: number;
+  vramReserveGb: number;
+  isUnifiedMemory: boolean;
+  assumedContextTokens: number;
+  gpuOffloadPercent: number;
+  memoryDeficitGb: number;
   estimatedTpsMin: number | null;
   estimatedTpsMax: number | null;
+  estimatedTpsCenter: number | null;
+  effectiveBandwidthGbps: number | null;
   confidence: 'medium' | 'low';
+  confidenceScore: number;
+  bottleneck: 'GPU memory bandwidth' | 'system RAM / split offload' | 'system memory bandwidth' | 'storage paging' | 'metadata';
   reason: string;
 }
 

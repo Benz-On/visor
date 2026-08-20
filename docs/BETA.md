@@ -1,8 +1,9 @@
-# VISOR 0.7 beta
+# VISOR 0.8 beta
 
-VISOR 0.7.0-beta.1 is the first hardware-intelligence release. Windows now has
-deep SMBIOS/WMI inventory, an HWiNFO-style sensor console, detailed RAM and
-process accounting, and broader local/cloud AI service attribution.
+VISOR 0.8.0-beta.1 develops the hardware-intelligence release into a transparent
+local-inference planner. It combines RAM and VRAM, models KV context and memory
+bandwidth, handles MoE active parameters, and keeps a conditional speed estimate
+visible even when a model exceeds fast memory.
 
 ## Delivery matrix
 
@@ -38,7 +39,9 @@ macOS, Linux, and ARM64 binary previews resume when native builders are availabl
 - Priority increases on macOS/Linux may require elevated permission.
 - Whole-device and per-process energy remain labeled engineering estimates unless
   a compatible vendor power sensor reports measured values.
-- Model tok/s values remain conservative predictions until a local benchmark runs.
+- Model tok/s ranges now expose context, memory equation, offload, bottleneck,
+  confidence, and paging assumptions, but remain predictions until a local
+  benchmark runs.
 - Exact CPU package, fan, voltage, and motherboard readings depend on firmware
   exposure or a running LibreHardwareMonitor/OpenHardwareMonitor WMI provider.
 
