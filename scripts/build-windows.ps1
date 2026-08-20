@@ -8,6 +8,20 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $projectRoot
 
+function Get-Sha256Hex {
+    param([Parameter(Mandatory)][string]$LiteralPath)
+
+    $stream = [System.IO.File]::OpenRead($LiteralPath)
+    $algorithm = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $algorithm.Dispose()
+        $stream.Dispose()
+    }
+}
+
 if (-not $IsWindows -and $PSVersionTable.PSEdition -eq 'Core') {
     throw 'VISOR Windows artifacts must be built on Windows.'
 }
@@ -84,11 +98,10 @@ Copy-Item -LiteralPath $installerSource.FullName -Destination $installerTarget -
 
 $files = @($portableTarget, $installerTarget) | ForEach-Object {
     $item = Get-Item -LiteralPath $_
-    $hash = Get-FileHash -LiteralPath $_ -Algorithm SHA256
     [pscustomobject][ordered]@{
         name = $item.Name
         bytes = $item.Length
-        sha256 = $hash.Hash.ToLowerInvariant()
+        sha256 = Get-Sha256Hex -LiteralPath $_
     }
 }
 $releaseManifest = [ordered]@{
