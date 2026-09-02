@@ -9,7 +9,6 @@ import {
   CircleGauge,
   CircuitBoard,
   Clock3,
-  Command,
   Cpu,
   Gauge,
   Gamepad2,
@@ -683,6 +682,10 @@ function AIWorkloads({ metrics, localAI, hardware, refreshing, onRefresh }: Metr
   const services = localAI?.applications || [];
   const cloudProviders = localAI?.cloudProviders || [];
   const detectedProviderCount = cloudProviders.filter((provider) => provider.detected).length;
+  const throughput = metrics.throughput;
+  const measuredDecode = throughput?.decodeTokensPerSecond ?? null;
+  const measuredPrefill = throughput?.prefillTokensPerSecond ?? null;
+  const throughputEvidence = throughput?.evidence || 'unavailable';
   return (
     <div className="ai-page-grid">
       <section className="panel ai-model-card">
@@ -728,11 +731,28 @@ function AIWorkloads({ metrics, localAI, hardware, refreshing, onRefresh }: Metr
         </div>
         <div className="model-spec-grid">
           <div><span>Family</span><strong>{model?.family || 'Not reported'}</strong></div>
-          <div><span>Parameters</span><strong>{model?.parameters || 'Not reported'}</strong></div>
+          <div><span>Parameters</span><strong>{model?.parameters || 'Not reported'}{model?.parameterCountExact ? <small style={{ marginLeft: 6, fontSize: 10, letterSpacing: '.06em', opacity: .65 }}>GGUF EXACT</small> : null}</strong></div>
           <div><span>Quantization</span><strong>{model?.quantization || 'Not reported'}</strong></div>
           <div><span>Context capacity</span><strong>{model?.contextLength ? `${model.contextLength.toLocaleString()} tokens` : 'Not reported'}</strong></div>
+          {model?.moe && <div><span>MoE routing</span><strong>{model.activeExperts} of {model.experts} experts</strong></div>}
         </div>
-        <div className="inference-chart-head"><div><strong>System GPU activity</strong><span>Live context while this runtime is present — not claimed as token throughput.</span></div><span className="source-chip">{model?.source || 'Operating system process counters'}</span></div>
+        <div className="inference-chart-head"><div><strong>{measuredDecode !== null ? 'Measured generation speed' : 'System GPU activity'}</strong><span>{measuredDecode !== null ? `Exact per-request rates from the runtime (${throughputEvidence === 'runtime-log' ? 'Ollama server log' : 'metrics endpoint'}).` : 'Live context while this runtime is present — not claimed as token throughput.'}</span></div><span className="source-chip">{measuredDecode !== null ? `${throughputEvidence === 'runtime-log' ? 'LOG MEASURED' : 'METRICS MEASURED'}` : model?.source || 'Operating system process counters'}</span></div>
+        {measuredDecode !== null && (
+          <div className="inference-chart" style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, padding: '0 2px 14px' }}>
+            <div className="panel" style={{ margin: 0, padding: 14 }}>
+              <span style={{ fontSize: 11, letterSpacing: '.08em', opacity: .7 }}>DECODE · MEASURED</span>
+              <strong style={{ display: 'block', fontSize: 26 }}>{measuredDecode.toFixed(1)}<small style={{ fontSize: 12 }}> tok/s</small></strong>
+            </div>
+            <div className="panel" style={{ margin: 0, padding: 14 }}>
+              <span style={{ fontSize: 11, letterSpacing: '.08em', opacity: .7 }}>PREFILL · MEASURED</span>
+              <strong style={{ display: 'block', fontSize: 26 }}>{measuredPrefill !== null ? measuredPrefill.toFixed(1) : '—'}<small style={{ fontSize: 12 }}> tok/s</small></strong>
+            </div>
+            <div className="panel" style={{ margin: 0, padding: 14 }}>
+              <span style={{ fontSize: 11, letterSpacing: '.08em', opacity: .7 }}>LAST REQUEST</span>
+              <strong style={{ display: 'block', fontSize: 26 }}>{throughput?.lastTokens ?? '—'}<small style={{ fontSize: 12 }}> tokens</small></strong>
+            </div>
+          </div>
+        )}
         <div className="inference-chart"><LineChart values={metrics.history.gpu} tone="violet" height={180} /></div>
       </section>
       <aside className="ai-side-column">
@@ -828,18 +848,21 @@ function EnergyView({ energy, processes, agent }: { energy?: EnergyEstimate; pro
 }
 
 function HistoryView({ metrics, energy, agent }: MetricsProps & { energy?: EnergyEstimate; agent?: AgentInfo }) {
-  const [range, setRange] = useState('1 hour');
+  // The collector keeps one rolling buffer; labeling it as anything longer
+  // would fabricate retention we do not have.
+  const [range, setRange] = useState('Live buffer');
   const history = metrics.history.cpu;
   const average = (values: number[]) => values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
   const peak = (values: number[]) => values.length ? Math.max(...values) : 0;
   const uptimeMinutes = Math.floor((agent?.uptimeSeconds || 0) / 60);
+  const bufferSeconds = Math.round(history.length * 1.1);
   return (
     <div className="history-grid">
       <section className="panel history-chart-card">
-        <div className="panel-header"><div><p className="eyebrow">SYSTEM LOAD</p><h2>Performance timeline</h2></div><div className="segmented-control">{['1 hour', '24 hours', '7 days'].map((item) => <button key={item} className={range === item ? 'active' : ''} onClick={() => setRange(item)}>{item}</button>)}</div></div>
+        <div className="panel-header"><div><p className="eyebrow">SYSTEM LOAD</p><h2>Performance timeline</h2></div><div className="segmented-control">{['Live buffer'].map((item) => <button key={item} className={range === item ? 'active' : ''} onClick={() => setRange(item)}>{item}</button>)}</div></div>
         <div className="history-legend"><span><i className="cyan-legend" />CPU average {average(metrics.history.cpu).toFixed(1)}%</span><span><i className="violet-legend" />GPU average {average(metrics.history.gpu).toFixed(1)}%</span></div>
         <div className="history-main-chart"><LineChart values={history} tone="cyan" height={250} /></div>
-        <div className="history-axis"><span>{history.length} samples ago</span><span>Rolling live buffer</span><span>Now</span></div>
+        <div className="history-axis"><span>{bufferSeconds} seconds ago</span><span>Last {bufferSeconds} s · 1.1 s samples</span><span>Now</span></div>
       </section>
       <section className="peak-grid">
         <PeakCard label="Peak CPU" value={`${peak(metrics.history.cpu).toFixed(1)}%`} time="Rolling buffer" icon={<Cpu />} />
@@ -914,16 +937,69 @@ function SettingStatus({ label, detail, value, tone }: { label: string; detail: 
   return <div className="setting-row"><div><strong>{label}</strong><span>{detail}</span></div><em className={`setting-status setting-status-${tone}`}>{value}</em></div>;
 }
 
+const commandItems: Array<{ view: ViewId; label: string; hint: string; icon: React.ReactNode }> = [
+  { view: 'processes', label: 'View all processes', hint: 'Resource attribution', icon: <Cpu size={18} /> },
+  { view: 'ai', label: 'Open AI workloads', hint: 'Local adapters', icon: <Bot size={18} /> },
+  { view: 'performance', label: 'Inspect GPU performance', hint: 'Live telemetry', icon: <Gauge size={18} /> },
+  { view: 'hardware', label: 'Hardware inventory', hint: 'SMBIOS + sensors', icon: <CircuitBoard size={18} /> },
+  { view: 'energy', label: 'Energy Lens', hint: 'Power and carbon', icon: <Leaf size={18} /> },
+  { view: 'history', label: 'Performance history', hint: 'Rolling buffer', icon: <Clock3 size={18} /> },
+  { view: 'alerts', label: 'Configure smart alerts', hint: 'Sustained policies', icon: <Bell size={18} /> },
+  { view: 'settings', label: 'Settings', hint: 'Themes and sources', icon: <Info size={18} /> },
+];
+
 function CommandPalette({ onClose, onNavigate }: { onClose: () => void; onNavigate: (view: ViewId) => void }) {
+  const [query, setQuery] = useState('');
+  const [cursor, setCursor] = useState(0);
+  const matches = commandItems.filter((item) =>
+    `${item.label} ${item.hint} ${item.view}`.toLowerCase().includes(query.toLowerCase()),
+  );
+  const safeCursor = Math.min(cursor, Math.max(0, matches.length - 1));
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        setCursor((current) => Math.min(current + 1, matches.length - 1));
+      } else if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        setCursor((current) => Math.max(current - 1, 0));
+      } else if (event.key === 'Enter') {
+        event.preventDefault();
+        const target = matches[safeCursor];
+        if (target) onNavigate(target.view);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [matches, safeCursor, onNavigate]);
+
   return (
     <div className="command-backdrop" onMouseDown={onClose}>
       <div className="command-palette" onMouseDown={(event) => event.stopPropagation()}>
-        <div className="command-search"><Search size={18} /><input autoFocus placeholder="Search VISOR or type a command…" /><button onClick={onClose}><X size={16} /></button></div>
-        <p>QUICK NAVIGATION</p>
-        <button onClick={() => onNavigate('processes')}><span><Cpu size={18} /> View all processes</span><Command size={14} /></button>
-        <button onClick={() => onNavigate('ai')}><span><Bot size={18} /> Open AI workloads</span><em>Local adapters</em></button>
-        <button onClick={() => onNavigate('performance')}><span><Gauge size={18} /> Inspect GPU performance</span><em>Live telemetry</em></button>
-        <button onClick={() => onNavigate('alerts')}><span><Bell size={18} /> Configure smart alerts</span></button>
+        <div className="command-search">
+          <Search size={18} />
+          <input
+            autoFocus
+            value={query}
+            onChange={(event) => { setQuery(event.target.value); setCursor(0); }}
+            placeholder="Search VISOR or type a command…"
+            aria-label="Search commands"
+          />
+          <button onClick={onClose}><X size={16} /></button>
+        </div>
+        <p>{query ? `${matches.length} MATCH${matches.length === 1 ? '' : 'ES'}` : 'QUICK NAVIGATION'}</p>
+        {matches.map((item, index) => (
+          <button
+            key={item.view}
+            className={index === safeCursor ? 'command-active' : ''}
+            onMouseEnter={() => setCursor(index)}
+            onClick={() => onNavigate(item.view)}
+          >
+            <span>{item.icon} {item.label}</span><em>{item.hint}</em>
+          </button>
+        ))}
+        {matches.length === 0 && <p className="planner-warning">No command matches “{query}”.</p>}
         <div className="command-footer"><span><kbd>↑↓</kbd> Navigate</span><span><kbd>Enter</kbd> Select</span><span><kbd>Esc</kbd> Close</span></div>
       </div>
     </div>

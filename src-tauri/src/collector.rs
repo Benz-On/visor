@@ -1,12 +1,14 @@
 use crate::alerts::AlertEngine;
 use crate::energy::{self, EnergyEstimate};
+use crate::gguf;
 use crate::local_ai;
+use crate::throughput::{self, InferenceThroughput};
 use crate::timed_command;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::process::Command;
 use std::time::{Duration, Instant};
-use sysinfo::{Disks, Networks, System};
+use sysinfo::{Disks, Networks, ProcessesToUpdate, System};
 
 const GIB: f64 = 1_073_741_824.0;
 const MIB: f64 = 1_048_576.0;
@@ -26,6 +28,8 @@ struct GpuInfo {
     temperature: f64,
     power: f64,
     power_limit: f64,
+    /// Populated when more than one discrete GPU answers the vendor query.
+    pub siblings: Vec<GpuInfo>,
 }
 
 pub struct Collector {
@@ -43,6 +47,12 @@ pub struct Collector {
     memory_details: Value,
     hardware_details: Value,
     local_ai: Value,
+    /// Measured inference throughput (metrics endpoint or runtime log).
+    inference: InferenceThroughput,
+    /// Exact GGUF metadata keyed by model name, refreshed every 10 minutes.
+    gguf_meta: HashMap<String, gguf::GgufMeta>,
+    last_gguf: Option<Instant>,
+    last_error: Option<String>,
     last_gpu: Option<Instant>,
     last_gpu_processes: Option<Instant>,
     last_process_details: Option<Instant>,
@@ -69,6 +79,10 @@ impl Collector {
             memory_details: json!({}),
             hardware_details: json!({}),
             local_ai: json!({ "scannedAt": null, "adapters": [], "models": [], "applications": [], "activeModelCount": 0, "loadedModelCount": 0 }),
+            inference: InferenceThroughput::default(),
+            gguf_meta: HashMap::new(),
+            last_gguf: None,
+            last_error: None,
             last_gpu: None,
             last_gpu_processes: None,
             last_process_details: None,
@@ -83,6 +97,16 @@ impl Collector {
         self.alert_engine.set_enabled(id, enabled)
     }
 
+    /// Refreshes only the process table for action-time validation.
+    pub fn refresh_processes_only(&mut self) {
+        self.system.refresh_processes(ProcessesToUpdate::All, true);
+    }
+
+    /// Read access to the process table for live action validation.
+    pub fn system_ref(&self) -> &System {
+        &self.system
+    }
+
     pub fn force_refresh(&mut self) {
         self.last_gpu = None;
         self.last_gpu_processes = None;
@@ -91,6 +115,19 @@ impl Collector {
         self.last_memory_details = None;
         self.last_hardware_details = None;
         self.last_local_ai = None;
+        self.last_gguf = None;
+    }
+
+    /// Reads GGUF headers for installed Ollama models and caches exact
+    /// metadata (parameter count, KV heads, MoE, tensor bytes). Bounded: one
+    /// header read per model, refreshed at most every 10 minutes.
+    fn probe_model_files(&mut self) {
+        self.gguf_meta.clear();
+        for (path, model_name) in local_ai::model_probe_targets() {
+            if let Some(meta) = gguf::probe(&path) {
+                self.gguf_meta.insert(model_name, meta);
+            }
+        }
     }
 
     pub fn collect(&mut self) -> Value {
@@ -101,10 +138,19 @@ impl Collector {
         self.system.refresh_all();
         self.networks.refresh(true);
         self.disks.refresh(true);
+        let mut probe_error: Option<String> = None;
 
         if stale(self.last_gpu, now, Duration::from_secs(2)) {
-            if let Some(gpu) = read_nvidia() {
-                self.gpu = gpu;
+            match read_nvidia() {
+                Some(gpu) => self.gpu = gpu,
+                None => {
+                    if self.gpu.temperature > 0.0 || self.gpu.utilization > 0.0 {
+                        probe_error = Some(
+                            "nvidia-smi stopped responding; GPU telemetry is unavailable."
+                                .to_string(),
+                        );
+                    }
+                }
             }
             self.last_gpu = Some(now);
         }
@@ -272,6 +318,13 @@ impl Collector {
 
         if stale(self.last_local_ai, now, Duration::from_secs(4)) {
             self.local_ai = local_ai::build(&processes);
+            if stale(self.last_gguf, now, Duration::from_secs(600)) {
+                self.probe_model_files();
+                self.last_gguf = Some(now);
+            }
+            if !self.gguf_meta.is_empty() {
+                local_ai::apply_gguf_metadata(&mut self.local_ai, &self.gguf_meta);
+            }
             self.last_local_ai = Some(now);
         }
         let gaming = processes
@@ -445,6 +498,30 @@ impl Collector {
                     "modeled-estimate"
                 },
             ));
+            for (index, sibling) in self.gpu.siblings.iter().enumerate() {
+                hardware_sensors.push(sensor_row(
+                    "GPU",
+                    &format!("GPU {index} utilization"),
+                    "Load",
+                    sibling.utilization,
+                    "%",
+                    "nvidia-smi",
+                    "graphics-driver",
+                ));
+                hardware_sensors.push(sensor_row(
+                    "GPU",
+                    &format!("GPU {index} memory"),
+                    "Load",
+                    if sibling.total_bytes > 0.0 {
+                        sibling.used_bytes / sibling.total_bytes * 100.0
+                    } else {
+                        0.0
+                    },
+                    "%",
+                    "nvidia-smi",
+                    "graphics-driver",
+                ));
+            }
         }
         let metrics = json!({
             "cpu": energy::round(cpu, 1),
@@ -458,6 +535,7 @@ impl Collector {
             "temperatureReadings": temperature_readings,
             "hardwareSensors": hardware_sensors,
             "sensorGuidance": self.sensors.get("cpuSensorGuidance").cloned().unwrap_or(Value::Null),
+            "throughput": throughput::as_json(&self.inference),
             "sensorSources": {
                 "cpu": self.sensors.get("cpuSource").cloned().unwrap_or(Value::Null),
                 "gpu": if self.gpu.temperature > 0.0 { json!("nvidia-smi") } else { Value::Null },
@@ -486,9 +564,31 @@ impl Collector {
                 "swapTotalBytes": self.system.total_swap(),
                 "swapUsedBytes": self.system.used_swap()
             },
-            "gpuMemory": { "totalBytes": self.gpu.total_bytes, "usedBytes": self.gpu.used_bytes }
+            "gpuMemory": { "totalBytes": self.gpu.total_bytes, "usedBytes": self.gpu.used_bytes },
+            "gpuCount": 1 + self.gpu.siblings.len(),
+            "gpus": {
+                "primary": {
+                    "model": self.gpu.model,
+                    "utilization": energy::round(self.gpu.utilization, 1),
+                    "totalBytes": self.gpu.total_bytes,
+                    "usedBytes": self.gpu.used_bytes,
+                    "temperature": energy::round(self.gpu.temperature, 1),
+                    "power": energy::round(self.gpu.power, 1),
+                    "powerLimit": energy::round(self.gpu.power_limit, 1)
+                },
+                "siblings": self.gpu.siblings.iter().map(|gpu| json!({
+                    "model": gpu.model,
+                    "utilization": energy::round(gpu.utilization, 1),
+                    "totalBytes": gpu.total_bytes,
+                    "usedBytes": gpu.used_bytes,
+                    "temperature": energy::round(gpu.temperature, 1),
+                    "power": energy::round(gpu.power, 1),
+                    "powerLimit": energy::round(gpu.power_limit, 1)
+                })).collect::<Vec<_>>()
+            }
         });
         let alerts = self.alert_engine.evaluate(&metrics, gaming);
+        self.inference = throughput::measure();
         let current_pid = std::process::id();
         let current_process = processes
             .iter()
@@ -499,6 +599,7 @@ impl Collector {
             .values()
             .filter(|process| format!("{:?}", process.status()).eq_ignore_ascii_case("Stop"))
             .count();
+        self.last_error = probe_error;
 
         json!({
             "timestamp": chrono::Utc::now().to_rfc3339(),
@@ -524,7 +625,7 @@ impl Collector {
                 "sampleDurationMs": collection_started.elapsed().as_millis(),
                 "gpuAttributionAvailable": !self.gpu_processes.is_empty(),
                 "sensorAttributionAvailable": cpu_temp > 0.0 || ssd_temp > 0.0,
-                "lastError": null
+                "lastError": self.last_error.clone()
             }
         })
     }
@@ -670,10 +771,32 @@ impl Collector {
                 "powerLimit": self.gpu.power_limit
             });
         }
+        let mut all_gpus = Vec::with_capacity(1 + self.gpu.siblings.len());
+        if !self.gpu.model.is_empty() {
+            all_gpus.push(json!({
+                "vendor": "NVIDIA",
+                "model": self.gpu.model,
+                "vramBytes": self.gpu.total_bytes,
+                "driverVersion": self.gpu.driver,
+                "status": "OK",
+                "powerLimit": self.gpu.power_limit
+            }));
+            for sibling in &self.gpu.siblings {
+                all_gpus.push(json!({
+                    "vendor": "NVIDIA",
+                    "model": sibling.model,
+                    "vramBytes": sibling.total_bytes,
+                    "driverVersion": sibling.driver,
+                    "status": "OK",
+                    "powerLimit": sibling.power_limit
+                }));
+            }
+        }
+        if all_gpus.is_empty() {
+            all_gpus = detail_gpus.clone();
+        }
         let fallback_networks = self
-            .networks
-            .iter()
-            .map(|(name, _)| {
+            .networks.keys().map(|name| {
                 json!({ "name": name, "manufacturer": "", "type": "Network interface", "speedBits": 0, "connection": name, "status": "Connected" })
             })
             .collect::<Vec<_>>();
@@ -719,7 +842,7 @@ impl Collector {
                 "estimatedTdp": tdp
             },
             "gpu": primary_gpu,
-            "gpus": detail_gpus,
+            "gpus": all_gpus,
             "memory": {
                 "totalBytes": positive_or(number(details_memory, "totalBytes"), self.system.total_memory() as f64),
                 "modules": details_memory.get("modules").and_then(Value::as_array).cloned().unwrap_or_default()
@@ -921,7 +1044,7 @@ fn attribute_energy(
 }
 
 fn read_nvidia() -> Option<GpuInfo> {
-    let fields = "name,driver_version,utilization.gpu,memory.total,memory.used,temperature.gpu,power.draw,power.limit";
+    let fields = "index,name,driver_version,utilization.gpu,memory.total,memory.used,temperature.gpu,power.draw,power.limit";
     let output = timed_command::output(
         hidden_command(if cfg!(windows) {
             "nvidia-smi.exe"
@@ -940,25 +1063,40 @@ fn read_nvidia() -> Option<GpuInfo> {
         return None;
     }
     let text = String::from_utf8_lossy(&output.stdout);
-    let row = text
+    let mut gpus: Vec<GpuInfo> = text
         .lines()
-        .next()?
-        .split(',')
-        .map(str::trim)
-        .collect::<Vec<_>>();
-    if row.len() < 8 {
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let row = line.split(',').map(str::trim).collect::<Vec<_>>();
+            if row.len() < 9 {
+                return GpuInfo::default();
+            }
+            GpuInfo {
+                model: row[1].to_string(),
+                driver: row[2].to_string(),
+                utilization: row[3].parse().unwrap_or_default(),
+                total_bytes: row[4].parse::<f64>().unwrap_or_default() * MIB,
+                used_bytes: row[5].parse::<f64>().unwrap_or_default() * MIB,
+                temperature: row[6].parse().unwrap_or_default(),
+                power: row[7].parse().unwrap_or_default(),
+                power_limit: row[8].parse().unwrap_or_default(),
+                siblings: Vec::new(),
+            }
+        })
+        .collect();
+    if gpus.iter().any(|gpu| gpu.model.is_empty()) || gpus.is_empty() {
         return None;
     }
-    Some(GpuInfo {
-        model: row[0].to_string(),
-        driver: row[1].to_string(),
-        utilization: row[2].parse().unwrap_or_default(),
-        total_bytes: row[3].parse::<f64>().unwrap_or_default() * MIB,
-        used_bytes: row[4].parse::<f64>().unwrap_or_default() * MIB,
-        temperature: row[5].parse().unwrap_or_default(),
-        power: row[6].parse().unwrap_or_default(),
-        power_limit: row[7].parse().unwrap_or_default(),
-    })
+    // Prefer the adapter with real memory use as the primary; expose the rest.
+    gpus.sort_by(|left, right| {
+        right
+            .used_bytes
+            .total_cmp(&left.used_bytes)
+            .then_with(|| right.total_bytes.total_cmp(&left.total_bytes))
+    });
+    let mut primary = gpus.remove(0);
+    primary.siblings = gpus;
+    Some(primary)
 }
 
 #[cfg(windows)]

@@ -152,9 +152,25 @@ export function analyzeLocalModel(model: LocalModelInfo, hardware?: HardwareInfo
   const availableVramGb = Math.max(0, totalVramGb - vramReserveGb);
   const usableCombinedMemoryGb = unifiedMemory ? availableRamGb : availableRamGb + availableVramGb;
   const totalCombinedMemoryGb = unifiedMemory ? totalRamGb : totalRamGb + totalVramGb;
-  const parameters = parameterProfile(model);
+  // Exact GGUF metadata wins when present; filename heuristics are fallbacks.
+  const exactParameters = model.parameterCountExact && model.parameterCountExact > 0
+    ? model.parameterCountExact / 1_000_000_000
+    : null;
+  const exactWeightGb = model.weightBytesExact && model.weightBytesExact > 0
+    ? model.weightBytesExact / GIB
+    : null;
+  const parameters: ParameterProfile = exactParameters
+    ? {
+        totalBillions: exactParameters,
+        // GGUF MoE keys give the true active ratio; fall back to name parsing.
+        activeBillions: model.moe && model.activeParameterRatio
+          ? exactParameters * model.activeParameterRatio
+          : parameterProfile(model).activeBillions,
+      }
+    : parameterProfile(model);
   const bits = quantizationBits(model);
-  const reportedWeightGb = (model.sizeBytes || 0) / GIB;
+  const reportedWeightGb = exactWeightGb
+    || (model.sizeBytes || 0) / GIB;
   const inferredWeightGb = parameters.totalBillions ? parameters.totalBillions * bits / 8 * 1.035 : 0;
   const modelWeightGb = reportedWeightGb || inferredWeightGb || (model.allocatedBytes ? model.allocatedBytes / GIB * .9 : 0);
   const requestedContext = Math.max(512, options.contextTokens || 4096);
@@ -180,7 +196,15 @@ export function analyzeLocalModel(model: LocalModelInfo, hardware?: HardwareInfo
     ? clamp(.1 + .9 * parameters.activeBillions / parameters.totalBillions, .08, 1)
     : 1;
   const activeWeightGb = modelWeightGb * activeRatio;
-  const kvBytesPerToken = workload === 'embedding' ? 0 : 128 * 1024 * Math.sqrt(Math.max(.25, totalParameters) / 8);
+  // Exact KV heads from the GGUF header replace the parameter-count heuristic:
+  // 2 bytes/elem (K+V f16) × layers × kv_heads × head_dim × context tokens.
+  const headDim = 128;
+  const kvBytesPerTokenExact = model.layers && model.kvHeads
+    ? 2 * model.layers * model.kvHeads * headDim * 2
+    : null;
+  const kvBytesPerToken = workload === 'embedding'
+    ? 0
+    : kvBytesPerTokenExact ?? 128 * 1024 * Math.sqrt(Math.max(.25, totalParameters) / 8);
   const kvCacheGb = kvBytesPerToken * assumedContextTokens / GIB;
   const runtimeOverheadGb = .35 + modelWeightGb * .035 + Math.min(2.5, totalParameters * .012);
   const modeledRequirement = modelWeightGb + kvCacheGb + runtimeOverheadGb;
@@ -230,10 +254,12 @@ export function analyzeLocalModel(model: LocalModelInfo, hardware?: HardwareInfo
   if (reportedWeightGb) confidenceScore += 20;
   if (parameters.totalBillions) confidenceScore += 12;
   if (model.quantization) confidenceScore += 8;
+  if (exactParameters) confidenceScore += 8;
+  if (kvBytesPerTokenExact) confidenceScore += 6;
   if (gpuProfile?.source === 'device-profile' || (!gpuWeightGb && cpuProfile.source === 'memory-topology')) confidenceScore += 10;
   if (model.contextLength) confidenceScore += 5;
   if (mode === 'paging') confidenceScore = Math.min(confidenceScore - 18, 48);
-  confidenceScore = Math.round(clamp(confidenceScore, 20, 85));
+  confidenceScore = Math.round(clamp(confidenceScore, 20, 95));
   const uncertainty = confidenceScore >= 70 ? [.72, 1.22] : confidenceScore >= 50 ? [.58, 1.35] : [.42, 1.55];
   const estimatedTpsCenter = workload === 'generation' ? roundTps(center) : null;
   const estimatedTpsMin = workload === 'generation' ? roundTps(center * uncertainty[0]) : null;
@@ -253,6 +279,9 @@ export function analyzeLocalModel(model: LocalModelInfo, hardware?: HardwareInfo
       : mode === 'cpu' ? 'CPU / unified-memory inference'
         : 'conditional paging / mmap fallback';
   const sourceLabel = bandwidthSourceKnown ? 'detected memory topology' : 'hardware-class fallback';
+  const metadataSource = exactParameters || exactWeightGb
+    ? 'exact GGUF header metadata'
+    : 'name and size heuristics';
 
   return {
     workload,
@@ -282,6 +311,6 @@ export function analyzeLocalModel(model: LocalModelInfo, hardware?: HardwareInfo
     confidence: confidenceScore >= 55 ? 'medium' : 'low',
     confidenceScore,
     bottleneck,
-    reason: `${modeLabel}; ${round(gpuOffloadPercent)}% estimated GPU offload at ${assumedContextTokens.toLocaleString()} context. Throughput is bandwidth-modeled from ${sourceLabel}, not benchmarked.`,
+    reason: `${modeLabel}; ${round(gpuOffloadPercent)}% estimated GPU offload at ${assumedContextTokens.toLocaleString()} context. Memory math uses ${metadataSource}; throughput is bandwidth-modeled from ${sourceLabel}, not benchmarked.`,
   };
 }

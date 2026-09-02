@@ -4,6 +4,14 @@ export type ThemeId = 'studio' | 'porcelain' | 'cyber' | 'retro';
 
 export type MetricKey = 'cpu' | 'gpu' | 'ram' | 'vram';
 
+export interface InferenceThroughputInfo {
+  decodeTokensPerSecond: number | null;
+  prefillTokensPerSecond: number | null;
+  lastTokens: number | null;
+  evidence: 'metrics-endpoint' | 'runtime-log' | 'unavailable' | string;
+  observedAt: string | null;
+}
+
 export interface LiveMetrics {
   cpu: number;
   gpu: number;
@@ -41,6 +49,8 @@ export interface LiveMetrics {
     swapUsedBytes: number;
   };
   gpuMemory?: { totalBytes: number; usedBytes: number };
+  /** Measured inference throughput; null rates mean no generation observed. */
+  throughput?: InferenceThroughputInfo;
   history: Record<MetricKey | 'network' | 'disk', number[]>;
 }
 
@@ -151,6 +161,16 @@ export interface LocalModelInfo {
   applicationEnergyWatts: number | null;
   applicationCpu: number;
   applicationGpu: number;
+  /** Exact GGUF header metadata — present only when the blob was readable. */
+  parameterCountExact?: number;
+  weightBytesExact?: number;
+  kvHeads?: number | null;
+  kvHeadCountExact?: boolean;
+  layers?: number | null;
+  experts?: number | null;
+  activeExperts?: number | null;
+  moe?: boolean;
+  activeParameterRatio?: number;
 }
 
 export interface LocalAiApplication {

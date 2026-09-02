@@ -2,7 +2,7 @@
 
 [![Latest release](https://img.shields.io/github/v/release/Benz-On/visor?include_prereleases)](https://github.com/Benz-On/visor/releases)
 
-Development version: **0.8.0-beta.1** · Latest published build: **0.7.0-beta.1**
+Development version: **0.9.0-beta.1** · Latest published build: **0.7.0-beta.1**
 
 VISOR is a premium, local-first system monitor for Windows, macOS, and Linux.
 It combines high-density live telemetry, process control, energy modeling, and
@@ -49,7 +49,8 @@ See [platform support](docs/PLATFORMS.md) for detailed coverage and limitations.
 - Sustained-load, thermal, and VRAM alerts with game-aware suppression
 - Installed and loaded model inventory for Ollama, LM Studio, llama.cpp, Jan,
   ComfyUI, GGUF/GGML, Safetensors, ONNX, and PyTorch weight folders
-- Hardware-fit advisor with reserved-memory modeling and conservative tok/s ranges
+- Measured decode/prefill tok/s from runtime logs and metrics endpoints, kept strictly separate from modeled ranges
+- Hardware-fit advisor with reserved-memory modeling, exact GGUF header metadata (parameters, KV heads, MoE), and conservative tok/s ranges
 - Live local footprint for Codex, ChatGPT, Claude Code, Kimi Code, Copilot,
   Cursor, Windsurf, Continue, Cline, Roo Code, Ollama, LM Studio, Jan, GPT4All,
   llama.cpp, and related runtimes

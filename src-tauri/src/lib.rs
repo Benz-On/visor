@@ -1,7 +1,9 @@
 mod alerts;
 mod collector;
 mod energy;
+mod gguf;
 mod local_ai;
+mod throughput;
 mod timed_command;
 
 use collector::Collector;
@@ -20,6 +22,37 @@ struct RuntimeState {
     latest: Arc<RwLock<Option<Value>>>,
     alert_settings: Arc<Mutex<HashMap<String, bool>>>,
     collector: Arc<Mutex<Collector>>,
+}
+
+/// Fresh look-up of a process at action time, independent of the (possibly
+/// stale and truncated) UI snapshot. Returns the process name, or an error.
+/// The protected check runs against this live data, closing the PID-recycling
+/// window between "the UI showed this PID" and "the OS acts on it".
+fn live_target(collector: &Mutex<Collector>, pid: u32) -> Result<Value, String> {
+    let mut collector = collector
+        .lock()
+        .map_err(|_| "VISOR native collector is unavailable.".to_string())?;
+    collector.refresh_processes_only();
+    let system = collector.system_ref();
+    let process = system
+        .process(sysinfo::Pid::from_u32(pid))
+        .ok_or_else(|| "The process is no longer running.".to_string())?;
+    let raw_name = process.name().to_string_lossy().to_string();
+    let name = if cfg!(windows)
+        && !raw_name.contains('.')
+        && !["System", "Registry", "Idle"].contains(&raw_name.as_str())
+    {
+        format!("{raw_name}.exe")
+    } else {
+        raw_name
+    };
+    let protected = collector::is_protected(pid, &name);
+    Ok(json!({
+        "id": pid,
+        "name": name,
+        "protected": protected,
+        "path": process.exe().map(|value| value.to_string_lossy().to_string()).unwrap_or_default()
+    }))
 }
 
 #[tauri::command]
@@ -53,7 +86,11 @@ fn kill_process(
     if confirmation != pid.to_string() {
         return Err("PID confirmation does not match.".to_string());
     }
-    let target = find_target(&state, pid)?;
+    // Re-validate against a live process refresh, not the UI snapshot.
+    let target = match live_target(&state.collector, pid) {
+        Ok(target) => target,
+        Err(_) => find_target(&state, pid)?,
+    };
     if target
         .get("protected")
         .and_then(Value::as_bool)
@@ -130,7 +167,11 @@ fn set_process_priority(
     pid: u32,
     priority: String,
 ) -> Result<Value, String> {
-    let target = find_target(&state, pid)?;
+    // Re-validate against a live process refresh, not the UI snapshot.
+    let target = match live_target(&state.collector, pid) {
+        Ok(target) => target,
+        Err(_) => find_target(&state, pid)?,
+    };
     if target
         .get("protected")
         .and_then(Value::as_bool)
