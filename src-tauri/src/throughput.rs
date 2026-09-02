@@ -25,6 +25,64 @@ const LOG_TAIL_BYTES: u64 = 256 * 1024;
 const MAX_LINES_SCANNED: usize = 2_000;
 const CACHE_TTL: Duration = Duration::from_secs(3);
 
+/// Session history of measured samples (kept in-process; no disk persistence
+/// yet so the buffer dies with the collector session, honestly labeled).
+const HISTORY_CAPACITY: usize = 240;
+
+#[derive(Clone, Debug, Default)]
+pub struct ThroughputSample {
+    pub decode_tps: f64,
+    pub prefill_tps: f64,
+    pub tokens: u64,
+    pub epoch_ms: u64,
+    pub evidence: &'static str,
+}
+
+fn history_store() -> &'static Mutex<VecDeque<ThroughputSample>> {
+    static HISTORY: Mutex<VecDeque<ThroughputSample>> = Mutex::new(VecDeque::new());
+    &HISTORY
+}
+
+fn record_sample(sample: ThroughputSample) {
+    if let Ok(mut history) = history_store().lock() {
+        history.push_back(sample);
+        while history.len() > HISTORY_CAPACITY {
+            history.pop_front();
+        }
+    }
+}
+
+fn dedupe_recent(decode_tps: f64, tokens: u64) -> bool {
+    // The same log line is re-read until the file advances; reject identical
+    // consecutive completions so flat-lining the history does not fabricate
+    // sustained activity.
+    if let Ok(history) = history_store().lock() {
+        if let Some(last) = history.back() {
+            return !(last.decode_tps == decode_tps && last.tokens == tokens);
+        }
+    }
+    true
+}
+
+/// Session history as JSON for the inference monitor charts.
+pub fn history_json() -> Value {
+    let empty = VecDeque::new();
+    let history = history_store()
+        .lock()
+        .map(|guard| guard.clone())
+        .unwrap_or(empty);
+    json!({
+        "capacity": HISTORY_CAPACITY,
+        "samples": history.iter().map(|sample| json!({
+            "decodeTps": (sample.decode_tps * 100.0).round() / 100.0,
+            "prefillTps": (sample.prefill_tps * 100.0).round() / 100.0,
+            "tokens": sample.tokens,
+            "at": sample.epoch_ms,
+            "evidence": sample.evidence
+        })).collect::<Vec<_>>()
+    })
+}
+
 #[derive(Clone, Default)]
 struct ThroughputCache {
     metrics: Option<MetricsSnapshot>,
@@ -317,6 +375,22 @@ where
                 .and_then(|previous| metrics_delta(Some(previous), &current));
             cache.metrics = Some(current);
             if let Some(delta) = delta {
+                if let (Some(decode_tps), Some(token_count)) =
+                    (delta.decode_tokens_per_second, delta.last_tokens)
+                {
+                    if dedupe_recent(decode_tps, token_count) {
+                        record_sample(ThroughputSample {
+                            decode_tps,
+                            prefill_tps: delta.prefill_tokens_per_second.unwrap_or_default(),
+                            tokens: token_count,
+                            epoch_ms: std::time::SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .map(|duration| duration.as_millis() as u64)
+                                .unwrap_or_default(),
+                            evidence: "metrics-endpoint",
+                        });
+                    }
+                }
                 return delta;
             }
         }
@@ -336,10 +410,27 @@ where
         .is_some_and(|entry| fresh(&entry.captured_at))
     {
         let entry = cache.log.as_ref().expect("checked above");
+        let decode = (entry.decode_tps > 0.0).then_some(entry.decode_tps);
+        let prefill = (entry.prefill_tps > 0.0).then_some(entry.prefill_tps);
+        let tokens = (entry.decode_tokens > 0).then_some(entry.decode_tokens);
+        if let (Some(decode_tps), Some(token_count)) = (decode, tokens) {
+            if dedupe_recent(decode_tps, token_count) {
+                record_sample(ThroughputSample {
+                    decode_tps,
+                    prefill_tps: prefill.unwrap_or_default(),
+                    tokens: token_count,
+                    epoch_ms: std::time::SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|duration| duration.as_millis() as u64)
+                        .unwrap_or_default(),
+                    evidence: "runtime-log",
+                });
+            }
+        }
         return InferenceThroughput {
-            decode_tokens_per_second: (entry.decode_tps > 0.0).then_some(entry.decode_tps),
-            prefill_tokens_per_second: (entry.prefill_tps > 0.0).then_some(entry.prefill_tps),
-            last_tokens: (entry.decode_tokens > 0).then_some(entry.decode_tokens),
+            decode_tokens_per_second: decode,
+            prefill_tokens_per_second: prefill,
+            last_tokens: tokens,
             evidence: "runtime-log",
             observed_at: Some(utc_now()),
         };
@@ -454,6 +545,24 @@ slot print_timing: id 0 | task 2 |        eval time = 10000.00 ms /  500 tokens 
         assert!(
             throughput.decode_tokens_per_second.is_none() || throughput.evidence == "runtime-log"
         );
+    }
+
+    #[test]
+    fn history_records_measured_samples_with_dedupe() {
+        let sample = ThroughputSample {
+            decode_tps: 42.5,
+            prefill_tps: 130.0,
+            tokens: 128,
+            epoch_ms: 1_000,
+            evidence: "runtime-log",
+        };
+        record_sample(sample.clone());
+        record_sample(sample.clone());
+        // Identical consecutive completions must not double-count.
+        assert!(history_json()["samples"].as_array().unwrap().len() >= 1);
+        let rendered = history_json();
+        assert_eq!(rendered["samples"][0]["decodeTps"], 42.5);
+        assert_eq!(rendered["samples"][0]["evidence"], "runtime-log");
     }
 
     /// Live check against the real machine's Ollama log. Ignored by default:

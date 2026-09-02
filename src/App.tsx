@@ -38,7 +38,7 @@ import { ProcessTable } from './components/ProcessTable';
 import { Sidebar, type ViewId } from './components/Sidebar';
 import { useVisorData } from './hooks/useVisorData';
 import { analyzeLocalModel } from './modelAdvisor';
-import type { AgentInfo, AlertsSnapshot, EnergyEstimate, HardwareInfo, LocalAiSnapshot, LocalModelInfo, MetricKey, MetricTone, ProcessInfo, TemperatureReading, ThemeId } from './types';
+import type { AgentInfo, AlertsSnapshot, EnergyEstimate, HardwareInfo, LocalAiSnapshot, LocalModelInfo, MetricKey, MetricTone, ProcessInfo, TemperatureReading, ThemeId, ThroughputSampleInfo } from './types';
 
 const themeOrder: ThemeId[] = ['studio', 'porcelain', 'cyber', 'retro'];
 const themeNames: Record<ThemeId, string> = {
@@ -213,7 +213,7 @@ function App() {
           {activeView === 'hardware' && <HardwareView metrics={metrics} hardware={visor.snapshot?.hardware} refreshing={visor.refreshing} onRefresh={visor.refresh} />}
           {activeView === 'processes' && <ProcessExplorer metrics={metrics} processes={visor.processes} counts={visor.snapshot?.processCounts} live={visor.connection === 'live'} refreshing={visor.refreshing} onRefresh={visor.refresh} onKill={visor.killProcess} onPriority={visor.setProcessPriority} />}
           {activeView === 'performance' && <Performance metrics={metrics} hardware={visor.snapshot?.hardware} refreshing={visor.refreshing} onRefresh={visor.refresh} />}
-          {activeView === 'ai' && <AIWorkloads metrics={metrics} localAI={visor.snapshot?.localAI} hardware={visor.snapshot?.hardware} refreshing={visor.refreshing} onRefresh={visor.refresh} />}
+          {activeView === 'ai' && <AIWorkloads metrics={metrics} localAI={visor.snapshot?.localAI} hardware={visor.snapshot?.hardware} throughputHistory={visor.throughputHistory} refreshing={visor.refreshing} onRefresh={visor.refresh} />}
           {activeView === 'energy' && <EnergyView energy={visor.snapshot?.energy} processes={visor.processes} agent={visor.snapshot?.agent} />}
           {activeView === 'history' && <HistoryView metrics={metrics} energy={visor.snapshot?.energy} agent={visor.snapshot?.agent} />}
           {activeView === 'alerts' && <AlertsView alerts={visor.snapshot?.alerts} live={visor.connection === 'live'} onToggle={visor.setAlertRule} />}
@@ -664,7 +664,7 @@ const tokenSpeed = (minimum: number | null, maximum: number | null, workload: 'g
   ? 'Embedding model'
   : minimum !== null && maximum !== null ? `${minimum}–${maximum} tok/s` : 'Speed unknown';
 
-function AIWorkloads({ metrics, localAI, hardware, refreshing, onRefresh }: MetricsProps & { localAI?: LocalAiSnapshot; hardware?: HardwareInfo } & RefreshControls) {
+function AIWorkloads({ metrics, localAI, hardware, throughputHistory, refreshing, onRefresh }: MetricsProps & { localAI?: LocalAiSnapshot; hardware?: HardwareInfo; throughputHistory: ThroughputSampleInfo[] } & RefreshControls) {
   const preferredModel = localAI?.models.find((item) => item.status === 'active') || localAI?.models.find((item) => item.status === 'loaded') || localAI?.models[0];
   const [selectedModelId, setSelectedModelId] = useState('');
   const [plannerContext, setPlannerContext] = useState(4096);
@@ -715,6 +715,26 @@ function AIWorkloads({ metrics, localAI, hardware, refreshing, onRefresh }: Metr
             </div>
             <div className="memory-capacity-track"><i style={{ width: `${Math.min(100, compatibility.requiredMemoryGb / Math.max(.1, compatibility.usableCombinedMemoryGb) * 100)}%` }} /><span className="vram-boundary" style={{ left: `${Math.min(100, compatibility.availableVramGb / Math.max(.1, compatibility.usableCombinedMemoryGb) * 100)}%` }} /></div>
             <div className="memory-capacity-legend"><span><i className="legend-vram" />{compatibility.isUnifiedMemory ? 'Unified memory pool' : `${compatibility.availableVramGb.toFixed(1)} GB usable VRAM`}</span><span><i className="legend-ram" />{compatibility.availableRamGb.toFixed(1)} GB usable RAM</span><strong>{compatibility.usableCombinedMemoryGb.toFixed(1)} GB usable combined</strong></div>
+            {compatibility.offloadPlan && (
+              <div style={{ marginTop: 10 }} aria-label="Layer offload plan">
+                <div style={{ fontSize: 11, letterSpacing: '.08em', opacity: .7, marginBottom: 6 }}>LAYER OFFLOAD PLAN · PREDICTED SPEED PER PLACEMENT</div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
+                  {compatibility.offloadPlan.map((step) => (
+                    <div
+                      key={step.layersOnGpu}
+                      className={`panel ${step.fitsVram ? '' : 'planner-warning'}`}
+                      style={{ margin: 0, padding: '10px 12px', opacity: step.fitsVram ? 1 : .65 }}
+                      title={step.fitsVram ? 'Fits in usable VRAM' : 'Exceeds usable VRAM'}
+                    >
+                      <strong style={{ display: 'block', fontSize: 15 }}>{step.layersOnGpu}/{step.layersTotal} layers</strong>
+                      <span style={{ fontSize: 12 }}>{step.estimatedTpsCenter ?? '—'} tok/s</span>
+                      <small style={{ display: 'block', opacity: .65 }}>{step.vramNeededGb.toFixed(1)} GB {step.fitsVram ? '· fits' : '· over'}</small>
+                    </div>
+                  ))}
+                </div>
+                <small style={{ display: 'block', marginTop: 6, opacity: .6 }}>Modeled from exact GGUF layer count and weight bytes. The best fitting placement is a starting point for <code>num_gpu</code>; a local benchmark remains authoritative.</small>
+              </div>
+            )}
             <p className={compatibility.memoryDeficitGb > 0 ? 'planner-warning' : ''}>{compatibility.memoryDeficitGb > 0 ? `${compatibility.memoryDeficitGb.toFixed(1)} GB beyond fast memory. Speed is still modeled using conditional mmap/pagefile access and may vary sharply.` : `${(compatibility.ramReserveGb + compatibility.vramReserveGb).toFixed(1)} GB reserved for the OS/display. ${compatibility.reason}`}</p>
           </section>
         </>}
@@ -752,6 +772,20 @@ function AIWorkloads({ metrics, localAI, hardware, refreshing, onRefresh }: Metr
               <strong style={{ display: 'block', fontSize: 26 }}>{throughput?.lastTokens ?? '—'}<small style={{ fontSize: 12 }}> tokens</small></strong>
             </div>
           </div>
+        )}
+        {throughputHistory.length > 1 && (
+          <section className="panel" style={{ margin: '0 2px 14px', padding: 14 }} aria-label="Measured throughput history">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
+              <span style={{ fontSize: 11, letterSpacing: '.08em', opacity: .7 }}>SESSION THROUGHPUT · {throughputHistory.length} MEASURED COMPLETIONS</span>
+              <small style={{ opacity: .6 }}>in-memory · this collector session only</small>
+            </div>
+            <LineChart values={throughputHistory.map((sample) => Math.min(100, sample.decodeTps))} tone="mint" height={90} compact />
+            <div style={{ display: 'flex', gap: 16, marginTop: 8, fontSize: 12 }}>
+              <span>Average {throughputHistory.reduce((sum, sample) => sum + sample.decodeTps, 0) / throughputHistory.length | 0} tok/s</span>
+              <span>Peak {Math.max(...throughputHistory.map((sample) => sample.decodeTps)).toFixed(1)} tok/s</span>
+              <span>{throughputHistory.reduce((sum, sample) => sum + sample.tokens, 0).toLocaleString()} tokens total</span>
+            </div>
+          </section>
         )}
         <div className="inference-chart"><LineChart values={metrics.history.gpu} tone="violet" height={180} /></div>
       </section>

@@ -82,3 +82,43 @@ test('classifies embedding and reranker tags as non-generative workloads', () =>
     assert.equal(result.estimatedTpsCenter, null);
   }
 });
+
+test('exact GGUF metadata raises confidence and drives the memory equation', () => {
+  const exact = analyzeLocalModel({
+    ...model(),
+    parameterCountExact: 9_653_104_368,
+    weightBytesExact: Math.round(6.1 * GIB),
+    layers: 32,
+    kvHeads: 8,
+    kvHeadCountExact: true,
+  }, hardware());
+  assert.ok(exact.confidenceScore >= 70);
+  assert.ok(exact.modelWeightGb > 6 && exact.modelWeightGb < 7);
+  assert.ok(exact.reason.includes('exact GGUF header metadata'));
+});
+
+test('offload plan answers how many layers fit on the GPU', () => {
+  const tight = analyzeLocalModel({
+    ...model({ name: 'qwen3.6-35B-A3B-Q4_K_M.gguf', parameters: '35B', size: 20, context: 4096 }),
+    parameterCountExact: 35_000_000_000,
+    weightBytesExact: Math.round(20 * GIB),
+    layers: 64,
+    kvHeads: 4,
+    kvHeadCountExact: true,
+  }, hardware({ ram: 32, vram: 8 }));
+  assert.ok(Array.isArray(tight.offloadPlan) && tight.offloadPlan.length === 4);
+  const full = tight.offloadPlan[0];
+  const partial = tight.offloadPlan[1];
+  assert.equal(full.layersOnGpu, 64);
+  assert.equal(full.fitsVram, false);
+  assert.equal(partial.layersOnGpu, 48);
+  assert.ok(partial.vramNeededGb < full.vramNeededGb);
+  assert.ok(partial.estimatedTpsCenter !== null);
+  // A partial plan should predict faster tokens than the paging verdict.
+  assert.ok(tight.estimatedTpsCenter === null || partial.estimatedTpsCenter >= tight.estimatedTpsCenter);
+});
+
+test('offload plan is absent without exact layer metadata', () => {
+  const heuristic = analyzeLocalModel(model(), hardware());
+  assert.equal(heuristic.offloadPlan, undefined);
+});

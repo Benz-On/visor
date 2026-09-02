@@ -2,7 +2,7 @@
 
 [![Latest release](https://img.shields.io/github/v/release/Benz-On/visor?include_prereleases)](https://github.com/Benz-On/visor/releases)
 
-Development version: **0.9.0-beta.1** · Latest published build: **0.7.0-beta.1**
+Development version: **0.9.1-beta.1** · Latest published build: **0.7.0-beta.1**
 
 VISOR is a premium, local-first system monitor for Windows, macOS, and Linux.
 It combines high-density live telemetry, process control, energy modeling, and

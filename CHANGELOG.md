@@ -3,6 +3,21 @@
 All notable VISOR changes are documented here. Versions follow Semantic
 Versioning while the product remains in beta.
 
+## [0.9.1-beta.1] - Unreleased
+
+### Added
+
+- Session throughput history: every measured completion (runtime log or
+  metrics endpoint) is recorded with decode/prefill rates and token count,
+  deduplicated so re-read log lines never double-count, and exposed via a
+  `get_throughput_history` command. The AI view renders the session curve
+  with average, peak, and total tokens — explicitly labeled as
+  in-memory for this collector session.
+- Layer offload plan in the inference planner: with an exact GGUF layer
+  count and weight bytes, four placements (100/75/50/25% of layers on
+  GPU) each report predicted tok/s and VRAM need, answering "how many
+  layers fit" with copy-ready `num_gpu` guidance.
+
 ## [0.9.0-beta.1] - Unreleased
 
 ### Added

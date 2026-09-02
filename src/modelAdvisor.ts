@@ -247,6 +247,44 @@ export function analyzeLocalModel(model: LocalModelInfo, hardware?: HardwareInfo
   const transferFactor = mode === 'hybrid' ? 1.13 : mode === 'paging' ? 1.28 : 1;
   const secondsPerToken = Math.max(.0005, (gpuSeconds + cpuSeconds + pagingSeconds) * transferFactor / (quantEfficiency * runtimeFactor));
   const center = clamp(1 / secondsPerToken, .01, 2500);
+
+  // Layer-level offload plan. With an exact layer count and exact weight bytes
+  // each step is defensible: per-layer weight bytes are uniform in GGUF, and
+  // per-layer KV is exact from the header. Steps: 25/50/75/100% of layers.
+  let offloadPlan: ModelCompatibility['offloadPlan'];
+  const layersTotal = model.layers && model.layers > 0 ? model.layers : null;
+  const perLayerWeightGb = layersTotal && reportedWeightGb && !exactWeightGb
+    ? modelWeightGb / layersTotal
+    : null;
+  if (layersTotal && (exactWeightGb || perLayerWeightGb) && !unifiedMemory) {
+    const perLayerGb = exactWeightGb
+      ? exactWeightGb / layersTotal
+      : (perLayerWeightGb ?? 0);
+    const kvPerLayerGb = kvBytesPerTokenExact
+      ? (kvBytesPerTokenExact / 2) * assumedContextTokens / GIB
+      : kvCacheGb / layersTotal;
+    offloadPlan = [1, .75, .5, .25].map((share) => {
+      const layersOnGpu = Math.max(0, Math.round(layersTotal * share));
+      const vramNeededGb = layersOnGpu * (perLayerGb + kvPerLayerGb) + runtimeOverheadGb * .5;
+      // Serial time: layers on GPU at GPU bandwidth, the rest at CPU bandwidth.
+      const onGpuWeight = activeWeightGb * (layersOnGpu / layersTotal);
+      const onCpuWeight = Math.max(0, activeWeightGb - onGpuWeight);
+      const stepGpuSeconds = onGpuWeight && gpuProfile
+        ? (onGpuWeight + contextReadGb * (layersOnGpu / layersTotal)) / gpuProfile.effectiveGbps
+        : 0;
+      const stepCpuSeconds = onCpuWeight
+        ? (onCpuWeight + contextReadGb * (onCpuWeight / activeWeightGb)) / cpuProfile.effectiveGbps
+        : 0;
+      const stepSeconds = Math.max(.0005, (stepGpuSeconds + stepCpuSeconds) * (onCpuWeight > 0 ? 1.13 : 1) / (quantEfficiency * runtimeFactor));
+      return {
+        layersOnGpu,
+        layersTotal,
+        vramNeededGb: round(vramNeededGb, 2),
+        fitsVram: vramNeededGb <= availableVramGb,
+        estimatedTpsCenter: workload === 'generation' ? roundTps(clamp(1 / stepSeconds, .01, 2500)) : null,
+      };
+    });
+  }
   const bandwidthSourceKnown = gpuWeightGb > 0
     ? gpuProfile?.source === 'device-profile' && (cpuWeightGb === 0 || cpuProfile.source !== 'capacity-fallback')
     : cpuProfile.source !== 'capacity-fallback';
@@ -304,6 +342,7 @@ export function analyzeLocalModel(model: LocalModelInfo, hardware?: HardwareInfo
     assumedContextTokens,
     gpuOffloadPercent: round(gpuOffloadPercent),
     memoryDeficitGb: round(memoryDeficitGb),
+    offloadPlan,
     estimatedTpsMin,
     estimatedTpsMax,
     estimatedTpsCenter,
