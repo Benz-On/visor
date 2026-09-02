@@ -2,7 +2,7 @@
 
 [![Latest release](https://img.shields.io/github/v/release/Benz-On/visor?include_prereleases)](https://github.com/Benz-On/visor/releases)
 
-Current version: **0.7.0-beta.1**
+Development version: **0.9.0-beta.1** · Latest published build: **0.7.0-beta.1**
 
 VISOR is a premium, local-first system monitor for Windows, macOS, and Linux.
 It combines high-density live telemetry, process control, energy modeling, and
@@ -49,7 +49,8 @@ See [platform support](docs/PLATFORMS.md) for detailed coverage and limitations.
 - Sustained-load, thermal, and VRAM alerts with game-aware suppression
 - Installed and loaded model inventory for Ollama, LM Studio, llama.cpp, Jan,
   ComfyUI, GGUF/GGML, Safetensors, ONNX, and PyTorch weight folders
-- Hardware-fit advisor with reserved-memory modeling and conservative tok/s ranges
+- Measured decode/prefill tok/s from runtime logs and metrics endpoints, kept strictly separate from modeled ranges
+- Hardware-fit advisor with reserved-memory modeling, exact GGUF header metadata (parameters, KV heads, MoE), and conservative tok/s ranges
 - Live local footprint for Codex, ChatGPT, Claude Code, Kimi Code, Copilot,
   Cursor, Windsurf, Continue, Cline, Roo Code, Ollama, LM Studio, Jan, GPT4All,
   llama.cpp, and related runtimes
@@ -153,10 +154,13 @@ process tree. An exact model name is shown only when a runtime reports it.
 - Known roots: GGUF, GGML, Safetensors, ONNX, and PyTorch weights
 - Custom roots: use the platform path separator in `VISOR_MODEL_PATHS`
 
-The hardware advisor reserves operating-system and runtime memory before deciding
-whether a model fits in VRAM, split VRAM/RAM, CPU RAM, or is too large. Tok/s is
-an engineering range until a real benchmark is run. Embedding models are not
-misrepresented as text-generation models.
+The hardware advisor combines RAM and dedicated VRAM, reserves operating-system
+and display memory, and accounts for model weights, runtime overhead, KV cache,
+context length, quantization, MoE active parameters, memory bandwidth, and GPU
+offload. It still reports a conditional tok/s range when a model exceeds fast
+memory, with storage paging and lower confidence made explicit. Unified memory
+is counted once. See the [model advisor methodology](docs/MODEL-ADVISOR.md).
+Embedding models are not misrepresented as text-generation models.
 
 ## Energy methodology
 

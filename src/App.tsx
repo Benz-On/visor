@@ -9,7 +9,6 @@ import {
   CircleGauge,
   CircuitBoard,
   Clock3,
-  Command,
   Cpu,
   Gauge,
   Gamepad2,
@@ -668,6 +667,7 @@ const tokenSpeed = (minimum: number | null, maximum: number | null, workload: 'g
 function AIWorkloads({ metrics, localAI, hardware, refreshing, onRefresh }: MetricsProps & { localAI?: LocalAiSnapshot; hardware?: HardwareInfo } & RefreshControls) {
   const preferredModel = localAI?.models.find((item) => item.status === 'active') || localAI?.models.find((item) => item.status === 'loaded') || localAI?.models[0];
   const [selectedModelId, setSelectedModelId] = useState('');
+  const [plannerContext, setPlannerContext] = useState(4096);
   const model = localAI?.models.find((item) => item.id === selectedModelId) || preferredModel;
   const application = localAI?.applications.find((item) => item.application === model?.application) || (!model ? localAI?.applications[0] : undefined);
   const runtimeProcess = model?.process || application?.processes.find((item) => item.role === 'model-runner' || item.role === 'runtime') || application?.processes[0];
@@ -676,12 +676,16 @@ function AIWorkloads({ metrics, localAI, hardware, refreshing, onRefresh }: Metr
   const totalVramGb = bytesToGb(metrics.gpuMemory?.totalBytes);
   const appEnergy = model?.applicationEnergyWatts ?? application?.energyWatts ?? 0;
   const exactModel = Boolean(model);
-  const compatibility = model ? analyzeLocalModel(model, hardware) : null;
+  const compatibility = model ? analyzeLocalModel(model, hardware, { contextTokens: plannerContext }) : null;
   const selectedModelSize = model ? modelSizeParts(model) : null;
   const installedModels = localAI?.models || [];
   const services = localAI?.applications || [];
   const cloudProviders = localAI?.cloudProviders || [];
   const detectedProviderCount = cloudProviders.filter((provider) => provider.detected).length;
+  const throughput = metrics.throughput;
+  const measuredDecode = throughput?.decodeTokensPerSecond ?? null;
+  const measuredPrefill = throughput?.prefillTokensPerSecond ?? null;
+  const throughputEvidence = throughput?.evidence || 'unavailable';
   return (
     <div className="ai-page-grid">
       <section className="panel ai-model-card">
@@ -695,12 +699,30 @@ function AIWorkloads({ metrics, localAI, hardware, refreshing, onRefresh }: Metr
           <div><span>RUNTIME</span><strong>{model?.runtime || application?.runtime || '—'}</strong></div><em>→</em>
           <div><span>MODEL</span><strong>{model?.model || 'Not reported'}</strong></div>
         </div>
-        {compatibility && <div className={`compatibility-banner fit-${compatibility.state}`}><div><span>HARDWARE FIT</span><strong>{compatibility.label}</strong><small>{compatibility.requiredMemoryGb.toFixed(1)} GB estimated · {compatibility.mode.toUpperCase()}</small></div><div><span>{compatibility.workload === 'embedding' ? 'EMBEDDING WORKLOAD' : 'ESTIMATED GENERATION'}</span><strong>{tokenSpeed(compatibility.estimatedTpsMin, compatibility.estimatedTpsMax, compatibility.workload)}</strong><small>{compatibility.workload === 'embedding' ? 'generation tok/s does not apply' : `${compatibility.confidence} confidence · not a benchmark`}</small></div></div>}
+        {compatibility && <>
+          <div className={`compatibility-banner fit-${compatibility.state}`}>
+            <div><span>HARDWARE FIT</span><strong>{compatibility.label}</strong><small>{compatibility.requiredMemoryGb.toFixed(1)} GB required · {compatibility.mode.toUpperCase()}</small></div>
+            <div><span>{compatibility.workload === 'embedding' ? 'EMBEDDING WORKLOAD' : 'ESTIMATED GENERATION'}</span><strong>{tokenSpeed(compatibility.estimatedTpsMin, compatibility.estimatedTpsMax, compatibility.workload)}</strong><small>{compatibility.workload === 'embedding' ? 'generation tok/s does not apply' : `${compatibility.estimatedTpsCenter ?? '—'} tok/s center · ${compatibility.confidenceScore}% input confidence`}</small></div>
+            <div><span>PRIMARY BOTTLENECK</span><strong>{compatibility.bottleneck}</strong><small>{compatibility.gpuOffloadPercent.toFixed(0)}% GPU offload · {compatibility.effectiveBandwidthGbps?.toFixed(1) || '—'} effective GB/s</small></div>
+          </div>
+          <section className="inference-planner" aria-label="Inference memory and context planner">
+            <div className="planner-header"><div><span>INFERENCE PLANNER</span><strong>RAM + VRAM capacity model</strong></div><div className="context-presets" aria-label="Assumed context length">{[2048, 4096, 8192, 16384, 32768].map((tokens) => <button key={tokens} className={plannerContext === tokens ? 'active' : ''} onClick={() => setPlannerContext(tokens)}>{tokens / 1024}K</button>)}</div></div>
+            <div className="memory-equation">
+              <div><span>Model weights</span><strong>{compatibility.modelWeightGb.toFixed(1)} GB</strong></div><em>+</em>
+              <div><span>KV cache · {(compatibility.assumedContextTokens / 1024).toFixed(compatibility.assumedContextTokens % 1024 ? 1 : 0)}K</span><strong>{compatibility.kvCacheGb.toFixed(2)} GB</strong></div><em>+</em>
+              <div><span>Runtime</span><strong>{compatibility.runtimeOverheadGb.toFixed(1)} GB</strong></div><em>=</em>
+              <div className="memory-total"><span>Required</span><strong>{compatibility.requiredMemoryGb.toFixed(1)} GB</strong></div>
+            </div>
+            <div className="memory-capacity-track"><i style={{ width: `${Math.min(100, compatibility.requiredMemoryGb / Math.max(.1, compatibility.usableCombinedMemoryGb) * 100)}%` }} /><span className="vram-boundary" style={{ left: `${Math.min(100, compatibility.availableVramGb / Math.max(.1, compatibility.usableCombinedMemoryGb) * 100)}%` }} /></div>
+            <div className="memory-capacity-legend"><span><i className="legend-vram" />{compatibility.isUnifiedMemory ? 'Unified memory pool' : `${compatibility.availableVramGb.toFixed(1)} GB usable VRAM`}</span><span><i className="legend-ram" />{compatibility.availableRamGb.toFixed(1)} GB usable RAM</span><strong>{compatibility.usableCombinedMemoryGb.toFixed(1)} GB usable combined</strong></div>
+            <p className={compatibility.memoryDeficitGb > 0 ? 'planner-warning' : ''}>{compatibility.memoryDeficitGb > 0 ? `${compatibility.memoryDeficitGb.toFixed(1)} GB beyond fast memory. Speed is still modeled using conditional mmap/pagefile access and may vary sharply.` : `${(compatibility.ramReserveGb + compatibility.vramReserveGb).toFixed(1)} GB reserved for the OS/display. ${compatibility.reason}`}</p>
+          </section>
+        </>}
         <div className="ai-primary-stats">
           {model?.status === 'detected' ? <>
             <div><span>Installed model size</span><strong>{selectedModelSize?.value || '—'}</strong><small>{selectedModelSize?.unit === 'size unavailable' ? selectedModelSize.unit : `${selectedModelSize?.unit} on disk`}</small></div>
             <div><span>Estimated memory need</span><strong>{compatibility?.requiredMemoryGb.toFixed(1) || '—'}</strong><small>GB including runtime overhead</small></div>
-            <div><span>{compatibility?.workload === 'embedding' ? 'Workload type' : 'Estimated generation'}</span><strong>{compatibility?.workload === 'embedding' ? 'EMBED' : compatibility?.estimatedTpsMax ?? '—'}</strong><small>{compatibility?.workload === 'embedding' ? 'generation speed is not applicable' : 'tok/s upper range · not loaded'}</small></div>
+            <div><span>{compatibility?.workload === 'embedding' ? 'Workload type' : 'Estimated generation'}</span><strong>{compatibility?.workload === 'embedding' ? 'EMBED' : compatibility?.estimatedTpsCenter ?? '—'}</strong><small>{compatibility?.workload === 'embedding' ? 'generation speed is not applicable' : 'tok/s modeled center · not loaded'}</small></div>
           </> : <>
             <div><span>Model VRAM allocation</span><strong>{modelVramGb.toFixed(2)}</strong><small>GB reported by {model?.application || 'process counters'}</small></div>
             <div><span>Model RAM allocation</span><strong>{allocatedRamGb.toFixed(2)}</strong><small>GB outside VRAM</small></div>
@@ -709,11 +731,28 @@ function AIWorkloads({ metrics, localAI, hardware, refreshing, onRefresh }: Metr
         </div>
         <div className="model-spec-grid">
           <div><span>Family</span><strong>{model?.family || 'Not reported'}</strong></div>
-          <div><span>Parameters</span><strong>{model?.parameters || 'Not reported'}</strong></div>
+          <div><span>Parameters</span><strong>{model?.parameters || 'Not reported'}{model?.parameterCountExact ? <small style={{ marginLeft: 6, fontSize: 10, letterSpacing: '.06em', opacity: .65 }}>GGUF EXACT</small> : null}</strong></div>
           <div><span>Quantization</span><strong>{model?.quantization || 'Not reported'}</strong></div>
           <div><span>Context capacity</span><strong>{model?.contextLength ? `${model.contextLength.toLocaleString()} tokens` : 'Not reported'}</strong></div>
+          {model?.moe && <div><span>MoE routing</span><strong>{model.activeExperts} of {model.experts} experts</strong></div>}
         </div>
-        <div className="inference-chart-head"><div><strong>System GPU activity</strong><span>Live context while this runtime is present — not claimed as token throughput.</span></div><span className="source-chip">{model?.source || 'Operating system process counters'}</span></div>
+        <div className="inference-chart-head"><div><strong>{measuredDecode !== null ? 'Measured generation speed' : 'System GPU activity'}</strong><span>{measuredDecode !== null ? `Exact per-request rates from the runtime (${throughputEvidence === 'runtime-log' ? 'Ollama server log' : 'metrics endpoint'}).` : 'Live context while this runtime is present — not claimed as token throughput.'}</span></div><span className="source-chip">{measuredDecode !== null ? `${throughputEvidence === 'runtime-log' ? 'LOG MEASURED' : 'METRICS MEASURED'}` : model?.source || 'Operating system process counters'}</span></div>
+        {measuredDecode !== null && (
+          <div className="inference-chart" style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, padding: '0 2px 14px' }}>
+            <div className="panel" style={{ margin: 0, padding: 14 }}>
+              <span style={{ fontSize: 11, letterSpacing: '.08em', opacity: .7 }}>DECODE · MEASURED</span>
+              <strong style={{ display: 'block', fontSize: 26 }}>{measuredDecode.toFixed(1)}<small style={{ fontSize: 12 }}> tok/s</small></strong>
+            </div>
+            <div className="panel" style={{ margin: 0, padding: 14 }}>
+              <span style={{ fontSize: 11, letterSpacing: '.08em', opacity: .7 }}>PREFILL · MEASURED</span>
+              <strong style={{ display: 'block', fontSize: 26 }}>{measuredPrefill !== null ? measuredPrefill.toFixed(1) : '—'}<small style={{ fontSize: 12 }}> tok/s</small></strong>
+            </div>
+            <div className="panel" style={{ margin: 0, padding: 14 }}>
+              <span style={{ fontSize: 11, letterSpacing: '.08em', opacity: .7 }}>LAST REQUEST</span>
+              <strong style={{ display: 'block', fontSize: 26 }}>{throughput?.lastTokens ?? '—'}<small style={{ fontSize: 12 }}> tokens</small></strong>
+            </div>
+          </div>
+        )}
         <div className="inference-chart"><LineChart values={metrics.history.gpu} tone="violet" height={180} /></div>
       </section>
       <aside className="ai-side-column">
@@ -723,15 +762,15 @@ function AIWorkloads({ metrics, localAI, hardware, refreshing, onRefresh }: Metr
       </aside>
       <section className="panel ai-inventory-card">
         <div className="panel-header"><div><p className="eyebrow">LOCAL MODEL CHECKER</p><h2>What this machine can actually run</h2></div><span>{localAI?.installedModelCount || installedModels.length} models inventoried</span></div>
-        <div className="inventory-hardware-strip"><span><Server size={15} /><strong>{hardware?.gpu?.model || 'GPU unavailable'}</strong><small>{bytesToGb(hardware?.gpu?.vramBytes).toFixed(1)} GB VRAM</small></span><span><Cpu size={15} /><strong>{hardware?.cpu.brand || 'CPU unavailable'}</strong><small>{hardware?.cpu.physicalCores || hardware?.cpu.cores || 0} physical cores</small></span><span><MemoryStick size={15} /><strong>{bytesToGb(hardware?.memory.totalBytes).toFixed(1)} GB RAM</strong><small>OS reserve included in every verdict</small></span></div>
+        <div className="inventory-hardware-strip"><span><Server size={15} /><strong>{hardware?.gpu?.model || 'GPU unavailable'}</strong><small>{bytesToGb(hardware?.gpu?.vramBytes).toFixed(1)} GB VRAM</small></span><span><Cpu size={15} /><strong>{hardware?.cpu.brand || 'CPU unavailable'}</strong><small>{hardware?.cpu.physicalCores || hardware?.cpu.cores || 0} physical cores</small></span><span><MemoryStick size={15} /><strong>{compatibility?.totalCombinedMemoryGb.toFixed(1) || bytesToGb(hardware?.memory.totalBytes).toFixed(1)} GB combined</strong><small>{compatibility?.isUnifiedMemory ? 'shared unified pool · counted once' : `${compatibility?.totalRamGb.toFixed(1) || '—'} RAM + ${compatibility?.totalVramGb.toFixed(1) || '—'} VRAM`}</small></span></div>
         <div className="model-inventory-list">
           {installedModels.length === 0 && <div className="ai-empty-state"><Bot size={20} /><div><strong>No local model found yet</strong><span>VISOR checked nine loopback adapters, Ollama manifests, common model libraries and known weight formats.</span></div></div>}
           {installedModels.map((item) => {
-            const fit = analyzeLocalModel(item, hardware);
+            const fit = analyzeLocalModel(item, hardware, { contextTokens: plannerContext });
             return <button key={item.id} className={item.id === model?.id ? 'selected' : ''} onClick={() => setSelectedModelId(item.id)}><div className="model-inventory-name"><strong>{item.model}</strong><span>{item.application} · {item.quantization || item.format?.toUpperCase() || 'metadata partial'}</span></div><span className="model-size-cell">{modelSize(item)}<small>{item.status}</small></span><span className={`fit-badge fit-${fit.state}`}>{fit.label}<small>{fit.mode}</small></span><span className="speed-cell">{tokenSpeed(fit.estimatedTpsMin, fit.estimatedTpsMax, fit.workload)}<small>{fit.workload === 'embedding' ? 'no generation tok/s' : `${fit.confidence} confidence`}</small></span></button>;
           })}
         </div>
-        <p className="advisor-disclaimer">Predictions are conservative engineering ranges based on model weight, quantization, usable VRAM/RAM, CPU class and execution mode. Run a benchmark to replace the estimate with measured throughput.</p>
+        <p className="advisor-disclaimer">Generation ranges model weight streaming, KV context, detected RAM topology, GPU memory bandwidth, quantization and offload mode. Models beyond RAM + VRAM still receive a conditional paging estimate. A local benchmark remains the authoritative measurement.</p>
       </section>
       <section className="panel ai-services-card">
         <div className="panel-header"><div><p className="eyebrow">AI SERVICE ATTRIBUTION</p><h2>Detected local runtimes and cloud clients</h2></div><span>{services.length} services · live process totals</span></div>
@@ -809,18 +848,21 @@ function EnergyView({ energy, processes, agent }: { energy?: EnergyEstimate; pro
 }
 
 function HistoryView({ metrics, energy, agent }: MetricsProps & { energy?: EnergyEstimate; agent?: AgentInfo }) {
-  const [range, setRange] = useState('1 hour');
+  // The collector keeps one rolling buffer; labeling it as anything longer
+  // would fabricate retention we do not have.
+  const [range, setRange] = useState('Live buffer');
   const history = metrics.history.cpu;
   const average = (values: number[]) => values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
   const peak = (values: number[]) => values.length ? Math.max(...values) : 0;
   const uptimeMinutes = Math.floor((agent?.uptimeSeconds || 0) / 60);
+  const bufferSeconds = Math.round(history.length * 1.1);
   return (
     <div className="history-grid">
       <section className="panel history-chart-card">
-        <div className="panel-header"><div><p className="eyebrow">SYSTEM LOAD</p><h2>Performance timeline</h2></div><div className="segmented-control">{['1 hour', '24 hours', '7 days'].map((item) => <button key={item} className={range === item ? 'active' : ''} onClick={() => setRange(item)}>{item}</button>)}</div></div>
+        <div className="panel-header"><div><p className="eyebrow">SYSTEM LOAD</p><h2>Performance timeline</h2></div><div className="segmented-control">{['Live buffer'].map((item) => <button key={item} className={range === item ? 'active' : ''} onClick={() => setRange(item)}>{item}</button>)}</div></div>
         <div className="history-legend"><span><i className="cyan-legend" />CPU average {average(metrics.history.cpu).toFixed(1)}%</span><span><i className="violet-legend" />GPU average {average(metrics.history.gpu).toFixed(1)}%</span></div>
         <div className="history-main-chart"><LineChart values={history} tone="cyan" height={250} /></div>
-        <div className="history-axis"><span>{history.length} samples ago</span><span>Rolling live buffer</span><span>Now</span></div>
+        <div className="history-axis"><span>{bufferSeconds} seconds ago</span><span>Last {bufferSeconds} s · 1.1 s samples</span><span>Now</span></div>
       </section>
       <section className="peak-grid">
         <PeakCard label="Peak CPU" value={`${peak(metrics.history.cpu).toFixed(1)}%`} time="Rolling buffer" icon={<Cpu />} />
@@ -895,16 +937,69 @@ function SettingStatus({ label, detail, value, tone }: { label: string; detail: 
   return <div className="setting-row"><div><strong>{label}</strong><span>{detail}</span></div><em className={`setting-status setting-status-${tone}`}>{value}</em></div>;
 }
 
+const commandItems: Array<{ view: ViewId; label: string; hint: string; icon: React.ReactNode }> = [
+  { view: 'processes', label: 'View all processes', hint: 'Resource attribution', icon: <Cpu size={18} /> },
+  { view: 'ai', label: 'Open AI workloads', hint: 'Local adapters', icon: <Bot size={18} /> },
+  { view: 'performance', label: 'Inspect GPU performance', hint: 'Live telemetry', icon: <Gauge size={18} /> },
+  { view: 'hardware', label: 'Hardware inventory', hint: 'SMBIOS + sensors', icon: <CircuitBoard size={18} /> },
+  { view: 'energy', label: 'Energy Lens', hint: 'Power and carbon', icon: <Leaf size={18} /> },
+  { view: 'history', label: 'Performance history', hint: 'Rolling buffer', icon: <Clock3 size={18} /> },
+  { view: 'alerts', label: 'Configure smart alerts', hint: 'Sustained policies', icon: <Bell size={18} /> },
+  { view: 'settings', label: 'Settings', hint: 'Themes and sources', icon: <Info size={18} /> },
+];
+
 function CommandPalette({ onClose, onNavigate }: { onClose: () => void; onNavigate: (view: ViewId) => void }) {
+  const [query, setQuery] = useState('');
+  const [cursor, setCursor] = useState(0);
+  const matches = commandItems.filter((item) =>
+    `${item.label} ${item.hint} ${item.view}`.toLowerCase().includes(query.toLowerCase()),
+  );
+  const safeCursor = Math.min(cursor, Math.max(0, matches.length - 1));
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        setCursor((current) => Math.min(current + 1, matches.length - 1));
+      } else if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        setCursor((current) => Math.max(current - 1, 0));
+      } else if (event.key === 'Enter') {
+        event.preventDefault();
+        const target = matches[safeCursor];
+        if (target) onNavigate(target.view);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [matches, safeCursor, onNavigate]);
+
   return (
     <div className="command-backdrop" onMouseDown={onClose}>
       <div className="command-palette" onMouseDown={(event) => event.stopPropagation()}>
-        <div className="command-search"><Search size={18} /><input autoFocus placeholder="Search VISOR or type a command…" /><button onClick={onClose}><X size={16} /></button></div>
-        <p>QUICK NAVIGATION</p>
-        <button onClick={() => onNavigate('processes')}><span><Cpu size={18} /> View all processes</span><Command size={14} /></button>
-        <button onClick={() => onNavigate('ai')}><span><Bot size={18} /> Open AI workloads</span><em>Local adapters</em></button>
-        <button onClick={() => onNavigate('performance')}><span><Gauge size={18} /> Inspect GPU performance</span><em>Live telemetry</em></button>
-        <button onClick={() => onNavigate('alerts')}><span><Bell size={18} /> Configure smart alerts</span></button>
+        <div className="command-search">
+          <Search size={18} />
+          <input
+            autoFocus
+            value={query}
+            onChange={(event) => { setQuery(event.target.value); setCursor(0); }}
+            placeholder="Search VISOR or type a command…"
+            aria-label="Search commands"
+          />
+          <button onClick={onClose}><X size={16} /></button>
+        </div>
+        <p>{query ? `${matches.length} MATCH${matches.length === 1 ? '' : 'ES'}` : 'QUICK NAVIGATION'}</p>
+        {matches.map((item, index) => (
+          <button
+            key={item.view}
+            className={index === safeCursor ? 'command-active' : ''}
+            onMouseEnter={() => setCursor(index)}
+            onClick={() => onNavigate(item.view)}
+          >
+            <span>{item.icon} {item.label}</span><em>{item.hint}</em>
+          </button>
+        ))}
+        {matches.length === 0 && <p className="planner-warning">No command matches “{query}”.</p>}
         <div className="command-footer"><span><kbd>↑↓</kbd> Navigate</span><span><kbd>Enter</kbd> Select</span><span><kbd>Esc</kbd> Close</span></div>
       </div>
     </div>

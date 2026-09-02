@@ -3,6 +3,64 @@
 All notable VISOR changes are documented here. Versions follow Semantic
 Versioning while the product remains in beta.
 
+## [0.9.0-beta.1] - Unreleased
+
+### Added
+
+- Measured inference throughput: decode and prefill tok/s read from the
+  Ollama server log (`slot print_timing` lines) and from llama.cpp/vLLM
+  prometheus `/metrics` counters, with explicit evidence labels
+  (`runtime-log`, `metrics-endpoint`, `unavailable`). Rates are never
+  modeled; when no generation is observed the panel reports absence.
+- Exact GGUF header reader: parameter count, block count, attention and
+  KV head counts (per-layer arrays included), embedding and context
+  lengths, expert counts for MoE, and exact weight bytes summed from the
+  tensor table. Every allocation is capped so a corrupt file aborts the
+  probe instead of the collector.
+- Installed Ollama models are probed through their manifests to the
+  primary GGUF blob, and the model advisor now prefers exact header
+  metadata (true parameter count, GQA-aware KV math, MoE active ratio,
+  weight bytes) over filename heuristics, raising advisor confidence.
+- Multi-GPU visibility: nvidia-smi enumerates every adapter; the primary
+  GPU is the one with active memory, siblings appear in the sensor
+  console and in a new `gpus` snapshot block.
+- Live process re-validation: kill and priority commands refresh the
+  process table at action time and re-run the protected-process check,
+  closing the PID-recycling window between the UI snapshot and the OS
+  call.
+- Collector diagnostics: `agent.lastError` now reports real probe
+  failures (for example an nvidia-smi timeout) instead of staying null.
+
+### Changed
+
+- Command palette is functional: query filtering, keyboard navigation
+  (up/down/Enter), and eight navigation targets.
+- History view honestly labels its rolling buffer (~37 s at 1.1 s
+  samples) instead of showing inert 1 hour/24 hours/7 days switches.
+- The AI view shows a measured-rate panel with decode/prefill split when
+  a runtime reports timings, and keeps the modeled estimate clearly
+  separate from it.
+
+## [0.8.0-beta.1] - Unreleased
+
+### Added
+
+- Interactive 2K–32K context planner with a transparent weights + KV cache +
+  runtime memory equation, combined RAM/VRAM budget, reserves, deficit, and GPU
+  offload visualization.
+- Bandwidth-oriented generation estimator with device profiles, detected DDR
+  topology, MoE active-parameter handling, context penalties, and an explicit
+  confidence score and bottleneck.
+- Conditional tok/s forecasts for models beyond usable RAM + VRAM instead of
+  hiding speed behind an unavailable verdict.
+
+### Changed
+
+- Unified-memory systems are counted once; dedicated systems now use RAM + VRAM
+  directly for capacity planning while keeping OS and display reserves visible.
+- Hybrid speed is calculated from serial GPU/CPU layer time, so slow system RAM
+  can no longer be masked by a fast GPU coefficient.
+
 ## [0.7.0-beta.1] - 2026-08-01
 
 ### Added
@@ -79,6 +137,7 @@ Versioning while the product remains in beta.
 - Premium Geist typography, four themes, thermal emphasis, and sustained-load
   alerts with gaming-aware suppression.
 
+[0.8.0-beta.1]: https://github.com/Benz-On/visor/compare/v0.7.0-beta.1...main
 [0.7.0-beta.1]: https://github.com/Benz-On/visor/compare/v0.6.0-beta.2...v0.7.0-beta.1
 [0.6.0-beta.2]: https://github.com/Benz-On/visor/compare/v0.6.0-beta.1...v0.6.0-beta.2
 [0.6.0-beta.1]: https://github.com/Benz-On/visor/compare/v0.5.0-beta.1...v0.6.0-beta.1

@@ -4,6 +4,14 @@ export type ThemeId = 'studio' | 'porcelain' | 'cyber' | 'retro';
 
 export type MetricKey = 'cpu' | 'gpu' | 'ram' | 'vram';
 
+export interface InferenceThroughputInfo {
+  decodeTokensPerSecond: number | null;
+  prefillTokensPerSecond: number | null;
+  lastTokens: number | null;
+  evidence: 'metrics-endpoint' | 'runtime-log' | 'unavailable' | string;
+  observedAt: string | null;
+}
+
 export interface LiveMetrics {
   cpu: number;
   gpu: number;
@@ -41,6 +49,8 @@ export interface LiveMetrics {
     swapUsedBytes: number;
   };
   gpuMemory?: { totalBytes: number; usedBytes: number };
+  /** Measured inference throughput; null rates mean no generation observed. */
+  throughput?: InferenceThroughputInfo;
   history: Record<MetricKey | 'network' | 'disk', number[]>;
 }
 
@@ -151,6 +161,16 @@ export interface LocalModelInfo {
   applicationEnergyWatts: number | null;
   applicationCpu: number;
   applicationGpu: number;
+  /** Exact GGUF header metadata — present only when the blob was readable. */
+  parameterCountExact?: number;
+  weightBytesExact?: number;
+  kvHeads?: number | null;
+  kvHeadCountExact?: boolean;
+  layers?: number | null;
+  experts?: number | null;
+  activeExperts?: number | null;
+  moe?: boolean;
+  activeParameterRatio?: number;
 }
 
 export interface LocalAiApplication {
@@ -202,13 +222,30 @@ export interface ModelCompatibility {
   workload: 'generation' | 'embedding';
   state: 'excellent' | 'good' | 'limited' | 'too-large' | 'unknown';
   label: string;
-  mode: 'gpu' | 'hybrid' | 'cpu' | 'unavailable';
+  mode: 'gpu' | 'hybrid' | 'cpu' | 'paging' | 'unavailable';
   requiredMemoryGb: number;
+  modelWeightGb: number;
+  runtimeOverheadGb: number;
+  kvCacheGb: number;
+  totalRamGb: number;
+  totalVramGb: number;
+  totalCombinedMemoryGb: number;
   availableVramGb: number;
   availableRamGb: number;
+  usableCombinedMemoryGb: number;
+  ramReserveGb: number;
+  vramReserveGb: number;
+  isUnifiedMemory: boolean;
+  assumedContextTokens: number;
+  gpuOffloadPercent: number;
+  memoryDeficitGb: number;
   estimatedTpsMin: number | null;
   estimatedTpsMax: number | null;
+  estimatedTpsCenter: number | null;
+  effectiveBandwidthGbps: number | null;
   confidence: 'medium' | 'low';
+  confidenceScore: number;
+  bottleneck: 'GPU memory bandwidth' | 'system RAM / split offload' | 'system memory bandwidth' | 'storage paging' | 'metadata';
   reason: string;
 }
 

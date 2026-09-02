@@ -1,7 +1,9 @@
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+use crate::gguf;
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -660,6 +662,11 @@ fn parse_ollama(payload: &Value) -> Vec<Value> {
         .map(|row| {
             let model = string(row.get("name")).or_else(|| string(row.get("model")));
             let digest = string(row.get("digest"));
+            let display_model = if model.is_empty() {
+                "Unknown Ollama model".to_string()
+            } else {
+                model.clone()
+            };
             let mut item = model_base(ModelBaseInput {
                 id: format!(
                     "ollama:{}",
@@ -667,21 +674,33 @@ fn parse_ollama(payload: &Value) -> Vec<Value> {
                 ),
                 application: "Ollama",
                 runtime: "Ollama engine",
-                model: if model.is_empty() {
-                    "Unknown Ollama model".to_string()
-                } else {
-                    model
-                },
+                model: display_model.clone(),
                 status: "loaded",
                 source: "Ollama /api/ps",
                 confidence: 100,
-                size_bytes: number(row.get("size")),
+                // `/api/ps.size` is the live allocation, which can include a
+                // large KV context. Weight bytes come from `/api/tags`/manifests.
+                size_bytes: 0.0,
                 location: "Ollama library".to_string(),
             });
             let details = row.get("details").unwrap_or(&Value::Null);
+            let parameters = string(details.get("parameter_size"));
+            let quantization = string(details.get("quantization_level"));
             item["family"] = Value::String(string(details.get("family")));
-            item["parameters"] = Value::String(string(details.get("parameter_size")));
-            item["quantization"] = Value::String(string(details.get("quantization_level")));
+            item["parameters"] = Value::String(
+                if parameters.is_empty() || parameters.eq_ignore_ascii_case("unknown") {
+                    infer_parameters(&display_model)
+                } else {
+                    parameters
+                },
+            );
+            item["quantization"] = Value::String(
+                if quantization.is_empty() || quantization.eq_ignore_ascii_case("unknown") {
+                    infer_quantization(&display_model)
+                } else {
+                    quantization
+                },
+            );
             item["format"] = Value::String(string(details.get("format")));
             item["contextLength"] = json!(number(row.get("context_length")));
             item["allocatedBytes"] = json!(number(row.get("size")));
@@ -701,6 +720,11 @@ fn parse_ollama_tags(payload: &Value) -> Vec<Value> {
         .map(|row| {
             let model = string(row.get("name")).or_else(|| string(row.get("model")));
             let digest = string(row.get("digest"));
+            let display_model = if model.is_empty() {
+                "Unknown Ollama model".to_string()
+            } else {
+                model.clone()
+            };
             let mut item = model_base(ModelBaseInput {
                 id: format!(
                     "ollama:{}",
@@ -708,11 +732,7 @@ fn parse_ollama_tags(payload: &Value) -> Vec<Value> {
                 ),
                 application: "Ollama",
                 runtime: "Ollama engine",
-                model: if model.is_empty() {
-                    "Unknown Ollama model".to_string()
-                } else {
-                    model
-                },
+                model: display_model.clone(),
                 status: "detected",
                 source: "Ollama /api/tags",
                 confidence: 100,
@@ -720,9 +740,23 @@ fn parse_ollama_tags(payload: &Value) -> Vec<Value> {
                 location: "Ollama library".to_string(),
             });
             let details = row.get("details").unwrap_or(&Value::Null);
+            let parameters = string(details.get("parameter_size"));
+            let quantization = string(details.get("quantization_level"));
             item["family"] = Value::String(string(details.get("family")));
-            item["parameters"] = Value::String(string(details.get("parameter_size")));
-            item["quantization"] = Value::String(string(details.get("quantization_level")));
+            item["parameters"] = Value::String(
+                if parameters.is_empty() || parameters.eq_ignore_ascii_case("unknown") {
+                    infer_parameters(&display_model)
+                } else {
+                    parameters
+                },
+            );
+            item["quantization"] = Value::String(
+                if quantization.is_empty() || quantization.eq_ignore_ascii_case("unknown") {
+                    infer_quantization(&display_model)
+                } else {
+                    quantization
+                },
+            );
             item["format"] = Value::String(string(details.get("format")));
             item
         })
@@ -1019,21 +1053,21 @@ fn candidate_model_roots() -> Vec<(PathBuf, String)> {
 }
 
 fn infer_quantization(name: &str) -> String {
-    name.split(['-', '_', '.'])
-        .map(str::to_ascii_uppercase)
+    name.split(['-', '.', ':', '/', '\\'])
+        .map(|part| part.trim_matches('_').to_ascii_uppercase())
         .find(|part| {
-            part.starts_with('Q')
+            (part.starts_with('Q')
                 && part[1..]
                     .chars()
                     .next()
-                    .is_some_and(|ch| ch.is_ascii_digit())
+                    .is_some_and(|ch| ch.is_ascii_digit()))
                 || matches!(part.as_str(), "F16" | "F32" | "BF16")
         })
         .unwrap_or_default()
 }
 
 fn infer_parameters(name: &str) -> String {
-    name.split(['-', '_', '.'])
+    name.split(['-', '_', '.', ':', '/', '\\'])
         .find_map(|part| {
             let upper = part.to_ascii_uppercase();
             let value = upper.strip_suffix('B')?;
@@ -1486,6 +1520,181 @@ fn cloud_provider_catalog(applications: &[Value]) -> Vec<Value> {
         .collect()
 }
 
+/// Resolve the primary GGUF blob for each installed Ollama model so the
+/// collector can read exact header metadata. Returns `(path, model_name)`
+/// pairs; missing blobs are skipped by the caller.
+pub fn model_probe_targets() -> Vec<(PathBuf, String)> {
+    let mut targets = Vec::new();
+    for (root, _) in candidate_model_roots().into_iter().filter(|(path, _)| {
+        path.file_name()
+            .and_then(|value| value.to_str())
+            .map(|value| value == "models")
+            .unwrap_or(false)
+            && path
+                .parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|value| value.to_str())
+                .map(|value| value == ".ollama" || value.eq_ignore_ascii_case("Ollama"))
+                .unwrap_or(false)
+    }) {
+        let manifest_root = root.join("manifests");
+        let mut pending = VecDeque::from([(manifest_root.clone(), 0_u8)]);
+        let mut scanned = 0_usize;
+        while let Some((directory, depth)) = pending.pop_front() {
+            if scanned >= 200 {
+                break;
+            }
+            let Ok(items) = fs::read_dir(&directory) else {
+                continue;
+            };
+            for entry in items.flatten() {
+                scanned += 1;
+                if scanned > 200 {
+                    break;
+                }
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                if file_type.is_dir() && depth < 6 {
+                    pending.push_back((entry.path(), depth + 1));
+                    continue;
+                }
+                if !file_type.is_file() {
+                    continue;
+                }
+                let entry_path = entry.path();
+                let Ok(relative) = entry_path.strip_prefix(&manifest_root) else {
+                    continue;
+                };
+                let parts = relative
+                    .components()
+                    .map(|part| part.as_os_str().to_string_lossy().to_string())
+                    .collect::<Vec<_>>();
+                if parts.len() < 3 {
+                    continue;
+                }
+                let tag = parts.last().cloned().unwrap_or_default();
+                let mut model_parts = parts[1..parts.len() - 1].to_vec();
+                if model_parts.first().is_some_and(|part| part == "library") {
+                    model_parts.remove(0);
+                }
+                if tag.is_empty() || model_parts.is_empty() {
+                    continue;
+                }
+                let model = format!("{}:{}", model_parts.join("/"), tag);
+                if let Some(blob) = primary_model_blob(&entry_path) {
+                    targets.push((blob, model));
+                }
+            }
+        }
+    }
+    targets.retain(|(path, _)| path.exists());
+    targets
+}
+
+/// Reads an Ollama manifest and returns the largest model-layer blob path.
+fn primary_model_blob(manifest_path: &Path) -> Option<PathBuf> {
+    let payload = fs::read_to_string(manifest_path).ok()?;
+    let payload: Value = serde_json::from_str(&payload).ok()?;
+    let layers = payload.get("layers")?.as_array()?;
+    let models_dir = manifest_path
+        .ancestors()
+        .find(|ancestor| {
+            ancestor
+                .file_name()
+                .and_then(|value| value.to_str())
+                .map(|value| value == "manifests")
+                .unwrap_or(false)
+        })?
+        .parent()?
+        .join("blobs");
+    layers
+        .iter()
+        .filter(|layer| {
+            layer.get("mediaType").and_then(Value::as_str)
+                == Some("application/vnd.ollama.image.model")
+        })
+        .filter_map(|layer| layer.get("digest").and_then(Value::as_str))
+        .filter_map(|digest| digest.strip_prefix("sha256:"))
+        .map(|hash| models_dir.join(format!("sha256-{hash}")))
+        .max_by_key(|path| {
+            fs::metadata(path)
+                .map(|meta| meta.len())
+                .unwrap_or_default()
+        })
+}
+
+/// Merge exact GGUF header metadata into the model inventory. Measured fields
+/// always win over name-inferred values; the source label tells the UI why.
+pub fn apply_gguf_metadata(models: &mut Value, metadata: &HashMap<String, gguf::GgufMeta>) {
+    let Some(items) = models.get_mut("models").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for model in items.iter_mut() {
+        let name = string(model.get("model")).to_ascii_lowercase();
+        if name.is_empty() {
+            continue;
+        }
+        let exact = metadata.iter().find(|(key, _)| {
+            name == key.to_ascii_lowercase()
+                || name.ends_with(&format!(
+                    ":{}",
+                    key.to_ascii_lowercase().rsplit(':').next().unwrap_or(key)
+                ))
+        });
+        let Some((_, meta)) = exact else {
+            continue;
+        };
+        if let Some(count) = meta.parameter_count {
+            model["parameters"] = json!(format_parameters(count));
+            model["parameterCountExact"] = json!(count);
+        }
+        if let Some(bytes) = meta.tensor_bytes {
+            model["weightBytesExact"] = json!(bytes);
+            if number(model.get("sizeBytes")) == 0.0 {
+                model["sizeBytes"] = json!(bytes as f64);
+            }
+        }
+        model["kvHeads"] = json!(meta.head_count_kv);
+        model["kvHeadCountExact"] = json!(meta.head_count_kv.is_some());
+        model["layers"] = json!(meta.block_count);
+        model["experts"] = json!(meta.expert_count);
+        model["activeExperts"] = json!(meta.expert_used_count);
+        if meta.expert_count.is_some() && meta.expert_used_count.unwrap_or(0) > 0 {
+            model["moe"] = json!(true);
+            model["activeParameterRatio"] = json!(
+                meta.expert_used_count.unwrap_or(0) as f64 / meta.expert_count.unwrap_or(1) as f64
+            );
+        }
+        if meta.context_length.is_some() && number(model.get("contextLength")) == 0.0 {
+            model["contextLength"] = json!(meta.context_length.unwrap_or_default());
+        }
+        if let Some(architecture) = &meta.architecture {
+            if string(model.get("family")).is_empty() {
+                model["family"] = json!(architecture);
+            }
+        }
+        let source = string(model.get("source"));
+        if !source.contains("GGUF header") {
+            model["source"] = json!(if source.is_empty() {
+                "GGUF header".to_string()
+            } else {
+                format!("{source} + GGUF header")
+            });
+        }
+    }
+}
+
+fn format_parameters(count: u64) -> String {
+    if count >= 1_000_000_000 {
+        format!("{:.1}B", count as f64 / 1_000_000_000.0)
+    } else if count >= 1_000_000 {
+        format!("{:.0}M", count as f64 / 1_000_000.0)
+    } else {
+        count.to_string()
+    }
+}
+
 pub fn build(processes: &[Value]) -> Value {
     let mut groups: BTreeMap<String, Value> = BTreeMap::new();
     for process in processes {
@@ -1777,6 +1986,16 @@ mod tests {
         assert_eq!(models[0]["status"], "detected");
         assert_eq!(models[0]["parameters"], "8B");
         assert_eq!(models[0]["sizeBytes"], 5_000_000_000_f64);
+    }
+
+    #[test]
+    fn ollama_tag_metadata_falls_back_to_name() {
+        let models = parse_ollama_tags(&json!({ "models": [{
+            "name": "org/Qwen3.6-35B-A3B:Q6_K_P", "size": 29_000_000_000_f64,
+            "details": { "parameter_size": "unknown", "quantization_level": "unknown", "format": "gguf" }
+        }] }));
+        assert_eq!(models[0]["parameters"], "35B");
+        assert_eq!(models[0]["quantization"], "Q6_K_P");
     }
 
     #[test]
