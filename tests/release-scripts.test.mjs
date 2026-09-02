@@ -9,7 +9,7 @@ import test from 'node:test';
 const node = process.execPath;
 
 test('release version gate accepts the synchronized prerelease tag', () => {
-  const output = execFileSync(node, ['scripts/check-release-version.mjs', 'v0.9.1-beta.1'], {
+  const output = execFileSync(node, ['scripts/check-release-version.mjs', 'v0.9.2-beta.1'], {
     encoding: 'utf8',
   });
   assert.match(output, /release metadata is consistent/);
@@ -40,7 +40,7 @@ test('release manifest records asset bytes and SHA-256 checksums', async () => {
   const checksums = await readFile(join(directory, 'SHA256SUMS.txt'), 'utf8');
   const digest = createHash('sha256').update(asset).digest('hex');
 
-  assert.equal(manifest.version, '0.9.1-beta.1');
+  assert.equal(manifest.version, '0.9.2-beta.1');
   assert.equal(manifest.channel, 'prerelease');
   assert.deepEqual(manifest.files, [{ name: assetName, bytes: asset.byteLength, sha256: digest }]);
   assert.equal(checksums, `${digest}  ${assetName}\n`);

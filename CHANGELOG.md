@@ -3,6 +3,29 @@
 All notable VISOR changes are documented here. Versions follow Semantic
 Versioning while the product remains in beta.
 
+## [0.9.2-beta.1] - Unreleased
+
+### Added
+
+- Premium design-system surfaces for the measured-AI features: a
+  mint-accented measured-rate strip with per-metric tone gradients and
+  tabular numerals; a layer offload plan rendered as interactive
+  placement cards with FITS/OVER verdict chips, hover lift, and tone
+  theming; a session throughput history card with average/peak/tokens
+  stat row and legend markers.
+- "GGUF exact" provenance tag in the model spec grid, styled as a
+  system chip rather than ad-hoc text.
+- Command palette keyboard-selection highlighting (inset accent bar)
+  matching the hover state.
+- Theme parity for Cyberdeck and Retro terminal across all new
+  surfaces; custom thin scrollbars and cyan text selection globally.
+
+### Changed
+
+- All ad-hoc inline styles in the AI view were replaced with design
+  system classes; every color now flows through theme tokens so all
+  four themes render the new panels correctly.
+
 ## [0.9.1-beta.1] - Unreleased
 
 ### Added

@@ -716,23 +716,27 @@ function AIWorkloads({ metrics, localAI, hardware, throughputHistory, refreshing
             <div className="memory-capacity-track"><i style={{ width: `${Math.min(100, compatibility.requiredMemoryGb / Math.max(.1, compatibility.usableCombinedMemoryGb) * 100)}%` }} /><span className="vram-boundary" style={{ left: `${Math.min(100, compatibility.availableVramGb / Math.max(.1, compatibility.usableCombinedMemoryGb) * 100)}%` }} /></div>
             <div className="memory-capacity-legend"><span><i className="legend-vram" />{compatibility.isUnifiedMemory ? 'Unified memory pool' : `${compatibility.availableVramGb.toFixed(1)} GB usable VRAM`}</span><span><i className="legend-ram" />{compatibility.availableRamGb.toFixed(1)} GB usable RAM</span><strong>{compatibility.usableCombinedMemoryGb.toFixed(1)} GB usable combined</strong></div>
             {compatibility.offloadPlan && (
-              <div style={{ marginTop: 10 }} aria-label="Layer offload plan">
-                <div style={{ fontSize: 11, letterSpacing: '.08em', opacity: .7, marginBottom: 6 }}>LAYER OFFLOAD PLAN · PREDICTED SPEED PER PLACEMENT</div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
+              <div className="offload-plan" aria-label="Layer offload plan">
+                <div className="offload-plan-head">
+                  <span>LAYER OFFLOAD PLAN</span>
+                  <small>Predicted speed per placement · modeled from exact GGUF layers + weights</small>
+                </div>
+                <div className="offload-plan-grid">
                   {compatibility.offloadPlan.map((step) => (
-                    <div
+                    <button
                       key={step.layersOnGpu}
-                      className={`panel ${step.fitsVram ? '' : 'planner-warning'}`}
-                      style={{ margin: 0, padding: '10px 12px', opacity: step.fitsVram ? 1 : .65 }}
+                      type="button"
+                      className={`offload-step tone-${step.fitsVram ? 'mint' : 'rose'}${step.fitsVram ? ' fits' : ' over'}`}
                       title={step.fitsVram ? 'Fits in usable VRAM' : 'Exceeds usable VRAM'}
                     >
-                      <strong style={{ display: 'block', fontSize: 15 }}>{step.layersOnGpu}/{step.layersTotal} layers</strong>
-                      <span style={{ fontSize: 12 }}>{step.estimatedTpsCenter ?? '—'} tok/s</span>
-                      <small style={{ display: 'block', opacity: .65 }}>{step.vramNeededGb.toFixed(1)} GB {step.fitsVram ? '· fits' : '· over'}</small>
-                    </div>
+                      <i>{step.fitsVram ? 'FITS' : 'OVER'}</i>
+                      <strong>{step.layersOnGpu}<small>/{step.layersTotal} layers</small></strong>
+                      <em>{step.estimatedTpsCenter ?? '—'} <small>tok/s</small></em>
+                      <span>{step.vramNeededGb.toFixed(1)} GB on GPU</span>
+                    </button>
                   ))}
                 </div>
-                <small style={{ display: 'block', marginTop: 6, opacity: .6 }}>Modeled from exact GGUF layer count and weight bytes. The best fitting placement is a starting point for <code>num_gpu</code>; a local benchmark remains authoritative.</small>
+                <small className="offload-plan-note">The best fitting placement is a starting point for <code>num_gpu</code>; a local benchmark remains authoritative.</small>
               </div>
             )}
             <p className={compatibility.memoryDeficitGb > 0 ? 'planner-warning' : ''}>{compatibility.memoryDeficitGb > 0 ? `${compatibility.memoryDeficitGb.toFixed(1)} GB beyond fast memory. Speed is still modeled using conditional mmap/pagefile access and may vary sharply.` : `${(compatibility.ramReserveGb + compatibility.vramReserveGb).toFixed(1)} GB reserved for the OS/display. ${compatibility.reason}`}</p>
@@ -751,39 +755,41 @@ function AIWorkloads({ metrics, localAI, hardware, throughputHistory, refreshing
         </div>
         <div className="model-spec-grid">
           <div><span>Family</span><strong>{model?.family || 'Not reported'}</strong></div>
-          <div><span>Parameters</span><strong>{model?.parameters || 'Not reported'}{model?.parameterCountExact ? <small style={{ marginLeft: 6, fontSize: 10, letterSpacing: '.06em', opacity: .65 }}>GGUF EXACT</small> : null}</strong></div>
+          <div><span>Parameters</span><strong>{model?.parameters || 'Not reported'}{model?.parameterCountExact ? <em className="exact-tag">GGUF exact</em> : null}</strong></div>
           <div><span>Quantization</span><strong>{model?.quantization || 'Not reported'}</strong></div>
           <div><span>Context capacity</span><strong>{model?.contextLength ? `${model.contextLength.toLocaleString()} tokens` : 'Not reported'}</strong></div>
           {model?.moe && <div><span>MoE routing</span><strong>{model.activeExperts} of {model.experts} experts</strong></div>}
         </div>
-        <div className="inference-chart-head"><div><strong>{measuredDecode !== null ? 'Measured generation speed' : 'System GPU activity'}</strong><span>{measuredDecode !== null ? `Exact per-request rates from the runtime (${throughputEvidence === 'runtime-log' ? 'Ollama server log' : 'metrics endpoint'}).` : 'Live context while this runtime is present — not claimed as token throughput.'}</span></div><span className="source-chip">{measuredDecode !== null ? `${throughputEvidence === 'runtime-log' ? 'LOG MEASURED' : 'METRICS MEASURED'}` : model?.source || 'Operating system process counters'}</span></div>
+        <div className="inference-chart-head"><div><strong>{measuredDecode !== null ? 'Measured generation speed' : 'System GPU activity'}</strong><span>{measuredDecode !== null ? `Exact per-request rates from the runtime (${throughputEvidence === 'runtime-log' ? 'Ollama server log' : 'metrics endpoint'}).` : 'Live context while this runtime is present — not claimed as token throughput.'}</span></div><span className={`source-chip${measuredDecode !== null ? ' source-measured' : ''}`}>{measuredDecode !== null ? `${throughputEvidence === 'runtime-log' ? 'LOG MEASURED' : 'METRICS MEASURED'}` : model?.source || 'Operating system process counters'}</span></div>
         {measuredDecode !== null && (
-          <div className="inference-chart" style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, padding: '0 2px 14px' }}>
-            <div className="panel" style={{ margin: 0, padding: 14 }}>
-              <span style={{ fontSize: 11, letterSpacing: '.08em', opacity: .7 }}>DECODE · MEASURED</span>
-              <strong style={{ display: 'block', fontSize: 26 }}>{measuredDecode.toFixed(1)}<small style={{ fontSize: 12 }}> tok/s</small></strong>
+          <div className="measured-strip">
+            <div className="measured-cell tone-mint">
+              <span>Decode · measured</span>
+              <strong>{measuredDecode.toFixed(1)}<small> tok/s</small></strong>
             </div>
-            <div className="panel" style={{ margin: 0, padding: 14 }}>
-              <span style={{ fontSize: 11, letterSpacing: '.08em', opacity: .7 }}>PREFILL · MEASURED</span>
-              <strong style={{ display: 'block', fontSize: 26 }}>{measuredPrefill !== null ? measuredPrefill.toFixed(1) : '—'}<small style={{ fontSize: 12 }}> tok/s</small></strong>
+            <div className="measured-cell tone-cyan">
+              <span>Prefill · measured</span>
+              <strong>{measuredPrefill !== null ? measuredPrefill.toFixed(1) : '—'}<small> tok/s</small></strong>
             </div>
-            <div className="panel" style={{ margin: 0, padding: 14 }}>
-              <span style={{ fontSize: 11, letterSpacing: '.08em', opacity: .7 }}>LAST REQUEST</span>
-              <strong style={{ display: 'block', fontSize: 26 }}>{throughput?.lastTokens ?? '—'}<small style={{ fontSize: 12 }}> tokens</small></strong>
+            <div className="measured-cell tone-violet">
+              <span>Last request</span>
+              <strong>{throughput?.lastTokens ?? '—'}<small> tokens</small></strong>
             </div>
           </div>
         )}
         {throughputHistory.length > 1 && (
-          <section className="panel" style={{ margin: '0 2px 14px', padding: 14 }} aria-label="Measured throughput history">
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
-              <span style={{ fontSize: 11, letterSpacing: '.08em', opacity: .7 }}>SESSION THROUGHPUT · {throughputHistory.length} MEASURED COMPLETIONS</span>
-              <small style={{ opacity: .6 }}>in-memory · this collector session only</small>
+          <section className="throughput-history" aria-label="Measured throughput history">
+            <div className="throughput-history-head">
+              <span>SESSION THROUGHPUT · {throughputHistory.length} measured completions</span>
+              <small>in-memory · this collector session only</small>
             </div>
-            <LineChart values={throughputHistory.map((sample) => Math.min(100, sample.decodeTps))} tone="mint" height={90} compact />
-            <div style={{ display: 'flex', gap: 16, marginTop: 8, fontSize: 12 }}>
-              <span>Average {throughputHistory.reduce((sum, sample) => sum + sample.decodeTps, 0) / throughputHistory.length | 0} tok/s</span>
-              <span>Peak {Math.max(...throughputHistory.map((sample) => sample.decodeTps)).toFixed(1)} tok/s</span>
-              <span>{throughputHistory.reduce((sum, sample) => sum + sample.tokens, 0).toLocaleString()} tokens total</span>
+            <div className="throughput-history-chart">
+              <LineChart values={throughputHistory.map((sample) => Math.min(100, sample.decodeTps))} tone="mint" height={90} compact />
+            </div>
+            <div className="throughput-history-stats">
+              <span><i className="avg" />Average <strong>{throughputHistory.reduce((sum, sample) => sum + sample.decodeTps, 0) / throughputHistory.length | 0} tok/s</strong></span>
+              <span><i className="peak" />Peak <strong>{Math.max(...throughputHistory.map((sample) => sample.decodeTps)).toFixed(1)} tok/s</strong></span>
+              <span><i className="total" /><strong>{throughputHistory.reduce((sum, sample) => sum + sample.tokens, 0).toLocaleString()}</strong> tokens total</span>
             </div>
           </section>
         )}
