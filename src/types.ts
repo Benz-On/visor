@@ -12,6 +12,15 @@ export interface InferenceThroughputInfo {
   observedAt: string | null;
 }
 
+/** One measured completion sample from the collector's session history. */
+export interface ThroughputSampleInfo {
+  decodeTps: number;
+  prefillTps: number;
+  tokens: number;
+  at: number;
+  evidence: string;
+}
+
 export interface LiveMetrics {
   cpu: number;
   gpu: number;
@@ -239,6 +248,17 @@ export interface ModelCompatibility {
   assumedContextTokens: number;
   gpuOffloadPercent: number;
   memoryDeficitGb: number;
+  /**
+   * Layer-level offload plan. Exact when the GGUF header exposes the block
+   * count; each step answers "load N of L layers → predicted tok/s".
+   */
+  offloadPlan?: Array<{
+    layersOnGpu: number;
+    layersTotal: number;
+    vramNeededGb: number;
+    fitsVram: boolean;
+    estimatedTpsCenter: number | null;
+  }>;
   estimatedTpsMin: number | null;
   estimatedTpsMax: number | null;
   estimatedTpsCenter: number | null;

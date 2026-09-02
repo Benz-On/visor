@@ -373,6 +373,11 @@ fn hidden_command(program: &str) -> Command {
     command
 }
 
+#[tauri::command]
+fn get_throughput_history() -> Result<Value, String> {
+    Ok(throughput::history_json())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let state = RuntimeState {
@@ -386,6 +391,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_system_snapshot,
             refresh_system_snapshot,
+            get_throughput_history,
             kill_process,
             set_process_priority,
             set_alert_rule

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { processes as demoProcesses } from '../data';
-import type { LiveMetrics, MetricKey, SystemSnapshot } from '../types';
+import type { LiveMetrics, MetricKey, SystemSnapshot, ThroughputSampleInfo } from '../types';
 import { useTelemetry } from './useTelemetry';
 
 const AGENT_URL = 'http://127.0.0.1:1421';
@@ -29,6 +29,7 @@ const isTauri = () => '__TAURI_INTERNALS__' in window;
 
 export function useVisorData(paused: boolean) {
   const [snapshot, setSnapshot] = useState<SystemSnapshot | null>(null);
+  const [throughputHistory, setThroughputHistory] = useState<ThroughputSampleInfo[]>([]);
   const [connection, setConnection] = useState<ConnectionState>('connecting');
   const [actionError, setActionError] = useState<string | null>(null);
   const [connectionError, setConnectionError] = useState<string | null>(null);
@@ -49,6 +50,14 @@ export function useVisorData(paused: boolean) {
       setConnection('live');
       setConnectionError(null);
       connectedRef.current = true;
+      if (nativeRuntime) {
+        try {
+          const throughputHistoryPayload = await invoke<{ samples: ThroughputSampleInfo[] }>('get_throughput_history');
+          setThroughputHistory(throughputHistoryPayload.samples || []);
+        } catch {
+          // History is best-effort; the live snapshot remains authoritative.
+        }
+      }
       setHistory((current) => {
         const base = current || (nativeRuntime ? emptyHistory() : fallback.history);
         const nextValues = {
@@ -165,6 +174,7 @@ export function useVisorData(paused: boolean) {
     connectionError,
     actionError,
     refreshing,
+    throughputHistory,
     processes: snapshot?.processes || (nativeRuntime ? [] : demoProcesses),
     killProcess,
     setProcessPriority,
