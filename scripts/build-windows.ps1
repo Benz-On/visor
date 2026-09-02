@@ -44,9 +44,21 @@ if (-not $visualStudio) {
 }
 $devCommand = Join-Path $visualStudio 'Common7\Tools\VsDevCmd.bat'
 
+# Git for Windows ships /usr/bin/link.exe (coreutils). When the build runs
+# from a Git Bash parent process that directory can precede the MSVC tools in
+# PATH, and rustc then invokes the wrong linker. Pin the MSVC toolchain
+# directory ahead of everything else so link.exe always resolves to LINK.EXE.
+$msvcLink = Get-ChildItem -Path (Join-Path $visualStudio 'VC\Tools\MSVC') -Recurse -Filter 'link.exe' |
+    Where-Object { $_.DirectoryName -like '*Hostx64\x64' } |
+    Select-Object -First 1
+if (-not $msvcLink) {
+    throw 'The MSVC x64 linker (link.exe) was not found.'
+}
+$msvcBin = $msvcLink.DirectoryName
+
 $steps = @(
     ('call "{0}" -no_logo -arch=x64' -f $devCommand),
-    ('set "PATH={0};%PATH%"' -f $cargoBin)
+    ('set "PATH={0};{1};%PATH%"' -f $msvcBin, $cargoBin)
 )
 if (-not $SkipInstall) {
     $steps += 'npm.cmd ci'
