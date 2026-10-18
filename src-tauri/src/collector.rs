@@ -75,7 +75,7 @@ impl Collector {
             gpu: GpuInfo::default(),
             gpu_processes: HashMap::new(),
             process_details: HashMap::new(),
-            sensors: json!({ "cpuTemperature": 0, "cpuSource": null, "storage": [], "hardwareMonitorAvailable": false }),
+            sensors: json!({ "cpuTemperature": null, "cpuSource": null, "storage": [], "hardwareMonitorAvailable": false }),
             memory_details: json!({}),
             hardware_details: json!({}),
             local_ai: json!({ "scannedAt": null, "adapters": [], "models": [], "applications": [], "activeModelCount": 0, "loadedModelCount": 0 }),
@@ -138,14 +138,14 @@ impl Collector {
         self.system.refresh_all();
         self.networks.refresh(true);
         self.disks.refresh(true);
-        let mut probe_error: Option<String> = None;
+        let mut collector_errors: Vec<String> = Vec::new();
 
         if stale(self.last_gpu, now, Duration::from_secs(2)) {
             match read_nvidia() {
                 Some(gpu) => self.gpu = gpu,
                 None => {
                     if self.gpu.temperature > 0.0 || self.gpu.utilization > 0.0 {
-                        probe_error = Some(
+                        collector_errors.push(
                             "nvidia-smi stopped responding; GPU telemetry is unavailable."
                                 .to_string(),
                         );
@@ -154,41 +154,60 @@ impl Collector {
             }
             self.last_gpu = Some(now);
         }
+        // A failed counter read keeps the previous map rather than silently
+        // zeroing every process's GPU and VRAM share.
         if stale(self.last_gpu_processes, now, Duration::from_secs(3)) {
-            self.gpu_processes = read_gpu_processes();
+            match read_gpu_processes() {
+                Ok(processes) => self.gpu_processes = processes,
+                Err(error) => collector_errors.push(error),
+            }
             self.last_gpu_processes = Some(now);
         }
         if stale(self.last_process_details, now, Duration::from_secs(2)) {
-            if let Some(details) = run_powershell_json(PROCESS_SNAPSHOT_SCRIPT) {
-                self.process_details = details
-                    .as_array()
-                    .cloned()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter_map(|item| {
-                        item.get("pid")
-                            .and_then(Value::as_u64)
-                            .map(|pid| (pid as u32, item))
-                    })
-                    .collect();
+            match run_powershell_json(PROCESS_SNAPSHOT_SCRIPT, "Process", Duration::from_secs(8)) {
+                Ok(Some(details)) => {
+                    self.process_details = details
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter_map(|item| {
+                            item.get("pid")
+                                .and_then(Value::as_u64)
+                                .map(|pid| (pid as u32, item))
+                        })
+                        .collect();
+                }
+                Ok(None) => {}
+                Err(error) => collector_errors.push(error),
             }
             self.last_process_details = Some(now);
         }
         if stale(self.last_sensors, now, Duration::from_secs(12)) {
-            if let Some(sensors) = run_powershell_json(SENSOR_SCRIPT) {
-                self.sensors = sensors;
+            match run_powershell_json(SENSOR_SCRIPT, "Sensor", Duration::from_secs(12)) {
+                Ok(Some(sensors)) => self.sensors = sensors,
+                Ok(None) => {}
+                Err(error) => collector_errors.push(error),
             }
             self.last_sensors = Some(now);
         }
         if stale(self.last_memory_details, now, Duration::from_secs(2)) {
-            if let Some(memory) = run_powershell_json(MEMORY_SNAPSHOT_SCRIPT) {
-                self.memory_details = memory;
+            match run_powershell_json(MEMORY_SNAPSHOT_SCRIPT, "Memory", Duration::from_secs(8)) {
+                Ok(Some(memory)) => self.memory_details = memory,
+                Ok(None) => {}
+                Err(error) => collector_errors.push(error),
             }
             self.last_memory_details = Some(now);
         }
         if stale(self.last_hardware_details, now, Duration::from_secs(300)) {
-            if let Some(hardware) = run_powershell_json(HARDWARE_SNAPSHOT_SCRIPT) {
-                self.hardware_details = hardware;
+            match run_powershell_json(
+                HARDWARE_SNAPSHOT_SCRIPT,
+                "Hardware inventory",
+                Duration::from_secs(15),
+            ) {
+                Ok(Some(hardware)) => self.hardware_details = hardware,
+                Ok(None) => {}
+                Err(error) => collector_errors.push(error),
             }
             self.last_hardware_details = Some(now);
         }
@@ -271,11 +290,13 @@ impl Collector {
             .flatten()
             .filter_map(|item| item.get("temperature").and_then(Value::as_f64))
             .fold(0.0_f64, f64::max);
+        // A missing temperature stays absent; encoding it as 0 would be
+        // indistinguishable from a genuine freezing-cold reading.
         let cpu_temp = self
             .sensors
             .get("cpuTemperature")
             .and_then(Value::as_f64)
-            .unwrap_or_default();
+            .filter(|value| *value > 0.0);
 
         let physical_cores =
             System::physical_core_count().unwrap_or(self.system.cpus().len().max(1));
@@ -528,7 +549,7 @@ impl Collector {
             "gpu": energy::round(self.gpu.utilization, 1),
             "ram": energy::round(if memory_total > 0.0 { memory_used / memory_total * 100.0 } else { 0.0 }, 1),
             "vram": energy::round(if self.gpu.total_bytes > 0.0 { self.gpu.used_bytes / self.gpu.total_bytes * 100.0 } else { 0.0 }, 1),
-            "cpuTemp": energy::round(cpu_temp, 1),
+            "cpuTemp": cpu_temp.map(|value| json!(energy::round(value, 1))).unwrap_or(Value::Null),
             "gpuTemp": energy::round(self.gpu.temperature, 1),
             "ssdTemp": energy::round(ssd_temp, 1),
             "storageTemperatures": storage_temperatures,
@@ -538,6 +559,11 @@ impl Collector {
             "throughput": throughput::as_json(&self.inference),
             "sensorSources": {
                 "cpu": self.sensors.get("cpuSource").cloned().unwrap_or(Value::Null),
+                "hardwareMonitorAvailable": self
+                    .sensors
+                    .get("hardwareMonitorAvailable")
+                    .and_then(Value::as_bool)
+                    .unwrap_or_default(),
                 "gpu": if self.gpu.temperature > 0.0 { json!("nvidia-smi") } else { Value::Null },
                 "storage": self.sensors.get("storage").and_then(Value::as_array).map(|items| items.iter().filter_map(|item| item.get("source").and_then(Value::as_str)).collect::<Vec<_>>()).unwrap_or_default()
             },
@@ -599,7 +625,11 @@ impl Collector {
             .values()
             .filter(|process| format!("{:?}", process.status()).eq_ignore_ascii_case("Stop"))
             .count();
-        self.last_error = probe_error;
+        self.last_error = if collector_errors.is_empty() {
+            None
+        } else {
+            Some(collector_errors.join(" "))
+        };
 
         json!({
             "timestamp": chrono::Utc::now().to_rfc3339(),
@@ -624,7 +654,7 @@ impl Collector {
                 "uptimeSeconds": self.started.elapsed().as_secs(),
                 "sampleDurationMs": collection_started.elapsed().as_millis(),
                 "gpuAttributionAvailable": !self.gpu_processes.is_empty(),
-                "sensorAttributionAvailable": cpu_temp > 0.0 || ssd_temp > 0.0,
+                "sensorAttributionAvailable": cpu_temp.is_some() || ssd_temp > 0.0,
                 "lastError": self.last_error.clone()
             }
         })
@@ -1100,26 +1130,38 @@ fn read_nvidia() -> Option<GpuInfo> {
 }
 
 #[cfg(windows)]
-fn read_gpu_processes() -> HashMap<u32, Value> {
-    run_powershell_json(GPU_COUNTER_SCRIPT)
+fn read_gpu_processes() -> Result<HashMap<u32, Value>, String> {
+    let items = run_powershell_json(GPU_COUNTER_SCRIPT, "GPU counter", Duration::from_secs(15))?
         .and_then(|value| value.as_array().cloned())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    Ok(items
         .into_iter()
         .filter_map(|item| {
             item.get("pid")
                 .and_then(Value::as_u64)
                 .map(|pid| (pid as u32, item))
         })
-        .collect()
+        .collect())
 }
 
 #[cfg(not(windows))]
-fn read_gpu_processes() -> HashMap<u32, Value> {
-    HashMap::new()
+fn read_gpu_processes() -> Result<HashMap<u32, Value>, String> {
+    Ok(HashMap::new())
 }
 
+/// Runs one of the embedded Windows collectors and decodes its JSON.
+/// `Ok(None)` means the collector does not exist on this platform, which is
+/// reported as absence rather than as a failure.
 #[cfg(windows)]
-fn run_powershell_json(script: &str) -> Option<Value> {
+fn run_powershell_json(
+    script: &str,
+    label: &str,
+    timeout: Duration,
+) -> Result<Option<Value>, String> {
+    // `powershell.exe -Command -` only flushes the final pipeline once it sees
+    // an empty line, so scripts ending in `} | ConvertTo-Json` return zero bytes
+    // unless the stdin payload carries a trailing blank line.
+    let payload = format!("{script}\n");
     let output = timed_command::output(
         hidden_command("powershell.exe").args([
             "-NoProfile",
@@ -1129,19 +1171,36 @@ fn run_powershell_json(script: &str) -> Option<Value> {
             "-Command",
             "-",
         ]),
-        Some(script.as_bytes()),
-        Duration::from_secs(8),
+        Some(payload.as_bytes()),
+        timeout,
     )
-    .ok()?;
+    .map_err(|error| format!("{label} collector could not run: {error}"))?;
     if !output.status.success() {
-        return None;
+        let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if message.is_empty() {
+            format!(
+                "{label} collector exited with code {}.",
+                output.status.code().unwrap_or_default()
+            )
+        } else {
+            format!("{label} collector failed: {message}")
+        });
     }
-    serde_json::from_slice(&output.stdout).ok()
+    if output.stdout.iter().all(u8::is_ascii_whitespace) {
+        return Err(format!("{label} collector returned no data."));
+    }
+    serde_json::from_slice(&output.stdout)
+        .map(Some)
+        .map_err(|error| format!("{label} collector returned unreadable JSON: {error}"))
 }
 
 #[cfg(not(windows))]
-fn run_powershell_json(_script: &str) -> Option<Value> {
-    None
+fn run_powershell_json(
+    _script: &str,
+    _label: &str,
+    _timeout: Duration,
+) -> Result<Option<Value>, String> {
+    Ok(None)
 }
 
 fn hidden_command(program: &str) -> Command {
@@ -1157,6 +1216,48 @@ fn hidden_command(program: &str) -> Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression guard for the silent-data-loss defect: `powershell -Command -`
+    /// buffers the final pipeline until an empty line, so a script shaped like
+    /// the embedded collectors must still decode, and an empty reply must be
+    /// reported instead of looking like a healthy collector.
+    #[cfg(windows)]
+    #[test]
+    fn powershell_collector_decodes_a_trailing_pipeline() {
+        let script = "$result = [ordered]@{ totalBytes = 1; availableBytes = 2 }\n$result | ConvertTo-Json -Compress -Depth 3\n";
+        let value = run_powershell_json(script, "Test", Duration::from_secs(30))
+            .expect("collector should report its own failures")
+            .expect("PowerShell collectors apply on Windows");
+        assert_eq!(value["totalBytes"], 1);
+        assert_eq!(value["availableBytes"], 2);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_collector_reports_empty_output_as_an_error() {
+        let error = run_powershell_json("exit 0\n", "Silent", Duration::from_secs(30))
+            .expect_err("empty stdout must not look like a healthy collector");
+        assert!(error.contains("no data"), "unexpected error: {error}");
+    }
+
+    /// End-to-end guard for the silent-empty-collector defect. `committedBytes`
+    /// is supplied only by the embedded memory script, so a zero here means the
+    /// PowerShell payload produced nothing and the field silently kept its
+    /// default. Skipped off Windows, where the collectors do not exist.
+    #[cfg(windows)]
+    #[test]
+    fn collect_receives_data_from_the_embedded_collectors() {
+        let snapshot = Collector::new().collect();
+        assert_eq!(snapshot["source"], "tauri-native");
+        let committed = snapshot["metrics"]["memory"]["committedBytes"]
+            .as_f64()
+            .unwrap_or_default();
+        assert!(
+            committed > 0.0,
+            "memory collector returned no data; lastError = {:?}",
+            snapshot["agent"]["lastError"]
+        );
+    }
 
     #[test]
     fn protects_critical_system_processes() {

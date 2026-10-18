@@ -26,14 +26,14 @@ export interface LiveMetrics {
   gpu: number;
   ram: number;
   vram: number;
-  cpuTemp: number;
+  cpuTemp: number | null;
   gpuTemp: number;
   ssdTemp?: number;
   storageTemperatures?: StorageTemperature[];
   temperatureReadings?: TemperatureReading[];
   hardwareSensors?: HardwareSensorReading[];
   sensorGuidance?: string | null;
-  sensorSources?: { cpu: string | null; gpu: string | null; storage: string[] };
+  sensorSources?: { cpu: string | null; gpu: string | null; storage: string[]; hardwareMonitorAvailable?: boolean };
   cpuPower: number;
   gpuPower: number;
   download: number;
