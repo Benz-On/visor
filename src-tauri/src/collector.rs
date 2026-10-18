@@ -63,6 +63,11 @@ pub struct Collector {
     last_memory_details: Option<Instant>,
     last_hardware_details: Option<Instant>,
     last_local_ai: Option<Instant>,
+    /// Electricity price and grid carbon intensity, editable from Settings. They
+    /// live here rather than in `energy` so a running collector changes its
+    /// projection without a restart.
+    tariff_per_kwh: f64,
+    carbon_grams_per_kwh: f64,
 }
 
 impl Collector {
@@ -93,7 +98,15 @@ impl Collector {
             last_memory_details: None,
             last_hardware_details: None,
             last_local_ai: None,
+            tariff_per_kwh: energy::DEFAULT_TARIFF,
+            carbon_grams_per_kwh: energy::DEFAULT_CARBON,
         }
+    }
+
+    /// Settings changes these; the projection follows on the next sample.
+    pub fn set_price_factors(&mut self, tariff: f64, carbon: f64) {
+        self.tariff_per_kwh = tariff;
+        self.carbon_grams_per_kwh = carbon;
     }
 
     pub fn set_alert_rule(&mut self, id: &str, enabled: bool) -> bool {
@@ -687,7 +700,12 @@ impl Collector {
             },
             "hardware": self.hardware(&cpu_brand, physical_cores, cpu_speed, cpu_speed_max, cpu_tdp),
             "metrics": metrics,
-            "energy": energy::as_json(&energy_estimate, self.session_wh),
+            "energy": energy::as_json(
+                &energy_estimate,
+                self.session_wh,
+                self.tariff_per_kwh,
+                self.carbon_grams_per_kwh,
+            ),
             "processes": processes,
             "processCounts": {
                 "all": self.system.processes().len(),

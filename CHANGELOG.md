@@ -3,6 +3,49 @@
 All notable VISOR changes are documented here. Versions follow Semantic
 Versioning while the product remains in beta.
 
+## [Unreleased]
+
+### Added
+
+- VISOR now behaves like a desktop application rather than a windowed web page.
+  A native menu bar (File, View, Window) switches views with `Ctrl+1` to `Ctrl+9`,
+  opens the command palette with `Ctrl+K` and Settings with `Ctrl+,`. A tray icon
+  carries Show, Hide and Quit, and its tooltip repeats the headline figures - CPU
+  and GPU load, wall watts, package temperature - so the state is readable without
+  a window. Sustained alerts can raise a system notification, one per trip rather
+  than one per sample, and it is **off until you turn it on**. Window size, position
+  and zoom are restored on the next start, and a second launch now focuses the
+  running instance instead of starting a second collector.
+- Settings became real and persistent: notification switch, keep-monitoring when
+  the window closes, start with the system, electricity price and grid carbon
+  intensity. The last two feed the projection through the collector, so changing
+  them changes the published cost and carbon figures rather than only the label.
+  They are stored in `settings.json` in the application data directory; the browser
+  preview keeps using `localStorage` and says so on screen.
+- The expand control on each metric now opens a detail overlay with the full plot,
+  the buffer peak, average and sample count. The notification bell and the system
+  health card open an attention panel listing tripped conditions, conditions still
+  inside their sustained window, and resolved ones.
+
+### Changed
+
+- `F5` and `Ctrl+P` are deliberately unbound: the webview reloads and prints on
+  those keys itself, so a menu item claiming otherwise would quietly do something
+  different from its label. The items remain clickable.
+- The placeholder avatar in the top bar and the one-option range control in
+  History are gone. Neither could do anything, and a control that cannot act is
+  worse than the empty space it occupied.
+
+### Fixed
+
+- Both search fields set `outline: 0` after the global focus rule at equal
+  specificity, so keyboard users had no visible caret in the sensor search, the
+  process search or the command palette.
+- Charts now take the palette from the theme tokens instead of a duplicated set of
+  hex values, so Cyberdeck and Retro actually recolor them, and they keep the
+  height they were given instead of growing with the panel width from a fixed
+  `viewBox` aspect ratio.
+
 ## [0.9.3-beta.1] - 2026-10-18
 
 ### Changed

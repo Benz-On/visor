@@ -18,6 +18,10 @@ The collector exposes missing sensors explicitly instead of simulating them.
   builds that do not register one, from their loopback web server on
   `127.0.0.1:8085`
 - Process tree termination and Windows priority classes
+- Native menu bar with view accelerators, tray icon with a live tooltip, restored
+  window size and position, and a single-instance guard on relaunch
+- System notifications for sustained alerts and start-with-Windows, both off
+  until enabled in Settings and persisted in `settings.json`
 
 The portable executable requires the system WebView2 runtime. The NSIS installer
 contains the WebView2 bootstrapper.
