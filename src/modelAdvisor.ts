@@ -196,11 +196,15 @@ export function analyzeLocalModel(model: LocalModelInfo, hardware?: HardwareInfo
     ? clamp(.1 + .9 * parameters.activeBillions / parameters.totalBillions, .08, 1)
     : 1;
   const activeWeightGb = modelWeightGb * activeRatio;
-  // Exact KV heads from the GGUF header replace the parameter-count heuristic:
-  // 2 bytes/elem (K+V f16) × layers × kv_heads × head_dim × context tokens.
-  const headDim = 128;
+  // Exact KV geometry comes from the GGUF header. Each layer stores K and V for
+  // every KV head at two bytes per element in the default f16 cache. Head width
+  // is model specific, so it is read from the header and only falls back to the
+  // common 128 when the blob was never inspected.
+  const keyDim = model.kvKeyLength && model.kvKeyLength > 0 ? model.kvKeyLength : 128;
+  const valueDim = model.kvValueLength && model.kvValueLength > 0 ? model.kvValueLength : keyDim;
+  const headDimExact = Boolean(model.kvKeyLength && model.kvKeyLength > 0);
   const kvBytesPerTokenExact = model.layers && model.kvHeads
-    ? 2 * model.layers * model.kvHeads * headDim * 2
+    ? model.layers * model.kvHeads * (keyDim + valueDim) * 2
     : null;
   const kvBytesPerToken = workload === 'embedding'
     ? 0
@@ -231,6 +235,11 @@ export function analyzeLocalModel(model: LocalModelInfo, hardware?: HardwareInfo
   const gpuProfile = gpuBandwidth(hardware?.gpu?.model, totalVramGb);
   const cpuProfile = cpuBandwidth(hardware);
   const quantEfficiency = quantizationEfficiency(model);
+  // When real weight bytes are known (an exact GGUF tensor sum, or the model
+  // file size), streaming them at the device bandwidth already reflects the
+  // quantization format. Applying the per-format efficiency factor on top
+  // double-counts it, so it only stands in for inferred byte counts.
+  const formatFactor = reportedWeightGb > 0 ? 1 : quantEfficiency;
   const runtimeFactor = runtimeEfficiency(model);
   const contextReadGb = kvCacheGb * .72;
   const gpuBudgetForWeights = Math.max(0, availableVramGb - kvCacheGb - runtimeOverheadGb * .5);
@@ -245,7 +254,7 @@ export function analyzeLocalModel(model: LocalModelInfo, hardware?: HardwareInfo
   const cpuSeconds = cpuWeightGb ? (cpuWeightGb + contextReadGb * (cpuWeightGb / activeWeightGb)) / cpuProfile.effectiveGbps : 0;
   const pagingSeconds = pagedWeightGb ? pagedWeightGb / storageBandwidth(hardware) : 0;
   const transferFactor = mode === 'hybrid' ? 1.13 : mode === 'paging' ? 1.28 : 1;
-  const secondsPerToken = Math.max(.0005, (gpuSeconds + cpuSeconds + pagingSeconds) * transferFactor / (quantEfficiency * runtimeFactor));
+  const secondsPerToken = Math.max(.0005, (gpuSeconds + cpuSeconds + pagingSeconds) * transferFactor / (formatFactor * runtimeFactor));
   const center = clamp(1 / secondsPerToken, .01, 2500);
 
   // Layer-level offload plan. With an exact layer count and exact weight bytes
@@ -260,9 +269,11 @@ export function analyzeLocalModel(model: LocalModelInfo, hardware?: HardwareInfo
     const perLayerGb = exactWeightGb
       ? exactWeightGb / layersTotal
       : (perLayerWeightGb ?? 0);
-    const kvPerLayerGb = kvBytesPerTokenExact
-      ? (kvBytesPerTokenExact / 2) * assumedContextTokens / GIB
-      : kvCacheGb / layersTotal;
+    // kvBytesPerTokenExact already spans every layer, so a per-layer figure must
+    // divide by the layer count. Dividing by two here inflated per-layer KV by
+    // layers/2 (16x at 32 layers, 32x at 64), which made every placement step
+    // report OVER on a model that actually fits.
+    const kvPerLayerGb = kvCacheGb / layersTotal;
     offloadPlan = [1, .75, .5, .25].map((share) => {
       const layersOnGpu = Math.max(0, Math.round(layersTotal * share));
       const vramNeededGb = layersOnGpu * (perLayerGb + kvPerLayerGb) + runtimeOverheadGb * .5;
@@ -275,7 +286,7 @@ export function analyzeLocalModel(model: LocalModelInfo, hardware?: HardwareInfo
       const stepCpuSeconds = onCpuWeight
         ? (onCpuWeight + contextReadGb * (onCpuWeight / activeWeightGb)) / cpuProfile.effectiveGbps
         : 0;
-      const stepSeconds = Math.max(.0005, (stepGpuSeconds + stepCpuSeconds) * (onCpuWeight > 0 ? 1.13 : 1) / (quantEfficiency * runtimeFactor));
+      const stepSeconds = Math.max(.0005, (stepGpuSeconds + stepCpuSeconds) * (onCpuWeight > 0 ? 1.13 : 1) / (formatFactor * runtimeFactor));
       return {
         layersOnGpu,
         layersTotal,
@@ -294,6 +305,7 @@ export function analyzeLocalModel(model: LocalModelInfo, hardware?: HardwareInfo
   if (model.quantization) confidenceScore += 8;
   if (exactParameters) confidenceScore += 8;
   if (kvBytesPerTokenExact) confidenceScore += 6;
+  if (headDimExact) confidenceScore += 2;
   if (gpuProfile?.source === 'device-profile' || (!gpuWeightGb && cpuProfile.source === 'memory-topology')) confidenceScore += 10;
   if (model.contextLength) confidenceScore += 5;
   if (mode === 'paging') confidenceScore = Math.min(confidenceScore - 18, 48);
