@@ -36,6 +36,23 @@ Versioning while the product remains in beta.
 
 ### Fixed
 
+- A runtime holding several models no longer reports the same aggregate as each
+  model's own usage. Application CPU and GPU were copied undivided onto every
+  loaded model, so two models each claimed 100% of the same compute; those
+  fields are now null when the runtime cannot separate them, and the overview
+  card says "Not separated" instead of substituting the aggregate.
+- The 180-row display budget is applied after local-AI attribution, not before.
+  A runtime with a small working set could fall below the cut and disappear from
+  the process list the AI snapshot is built from, dropping its loaded model from
+  the counts on busy machines.
+- Throughput charts no longer flatten fast models. The line component hardcoded
+  a 0-100 percent scale and the session chart clipped values to it, so every
+  decode rate above 100 tok/s and all prefill drew as a ceiling line while the
+  figures beside it reported the true peak. The scale is now derived from the
+  data, the peak is computed without spreading the array, the mean is rounded
+  rather than truncated, and the count is labelled as measured samples.
+- Each chart now carries its own accessible label; every line chart previously
+  announced itself as "Live performance history".
 - Sampling cadence is now reported as measured rather than as claimed. The
   snapshot advertised a fixed 1.1 s interval while the Windows collectors
   routinely overrun it, so every rate derived from "time since last sample" was

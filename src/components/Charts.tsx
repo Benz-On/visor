@@ -14,15 +14,20 @@ interface LineChartProps {
   tone?: MetricTone;
   height?: number;
   compact?: boolean;
+  /** Upper bound of the vertical scale. Defaults to 100 for percentages. */
+  maximum?: number;
+  ariaLabel?: string;
 }
-export function LineChart({ values, tone = 'cyan', height = 120, compact = false }: LineChartProps) {
+
+export function LineChart({ values, tone = 'cyan', height = 120, compact = false, maximum = 100, ariaLabel = 'Live performance history' }: LineChartProps) {
   const reactId = useId().replace(/:/g, '');
   const width = 520;
   const verticalPadding = compact ? 8 : 14;
+  const scale = Math.max(maximum, 1);
   const points = values
     .map((value, index) => {
       const x = (index / Math.max(values.length - 1, 1)) * width;
-      const y = height - verticalPadding - (value / 100) * (height - verticalPadding * 2);
+      const y = height - verticalPadding - (Math.min(Math.max(value, 0), scale) / scale) * (height - verticalPadding * 2);
       return `${x},${y}`;
     })
     .join(' ');
@@ -35,7 +40,7 @@ export function LineChart({ values, tone = 'cyan', height = 120, compact = false
       viewBox={`0 0 ${width} ${height}`}
       preserveAspectRatio="none"
       role="img"
-      aria-label="Live performance history"
+      aria-label={ariaLabel}
     >
       <defs>
         <linearGradient id={`fill-${reactId}`} x1="0" y1="0" x2="0" y2="1">

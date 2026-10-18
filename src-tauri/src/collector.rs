@@ -342,7 +342,6 @@ impl Collector {
                 .total_cmp(&number(left, "energyWatts"))
                 .then_with(|| number(right, "cpu").total_cmp(&number(left, "cpu")))
         });
-        processes.truncate(180);
 
         if stale(self.last_local_ai, now, Duration::from_secs(4)) {
             self.local_ai = local_ai::build(&processes);
@@ -623,9 +622,11 @@ impl Collector {
         let alerts = self.alert_engine.evaluate(&metrics, gaming);
         self.inference = throughput::measure();
         let current_pid = std::process::id();
-        let current_process = processes
+        let (self_cpu, self_memory_mb) = processes
             .iter()
-            .find(|process| process.get("id").and_then(Value::as_u64) == Some(current_pid as u64));
+            .find(|process| process.get("id").and_then(Value::as_u64) == Some(current_pid as u64))
+            .map(|process| (number(process, "cpu"), number(process, "memory") * 1024.0))
+            .unwrap_or_default();
         let blocked = self
             .system
             .processes()
@@ -637,6 +638,11 @@ impl Collector {
         } else {
             Some(collector_errors.join(" "))
         };
+
+        // The display budget is applied last. Truncating before attribution let a
+        // runtime with a small working set drop out of the process list the AI
+        // snapshot is built from, and its loaded model then vanished from counts.
+        processes.truncate(180);
 
         let age_ms =
             |since: &Option<Instant>| since.map(|moment| moment.elapsed().as_millis() as u64);
@@ -672,8 +678,8 @@ impl Collector {
             "localAI": self.local_ai,
             "alerts": alerts,
             "agent": {
-                "cpuPercent": current_process.map(|process| number(process, "cpu")).unwrap_or_default(),
-                "memoryMb": current_process.map(|process| number(process, "memory") * 1024.0).unwrap_or_default(),
+                "cpuPercent": self_cpu,
+                "memoryMb": self_memory_mb,
                 "pid": current_pid,
                 "uptimeSeconds": self.started.elapsed().as_secs(),
                 "sampleDurationMs": collection_started.elapsed().as_millis(),
