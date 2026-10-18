@@ -64,7 +64,7 @@ jobs:
         run: npm audit --audit-level=high
 
   native:
-    name: Native tests · ${{ matrix.os }}
+    name: Native tests - ${{ matrix.os }}
     needs: preflight
     # Automatic events pay for one Linux native job only; the Windows and
     # macOS legs run on manual dispatch.
