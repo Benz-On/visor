@@ -149,25 +149,60 @@ fn read_value<R: Read>(reader: &mut Reader<R>, value_type: u32) -> Option<Value>
     })
 }
 
-/// Approximate bytes per element for common GGML types, used only when a
-/// model lacks `general.parameter_count` and weights must be summed.
-fn ggml_type_bytes(type_id: u32) -> Option<f64> {
+/// `(block_size, block_bytes)` per GGML type id, mirroring the
+/// `ggml_type_traits` table in ggml-common.h. Type ids are persisted in GGUF
+/// files, so they follow the historical enum (F32=0, Q4_0=2, Q4_K=12, F64=28,
+/// BF16=30), not the declaration order of any source array.
+fn ggml_block(type_id: u32) -> Option<(u64, u64)> {
     Some(match type_id {
-        0 => 4.0,          // F32
-        1 => 2.0,          // F16
-        2 | 3 => 1.0,      // Q4_0 / Q4_1
-        6 | 7 => 1.0,      // Q5_0 / Q5_1
-        8 | 9 => 1.0,      // Q8_0 / Q8_1
-        10..=14 => 1.0,    // Q2_K family
-        16..=21 => 0.5625, // Q3_K family
-        22 => 0.5625,      // Q4_K
-        23 => 0.6875,      // Q5_K
-        24 => 0.8125,      // Q6_K
-        25 => 1.0625,      // Q8_K
-        28 => 2.0625,      // BF16 (GGML_TYPE_BF16)
-        36..=48 => 0.5625, // IQ2/IQ3/IQ4 family approximations
+        0 => (1, 4),      // F32
+        1 => (1, 2),      // F16
+        2 => (32, 18),    // Q4_0
+        3 => (32, 20),    // Q4_1
+        6 => (32, 22),    // Q5_0
+        7 => (32, 24),    // Q5_1
+        8 => (32, 34),    // Q8_0
+        9 => (32, 36),    // Q8_1
+        10 => (256, 84),  // Q2_K
+        11 => (256, 110), // Q3_K
+        12 => (256, 144), // Q4_K
+        13 => (256, 176), // Q5_K
+        14 => (256, 210), // Q6_K
+        15 => (256, 292), // Q8_K
+        16 => (256, 66),  // IQ2_XXS
+        17 => (256, 74),  // IQ2_XS
+        18 => (256, 98),  // IQ3_XXS
+        19 => (256, 50),  // IQ1_S
+        20 => (32, 18),   // IQ4_NL
+        21 => (256, 110), // IQ3_S
+        22 => (256, 82),  // IQ2_S
+        23 => (256, 136), // IQ4_XS
+        24 => (1, 1),     // I8
+        25 => (1, 2),     // I16
+        26 => (1, 4),     // I32
+        27 => (1, 8),     // I64
+        28 => (1, 8),     // F64
+        29 => (256, 56),  // IQ1_M
+        30 => (1, 2),     // BF16
+        34 => (256, 54),  // TQ1_0
+        35 => (256, 66),  // TQ2_0
+        39 => (32, 17),   // MXFP4
+        40 => (64, 36),   // NVFP4
+        41 => (128, 18),  // Q1_0
+        42 => (64, 18),   // Q2_0
+        // 4, 5, 31-33, 36-38 were removed from the format; unknown ids must
+        // return None so callers fall back instead of guessing.
         _ => return None,
     })
+}
+
+/// `ggml_row_size()`: exact weight bytes for `elements` values of `type_id`.
+fn ggml_row_size(type_id: u32, elements: u64) -> Option<u64> {
+    let (block, block_bytes) = ggml_block(type_id)?;
+    if elements == 0 {
+        return Some(0);
+    }
+    Some(elements.div_ceil(block).saturating_mul(block_bytes))
 }
 
 pub fn probe(path: &Path) -> Option<GgufMeta> {
@@ -225,10 +260,13 @@ pub fn probe(path: &Path) -> Option<GgufMeta> {
         }
         let mut elements = 1_u64;
         let mut overflow = false;
+        let mut stream_exhausted = false;
         for _ in 0..dims {
-            let extent = match reader.scalar(8) {
-                Some(value) => value,
-                None => break,
+            // A truncated dimension stream would desync every later read, so
+            // stop the whole tensor table rather than parsing garbage.
+            let Some(extent) = reader.scalar(8) else {
+                stream_exhausted = true;
+                break;
             };
             elements = match elements.checked_mul(extent) {
                 Some(value) => value,
@@ -237,6 +275,9 @@ pub fn probe(path: &Path) -> Option<GgufMeta> {
                     0
                 }
             };
+        }
+        if stream_exhausted {
+            break;
         }
         let type_id = match reader.scalar(4) {
             Some(value) => value as u32,
@@ -249,8 +290,8 @@ pub fn probe(path: &Path) -> Option<GgufMeta> {
         if overflow {
             continue;
         }
-        if let Some(bytes_per_element) = ggml_type_bytes(type_id) {
-            tensor_bytes += (elements as f64 * bytes_per_element) as u64;
+        if let Some(row_bytes) = ggml_row_size(type_id, elements) {
+            tensor_bytes = tensor_bytes.saturating_add(row_bytes);
         }
     }
     if counted > 0 {
@@ -280,7 +321,9 @@ fn apply_kv(meta: &mut GgufMeta, key: &str, value: Value) {
             if active.is_empty() {
                 return;
             }
-            let sum: u64 = active.iter().sum();
+            let sum: u64 = active
+                .iter()
+                .fold(0_u64, |acc, value| acc.saturating_add(*value));
             meta.head_count_kv = Some(sum as f64 / active.len() as f64);
         }
     }
@@ -447,6 +490,52 @@ mod tests {
             }
         }
         println!("no GGUF blob probed on this machine");
+    }
+
+    #[test]
+    fn row_sizes_match_published_bits_per_weight() {
+        // Guard the id -> (block, bytes) table: these ids are persisted in
+        // GGUF files and were previously mapped to the wrong quant families.
+        assert_eq!(ggml_row_size(0, 1024), Some(4096)); // F32
+        assert_eq!(ggml_row_size(1, 1024), Some(2048)); // F16
+        assert_eq!(ggml_row_size(2, 256), Some(144)); // Q4_0, 4.5 bpw
+        assert_eq!(ggml_row_size(8, 256), Some(272)); // Q8_0
+        assert_eq!(ggml_row_size(10, 256), Some(84)); // Q2_K
+        assert_eq!(ggml_row_size(11, 256), Some(110)); // Q3_K
+        assert_eq!(ggml_row_size(12, 256), Some(144)); // Q4_K
+        assert_eq!(ggml_row_size(13, 256), Some(176)); // Q5_K
+        assert_eq!(ggml_row_size(14, 256), Some(210)); // Q6_K
+        assert_eq!(ggml_row_size(20, 32), Some(18)); // IQ4_NL
+        assert_eq!(ggml_row_size(22, 256), Some(82)); // IQ2_S
+        assert_eq!(ggml_row_size(28, 16), Some(128)); // F64, not BF16
+        assert_eq!(ggml_row_size(30, 1024), Some(2048)); // BF16
+                                                         // Partial blocks round up; removed and unknown ids yield no estimate.
+        assert_eq!(ggml_row_size(12, 300), Some(288));
+        assert_eq!(ggml_row_size(4, 256), None);
+        assert_eq!(ggml_row_size(99, 256), None);
+    }
+
+    #[test]
+    fn q4_k_tensor_bytes_use_exact_block_math() {
+        let mut body: Vec<u8> = Vec::new();
+        body.extend_from_slice(&1_u64.to_le_bytes()); // one tensor
+        body.extend_from_slice(&1_u64.to_le_bytes()); // one kv pair
+        push_string(&mut body, "general.architecture");
+        body.extend_from_slice(&8_u32.to_le_bytes());
+        push_string(&mut body, "qwen2");
+        push_string(&mut body, "blk.0.attn_q.weight");
+        body.extend_from_slice(&1_u32.to_le_bytes()); // one dimension
+        body.extend_from_slice(&1024_u64.to_le_bytes());
+        body.extend_from_slice(&12_u32.to_le_bytes()); // GGML_TYPE_Q4_K
+        body.extend_from_slice(&0_u64.to_le_bytes());
+
+        let path = temp_gguf("q4k", &body);
+        let meta = probe(&path).expect("parses header");
+        std::fs::remove_file(&path).ok();
+
+        // 1024 weights = 4 blocks of 256 x 144 bytes. The previous table
+        // assumed ~1 byte per weight and reported 1024.
+        assert_eq!(meta.tensor_bytes, Some(576));
     }
 
     #[test]

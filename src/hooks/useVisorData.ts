@@ -36,6 +36,7 @@ export function useVisorData(paused: boolean) {
   const [refreshing, setRefreshing] = useState(false);
   const [history, setHistory] = useState<LiveMetrics['history'] | null>(null);
   const connectedRef = useRef(false);
+  const lastStampedRef = useRef<string | null>(null);
   const nativeRuntime = isTauri();
   const fallback = useTelemetry(paused || nativeRuntime || connection === 'live');
   const fetchSnapshot = useCallback(async (signal?: AbortSignal, force = false) => {
@@ -59,6 +60,12 @@ export function useVisorData(paused: boolean) {
         }
       }
       setHistory((current) => {
+        // The native collector refreshes on its own cadence, which the heavy
+        // Windows collectors routinely overrun. Re-appending the same snapshot
+        // every poll drew one real sample as several flat points and compressed
+        // the chart's time axis, so only a new snapshot advances history.
+        if (next.timestamp && next.timestamp === lastStampedRef.current) return current;
+        if (next.timestamp) lastStampedRef.current = next.timestamp;
         const base = current || (nativeRuntime ? emptyHistory() : fallback.history);
         const nextValues = {
           cpu: next.metrics.cpu,

@@ -1,16 +1,30 @@
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 const finite = (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback;
 
+// Keep in sync with `infer_cpu_tdp` in src-tauri/src/energy.rs. The suffix of
+// the model number sets the power class for Intel and AMD mobile parts.
+function modelSuffix(brand) {
+  const matches = [...String(brand || '').toLowerCase().matchAll(/(\d{3,})([a-z]{1,2})/g)];
+  return matches.length ? matches[matches.length - 1][2] : null;
+}
+
 export function inferCpuTdp(cpu = {}) {
   const brand = String(cpu.brand || cpu.model || '').toLowerCase();
   const cores = finite(cpu.physicalCores || cpu.cores, 8);
 
-  if (/\b(ultra|ryzen)\b.*\b[3579]?[u]\b|\b[3579][0-9]{3}u\b/.test(brand)) return 28;
-  if (/\b[3579][0-9]{3}h[sx]?\b|\bhx\b/.test(brand)) return 55;
-  if (cores <= 4) return 65;
-  if (cores <= 8) return 105;
-  if (cores <= 16) return 170;
-  return 230;
+  switch (modelSuffix(brand)) {
+    case 'u':
+      return 28;
+    case 'h':
+    case 'hs':
+    case 'hx':
+      return 55;
+    default:
+      if (cores <= 4) return 65;
+      if (cores <= 8) return 105;
+      if (cores <= 16) return 170;
+      return 230;
+  }
 }
 
 export function estimateEnergy(input) {
@@ -20,11 +34,16 @@ export function estimateEnergy(input) {
   const diskActivity = clamp(finite(input.diskActivity), 0, 100);
   const cpuTdp = Math.max(15, finite(input.cpuTdp, 105));
   const speedRatio = clamp(finite(input.cpuSpeedRatio, 1), 0.45, 1.35);
+  const measuredCpuPower = finite(input.measuredCpuPower, 0);
   const measuredGpuPower = finite(input.measuredGpuPower, 0);
   const gpuPowerLimit = Math.max(30, finite(input.gpuPowerLimit, 220));
 
   const cpuIdle = Math.max(5, cpuTdp * 0.075);
-  const cpu = cpuIdle + (cpuTdp - cpuIdle) * Math.pow(cpuLoad / 100, 0.78) * speedRatio;
+  // Keep in sync with `estimate` in src-tauri/src/energy.rs: an on-die package
+  // reading replaces the TDP curve rather than blending into it.
+  const cpu = measuredCpuPower > 0
+    ? measuredCpuPower
+    : cpuIdle + (cpuTdp - cpuIdle) * Math.pow(cpuLoad / 100, 0.78) * speedRatio;
   const gpu = measuredGpuPower > 0
     ? measuredGpuPower
     : gpuPowerLimit * (0.1 + 0.9 * Math.pow(gpuLoad / 100, 0.92));
@@ -34,15 +53,23 @@ export function estimateEnergy(input) {
   const componentTotal = cpu + gpu + memory + storage + platform;
   const psuEfficiency = componentTotal > 350 ? 0.91 : componentTotal > 150 ? 0.89 : 0.86;
   const total = componentTotal / psuEfficiency;
+  const cpuMeasured = measuredCpuPower > 0;
   const gpuMeasured = measuredGpuPower > 0;
+  const bothMeasured = cpuMeasured && gpuMeasured;
 
   return {
     watts: Math.round(total * 10) / 10,
-    confidence: gpuMeasured ? 'hybrid' : 'estimated',
-    confidenceScore: gpuMeasured ? 76 : 54,
-    methodology: gpuMeasured
-      ? 'GPU measured by vendor telemetry; CPU and platform modeled from live load.'
-      : 'CPU, GPU and platform modeled from live utilization and hardware limits.',
+    cpuMeasured,
+    gpuMeasured,
+    confidence: bothMeasured ? 'measured' : cpuMeasured || gpuMeasured ? 'hybrid' : 'estimated',
+    confidenceScore: bothMeasured ? 88 : cpuMeasured ? 78 : gpuMeasured ? 76 : 54,
+    methodology: bothMeasured
+      ? 'CPU package and GPU measured by on-die telemetry; memory, storage and platform modeled from live load.'
+      : cpuMeasured
+        ? 'CPU package measured by on-die telemetry; GPU and platform modeled from live load.'
+        : gpuMeasured
+          ? 'GPU measured by vendor telemetry; CPU and platform modeled from live load.'
+          : 'CPU, GPU and platform modeled from live utilization and hardware limits.',
     breakdown: {
       cpu: Math.round(cpu * 10) / 10,
       gpu: Math.round(gpu * 10) / 10,

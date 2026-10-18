@@ -1520,6 +1520,24 @@ fn cloud_provider_catalog(applications: &[Value]) -> Vec<Value> {
         .collect()
 }
 
+/// Loopback `/metrics` endpoints for runtimes that expose token counters, as
+/// `(display source, url)` pairs. Ollama is deliberately absent: it serves no
+/// metrics endpoint, so its rates come from the server log instead. Probing a
+/// fixed port blindly previously pointed at whatever local service happened to
+/// own it, which measured nothing while still reporting a provenance.
+pub fn metrics_targets() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("llama.cpp /metrics", "http://127.0.0.1:8080/metrics"),
+        ("vLLM /metrics", "http://127.0.0.1:8000/metrics"),
+        (
+            "Text generation web UI /metrics",
+            "http://127.0.0.1:5000/metrics",
+        ),
+        ("Jan /metrics", "http://127.0.0.1:1337/metrics"),
+        ("LocalAI /metrics", "http://127.0.0.1:8081/metrics"),
+    ]
+}
+
 /// Resolve the primary GGUF blob for each installed Ollama model so the
 /// collector can read exact header metadata. Returns `(path, model_name)`
 /// pairs; missing blobs are skipped by the caller.
@@ -1657,6 +1675,10 @@ pub fn apply_gguf_metadata(models: &mut Value, metadata: &HashMap<String, gguf::
         }
         model["kvHeads"] = json!(meta.head_count_kv);
         model["kvHeadCountExact"] = json!(meta.head_count_kv.is_some());
+        // Head dimensions complete the KV-cache equation; without them the
+        // advisor has to assume 128, which is wrong for Gemma (256) and Phi (96).
+        model["kvKeyLength"] = json!(meta.key_length);
+        model["kvValueLength"] = json!(meta.value_length);
         model["layers"] = json!(meta.block_count);
         model["experts"] = json!(meta.expert_count);
         model["activeExperts"] = json!(meta.expert_used_count);
@@ -1904,12 +1926,23 @@ pub fn build(processes: &[Value]) -> Value {
         } else {
             Value::Null
         };
-        model["applicationCpu"] = json!(application
-            .map(|item| number(item.get("cpu")))
-            .unwrap_or_default());
-        model["applicationGpu"] = json!(application
-            .map(|item| number(item.get("gpu")))
-            .unwrap_or_default());
+        // A runtime hosting several models reports one aggregate. Copying it onto
+        // every model claimed 100% of the same CPU and GPU twice over, so only a
+        // lone loaded model may inherit the application totals.
+        model["applicationCpu"] = if single_loaded_model {
+            json!(application
+                .map(|item| number(item.get("cpu")))
+                .unwrap_or_default())
+        } else {
+            Value::Null
+        };
+        model["applicationGpu"] = if single_loaded_model {
+            json!(application
+                .map(|item| number(item.get("gpu")))
+                .unwrap_or_default())
+        } else {
+            Value::Null
+        };
         model["allocatedRamBytes"] = json!((allocated - vram).max(0.0));
         model["allocatedVramGb"] = json!(vram / GIB);
     }
@@ -1964,6 +1997,37 @@ pub fn build(processes: &[Value]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The advisor only avoids its 128-wide head assumption if the header values
+    /// actually reach the payload; a dropped key here silently halves or doubles
+    /// every KV-cache estimate and no test downstream would notice.
+    #[test]
+    fn gguf_head_dimensions_reach_the_advisor_payload() {
+        let meta = gguf::GgufMeta {
+            head_count_kv: Some(4.0),
+            block_count: Some(62),
+            key_length: Some(256),
+            value_length: Some(256),
+            ..Default::default()
+        };
+        let mut models = json!({ "models": [{ "model": "gemma-3:12b", "sizeBytes": 0 }] });
+        let mut table = HashMap::new();
+        table.insert("gemma-3:12b".to_string(), meta);
+        apply_gguf_metadata(&mut models, &table);
+
+        let model = &models["models"][0];
+        assert_eq!(model["kvKeyLength"], 256);
+        assert_eq!(model["kvValueLength"], 256);
+        assert_eq!(model["layers"], 62);
+
+        let mut sparse = json!({ "models": [{ "model": "unknown:1b", "sizeBytes": 0 }] });
+        apply_gguf_metadata(&mut sparse, &HashMap::new());
+        assert_eq!(
+            sparse["models"][0].get("kvKeyLength"),
+            None,
+            "unmatched models must not gain synthetic metadata"
+        );
+    }
 
     #[test]
     fn codex_host_is_not_mistaken_for_chatgpt() {
