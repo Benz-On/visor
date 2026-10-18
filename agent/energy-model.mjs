@@ -1,16 +1,30 @@
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 const finite = (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback;
 
+// Keep in sync with `infer_cpu_tdp` in src-tauri/src/energy.rs. The suffix of
+// the model number sets the power class for Intel and AMD mobile parts.
+function modelSuffix(brand) {
+  const matches = [...String(brand || '').toLowerCase().matchAll(/(\d{3,})([a-z]{1,2})/g)];
+  return matches.length ? matches[matches.length - 1][2] : null;
+}
+
 export function inferCpuTdp(cpu = {}) {
   const brand = String(cpu.brand || cpu.model || '').toLowerCase();
   const cores = finite(cpu.physicalCores || cpu.cores, 8);
 
-  if (/\b(ultra|ryzen)\b.*\b[3579]?[u]\b|\b[3579][0-9]{3}u\b/.test(brand)) return 28;
-  if (/\b[3579][0-9]{3}h[sx]?\b|\bhx\b/.test(brand)) return 55;
-  if (cores <= 4) return 65;
-  if (cores <= 8) return 105;
-  if (cores <= 16) return 170;
-  return 230;
+  switch (modelSuffix(brand)) {
+    case 'u':
+      return 28;
+    case 'h':
+    case 'hs':
+    case 'hx':
+      return 55;
+    default:
+      if (cores <= 4) return 65;
+      if (cores <= 8) return 105;
+      if (cores <= 16) return 170;
+      return 230;
+  }
 }
 
 export function estimateEnergy(input) {

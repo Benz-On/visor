@@ -559,7 +559,7 @@ slot print_timing: id 0 | task 2 |        eval time = 10000.00 ms /  500 tokens 
         record_sample(sample.clone());
         record_sample(sample.clone());
         // Identical consecutive completions must not double-count.
-        assert!(history_json()["samples"].as_array().unwrap().len() >= 1);
+        assert!(!history_json()["samples"].as_array().unwrap().is_empty());
         let rendered = history_json();
         assert_eq!(rendered["samples"][0]["decodeTps"], 42.5);
         assert_eq!(rendered["samples"][0]["evidence"], "runtime-log");

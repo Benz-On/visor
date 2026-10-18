@@ -47,9 +47,11 @@ macOS, Linux, and ARM64 binary previews resume when native builders are availabl
 
 ## Release acceptance
 
-1. Frontend lint, production build, and Node tests pass.
-2. Rust formatting and tests pass on the release host; cross-platform tests run
-   again when hosted-runner quota is restored.
+1. Frontend lint, production build, and Node tests pass. These also run
+   automatically on Linux for pushes to `main` and for pull requests.
+2. Rust formatting and tests pass on the release host; the automatic gate covers
+   Linux, and the Windows and macOS legs run on manual dispatch until more
+   hosted-runner quota is available.
 3. Each published platform produces both expected portable and package artifacts.
 4. Checksums match the generated release manifest.
 5. A portable build is smoke-tested on each supported operating-system family.

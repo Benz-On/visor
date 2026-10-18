@@ -48,3 +48,13 @@ test('CPU TDP heuristic scales with core count', () => {
   assert.equal(inferCpuTdp({ physicalCores: 16 }), 170);
   assert.equal(inferCpuTdp({ physicalCores: 24 }), 230);
 });
+
+test('mobile model suffix sets the power class for Intel and AMD', () => {
+  assert.equal(inferCpuTdp({ physicalCores: 8, brand: 'Intel(R) Core(TM) Ultra 7 155U' }), 28);
+  assert.equal(inferCpuTdp({ physicalCores: 8, brand: '13th Gen Intel(R) Core(TM) i7-1355U' }), 28);
+  assert.equal(inferCpuTdp({ physicalCores: 8, brand: 'AMD Ryzen 7 6800U' }), 28);
+  assert.equal(inferCpuTdp({ physicalCores: 8, brand: 'AMD Ryzen 9 7945HS' }), 55);
+  assert.equal(inferCpuTdp({ physicalCores: 10, brand: 'Intel(R) Core(TM) i9-14900HX' }), 55);
+  assert.equal(inferCpuTdp({ physicalCores: 6, brand: 'Intel(R) Core(TM) i5-8400' }), 105);
+  assert.equal(inferCpuTdp({ physicalCores: 16, brand: 'Intel(R) Core(TM) 13th Gen Ultra 9' }), 170);
+});

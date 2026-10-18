@@ -12,11 +12,11 @@ use sysinfo::{Disks, Networks, ProcessesToUpdate, System};
 
 const GIB: f64 = 1_073_741_824.0;
 const MIB: f64 = 1_048_576.0;
-const SENSOR_SCRIPT: &str = include_str!("../../agent/sensors.ps1");
-const GPU_COUNTER_SCRIPT: &str = include_str!("../../agent/gpu-counters.ps1");
-const PROCESS_SNAPSHOT_SCRIPT: &str = include_str!("../../agent/process-snapshot.ps1");
-const MEMORY_SNAPSHOT_SCRIPT: &str = include_str!("../../agent/memory-snapshot.ps1");
-const HARDWARE_SNAPSHOT_SCRIPT: &str = include_str!("../../agent/hardware-snapshot.ps1");
+const SENSOR_SCRIPT: &str = include_str!("../collectors/sensors.ps1");
+const GPU_COUNTER_SCRIPT: &str = include_str!("../collectors/gpu-counters.ps1");
+const PROCESS_SNAPSHOT_SCRIPT: &str = include_str!("../collectors/process-snapshot.ps1");
+const MEMORY_SNAPSHOT_SCRIPT: &str = include_str!("../collectors/memory-snapshot.ps1");
+const HARDWARE_SNAPSHOT_SCRIPT: &str = include_str!("../collectors/hardware-snapshot.ps1");
 
 #[derive(Clone, Default)]
 struct GpuInfo {

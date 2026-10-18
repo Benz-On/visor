@@ -25,6 +25,40 @@ Versioning while the product remains in beta.
 - All ad-hoc inline styles in the AI view were replaced with design
   system classes; every color now flows through theme tokens so all
   four themes render the new panels correctly.
+- Tauri moved from the exact `=2.8.5` pin to the `2.12` line, with the
+  JavaScript API and CLI updated to match. The lockfiles stay committed,
+  so builds remain reproducible while patch releases can reach us again.
+- The declared Rust floor is now 1.90, matching what the current Tauri
+  release requires.
+- The Windows sensor scripts live in `src-tauri/collectors/`. They are
+  embedded into the native binary at compile time, so they are no longer
+  stored in the directory the README describes as a development fallback.
+
+### Fixed
+
+- Model weight sizes are no longer overestimated. The GGML type table was
+  mapped onto the wrong quantization ids and assumed roughly one byte per
+  weight for most formats, so Q4_K and Q4_0 read about 1.8x too large and
+  Q2_K about 3x. Weights are now summed with exact block arithmetic, which
+  feeds the advisor's memory and layer-offload estimates.
+- Intel mobile processors receive a power class. CPU TDP inference only
+  recognised AMD suffixes, which pushed an eight-core Intel Core Ultra into
+  the 105 W desktop bucket; the model-number suffix now sets the class for
+  both vendors, and the Node energy model matches the native one.
+- A truncated GGUF dimension stream stops parsing the tensor table instead
+  of continuing out of sync, and KV-head and weight totals saturate rather
+  than overflow.
+- Continuous integration runs on pushes to `main` and on pull requests
+  again. The automatic gate covers the preflight, web build, agent tests,
+  and native formatting, Clippy and tests on Linux; Windows and macOS native
+  legs remain on manual dispatch to respect Actions quota.
+- The README no longer claims that pushing a version tag starts release
+  builds.
+- Four advisories in build-time dependencies (browserslist, brace-expansion,
+  source-map-js, baseline-browser-mapping) are resolved, so the CI
+  `npm audit --audit-level=high` step passes.
+- Apache-2.0 licensing is in place, with a contributor license grant, so the
+  public repository no longer accepts contributions without a license.
 
 ## [0.9.1-beta.1] - Unreleased
 

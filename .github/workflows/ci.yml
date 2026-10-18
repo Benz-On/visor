@@ -1,8 +1,13 @@
 name: CI
 
 on:
-  # GitHub-hosted runners are temporarily disabled for automatic events.
-  # Run this workflow manually when Actions capacity is available again.
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Manual runs additionally exercise the Windows and macOS native jobs. The
+  # paid hosted runners stay out of the automatic path to conserve Actions
+  # quota; the automatic gate below runs on Linux only.
   workflow_dispatch:
 
 permissions:
@@ -61,6 +66,9 @@ jobs:
   native:
     name: Native tests · ${{ matrix.os }}
     needs: preflight
+    # Automatic events pay for one Linux native job only; the Windows and
+    # macOS legs run on manual dispatch.
+    if: github.event_name == 'workflow_dispatch' || matrix.os == 'ubuntu-24.04'
     strategy:
       fail-fast: false
       matrix:
