@@ -34,6 +34,7 @@ import {
   Zap,
 } from 'lucide-react';
 import { Donut, LineChart } from './components/Charts';
+import { niceCeiling } from './chartScale';
 import { ProcessTable } from './components/ProcessTable';
 import { Sidebar, type ViewId } from './components/Sidebar';
 import { useVisorData } from './hooks/useVisorData';
@@ -394,6 +395,10 @@ function AIInsight({ processes, localAI }: { processes: ProcessInfo[]; localAI?:
   const model = localAI?.models.find((item) => item.status === 'active') || localAI?.models[0];
   const application = localAI?.applications.find((item) => item.application === model?.application) || (!model ? localAI?.applications[0] : undefined);
   const modelDetected = Boolean(model || application || workload);
+  // A runtime holding several models exposes one aggregate. Substituting it into
+  // a model-level row would let each model claim 100% of the same CPU, GPU and
+  // VRAM, so those rows say the figure is not separated instead of guessing.
+  const separable = (localAI?.loadedModelCount ?? 0) <= 1;
   return (
     <article className="panel insight-card ai-insight">
       <div className="insight-card-head">
@@ -403,9 +408,9 @@ function AIInsight({ processes, localAI }: { processes: ProcessInfo[]; localAI?:
       </div>
       <div className="model-name"><Sparkles size={16} /><strong>{model?.model || 'Waiting for a runtime API'}</strong><span>{model ? `${model.confidence}% exact` : workload ? `PID ${workload.id}` : 'LOCAL'}</span></div>
       <div className="model-stats">
-        <div><span>Application power</span><strong>~{(model?.applicationEnergyWatts ?? application?.energyWatts ?? workload?.energyWatts ?? 0).toFixed(1)} <small>W</small></strong></div>
-        <div><span>GPU activity</span><strong>{(model?.applicationGpu ?? application?.gpu ?? workload?.gpu ?? 0).toFixed(1)}%</strong></div>
-        <div><span>Model VRAM</span><strong>{(model?.allocatedVramGb ?? application?.vramGb ?? workload?.vram ?? 0).toFixed(1)} <small>GB</small></strong></div>
+        <div><span>Application power</span><strong>{model && !separable ? 'Not separated' : <>~{(model?.applicationEnergyWatts ?? application?.energyWatts ?? workload?.energyWatts ?? 0).toFixed(1)} <small>W</small></>}</strong></div>
+        <div><span>GPU activity</span><strong>{model && !separable ? 'Not separated' : <>{(model?.applicationGpu ?? application?.gpu ?? workload?.gpu ?? 0).toFixed(1)}%</>}</strong></div>
+        <div><span>Model VRAM</span><strong>{model && !separable ? 'Not separated' : <>{(model?.allocatedVramGb ?? application?.vramGb ?? workload?.vram ?? 0).toFixed(1)} <small>GB</small></>}</strong></div>
       </div>
     </article>
   );
@@ -672,7 +677,10 @@ function AIWorkloads({ metrics, localAI, hardware, throughputHistory, refreshing
   const application = localAI?.applications.find((item) => item.application === model?.application) || (!model ? localAI?.applications[0] : undefined);
   const runtimeProcess = model?.process || application?.processes.find((item) => item.role === 'model-runner' || item.role === 'runtime') || application?.processes[0];
   const allocatedRamGb = bytesToGb(model?.allocatedRamBytes);
-  const modelVramGb = model?.allocatedVramGb || (model?.status !== 'detected' ? application?.vramGb : 0) || 0;
+  // The application's total VRAM may only stand in for a model when that runtime
+  // holds exactly one loaded model; otherwise both models claim the same memory.
+  const modelSeparable = (localAI?.loadedModelCount ?? 0) <= 1;
+  const modelVramGb = model?.allocatedVramGb || (modelSeparable && model?.status !== 'detected' ? application?.vramGb : 0) || 0;
   const totalVramGb = bytesToGb(metrics.gpuMemory?.totalBytes);
   const appEnergy = model?.applicationEnergyWatts ?? application?.energyWatts ?? 0;
   const exactModel = Boolean(model);
@@ -789,15 +797,15 @@ function AIWorkloads({ metrics, localAI, hardware, throughputHistory, refreshing
         {throughputHistory.length > 1 && (
           <section className="throughput-history" aria-label="Measured throughput history">
             <div className="throughput-history-head">
-              <span>SESSION THROUGHPUT · {throughputHistory.length} measured completions</span>
+              <span>SESSION THROUGHPUT · {throughputHistory.length} measured samples</span>
               <small>in-memory · this collector session only</small>
             </div>
             <div className="throughput-history-chart">
-              <LineChart values={throughputHistory.map((sample) => Math.min(100, sample.decodeTps))} tone="mint" height={90} compact />
+              <LineChart values={throughputHistory.map((sample) => sample.decodeTps)} tone="mint" height={90} compact maximum={niceCeiling(throughputHistory.map((sample) => sample.decodeTps))} ariaLabel="Measured decode tokens per second history" />
             </div>
             <div className="throughput-history-stats">
-              <span><i className="avg" />Average <strong>{throughputHistory.reduce((sum, sample) => sum + sample.decodeTps, 0) / throughputHistory.length | 0} tok/s</strong></span>
-              <span><i className="peak" />Peak <strong>{Math.max(...throughputHistory.map((sample) => sample.decodeTps)).toFixed(1)} tok/s</strong></span>
+              <span><i className="avg" />Mean of samples <strong>{Math.round(throughputHistory.reduce((sum, sample) => sum + sample.decodeTps, 0) / throughputHistory.length)} tok/s</strong></span>
+              <span><i className="peak" />Peak <strong>{throughputHistory.reduce((highest, sample) => Math.max(highest, sample.decodeTps), 0).toFixed(1)} tok/s</strong></span>
               <span><i className="total" /><strong>{throughputHistory.reduce((sum, sample) => sum + sample.tokens, 0).toLocaleString()}</strong> tokens total</span>
             </div>
           </section>

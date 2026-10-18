@@ -1926,12 +1926,23 @@ pub fn build(processes: &[Value]) -> Value {
         } else {
             Value::Null
         };
-        model["applicationCpu"] = json!(application
-            .map(|item| number(item.get("cpu")))
-            .unwrap_or_default());
-        model["applicationGpu"] = json!(application
-            .map(|item| number(item.get("gpu")))
-            .unwrap_or_default());
+        // A runtime hosting several models reports one aggregate. Copying it onto
+        // every model claimed 100% of the same CPU and GPU twice over, so only a
+        // lone loaded model may inherit the application totals.
+        model["applicationCpu"] = if single_loaded_model {
+            json!(application
+                .map(|item| number(item.get("cpu")))
+                .unwrap_or_default())
+        } else {
+            Value::Null
+        };
+        model["applicationGpu"] = if single_loaded_model {
+            json!(application
+                .map(|item| number(item.get("gpu")))
+                .unwrap_or_default())
+        } else {
+            Value::Null
+        };
         model["allocatedRamBytes"] = json!((allocated - vram).max(0.0));
         model["allocatedVramGb"] = json!(vram / GIB);
     }

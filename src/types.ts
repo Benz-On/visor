@@ -172,8 +172,9 @@ export interface LocalModelInfo {
   location?: string;
   process: LocalAiProcess | null;
   applicationEnergyWatts: number | null;
-  applicationCpu: number;
-  applicationGpu: number;
+  /** Null when the runtime holds several models: one aggregate cannot be split. */
+  applicationCpu: number | null;
+  applicationGpu: number | null;
   /** Exact GGUF header metadata — present only when the blob was readable. */
   parameterCountExact?: number;
   weightBytesExact?: number;

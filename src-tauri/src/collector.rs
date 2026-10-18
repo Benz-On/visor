@@ -342,7 +342,6 @@ impl Collector {
                 .total_cmp(&number(left, "energyWatts"))
                 .then_with(|| number(right, "cpu").total_cmp(&number(left, "cpu")))
         });
-        processes.truncate(180);
 
         if stale(self.last_local_ai, now, Duration::from_secs(4)) {
             self.local_ai = local_ai::build(&processes);
@@ -623,9 +622,11 @@ impl Collector {
         let alerts = self.alert_engine.evaluate(&metrics, gaming);
         self.inference = throughput::measure();
         let current_pid = std::process::id();
-        let current_process = processes
+        let (self_cpu, self_memory_mb) = processes
             .iter()
-            .find(|process| process.get("id").and_then(Value::as_u64) == Some(current_pid as u64));
+            .find(|process| process.get("id").and_then(Value::as_u64) == Some(current_pid as u64))
+            .map(|process| (number(process, "cpu"), number(process, "memory") * 1024.0))
+            .unwrap_or_default();
         let blocked = self
             .system
             .processes()
@@ -637,6 +638,11 @@ impl Collector {
         } else {
             Some(collector_errors.join(" "))
         };
+
+        // The display budget is applied last. Truncating before attribution let a
+        // runtime with a small working set drop out of the process list the AI
+        // snapshot is built from, and its loaded model then vanished from counts.
+        processes.truncate(180);
 
         let age_ms =
             |since: &Option<Instant>| since.map(|moment| moment.elapsed().as_millis() as u64);
@@ -672,8 +678,8 @@ impl Collector {
             "localAI": self.local_ai,
             "alerts": alerts,
             "agent": {
-                "cpuPercent": current_process.map(|process| number(process, "cpu")).unwrap_or_default(),
-                "memoryMb": current_process.map(|process| number(process, "memory") * 1024.0).unwrap_or_default(),
+                "cpuPercent": self_cpu,
+                "memoryMb": self_memory_mb,
                 "pid": current_pid,
                 "uptimeSeconds": self.started.elapsed().as_secs(),
                 "sampleDurationMs": collection_started.elapsed().as_millis(),
@@ -1329,6 +1335,52 @@ mod tests {
                 "sampledAgoMs.{field} missing"
             );
         }
+    }
+
+    /// Accuracy harness: compares the shipped collector against the vendor tool
+    /// rather than a fixture. Ignored because it needs real NVIDIA telemetry.
+    /// Run on a Windows host with
+    /// `cargo test live_snapshot_matches -- --ignored --nocapture`.
+    ///
+    /// Utilisation is printed but not asserted: the collector samples on a
+    /// interval while nvidia-smi answers for a fresh one, so any difference is
+    /// legitimate. Resident VRAM changes slowly enough to compare directly, and
+    /// a large gap means the two are not looking at the same adapter.
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn live_snapshot_matches_nvidia_telemetry() {
+        let snapshot = Collector::new().collect();
+        let reported_bytes = snapshot["metrics"]["gpuMemory"]["usedBytes"]
+            .as_f64()
+            .unwrap_or_default();
+        let reported_utilization = snapshot["metrics"]["gpu"].as_f64().unwrap_or_default();
+        let vendor = Command::new("nvidia-smi")
+            .args([
+                "--query-gpu=memory.used,utilization.gpu",
+                "--format=csv,noheader,nounits",
+            ])
+            .output()
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .unwrap_or_default();
+        println!("collector: {reported_bytes} bytes used, {reported_utilization}% busy");
+        println!("nvidia-smi: {vendor}");
+        assert!(!vendor.is_empty(), "nvidia-smi unavailable on this host");
+        let vendor_mib: Vec<f64> = vendor
+            .split(',')
+            .map(|part| part.trim().parse::<f64>().unwrap_or_default())
+            .collect();
+        assert!(
+            vendor_mib.first().is_some_and(|used| *used > 0.0),
+            "vendor reports no resident memory: {vendor}"
+        );
+        let vendor_bytes = vendor_mib[0] * MIB;
+        let drift = (reported_bytes - vendor_bytes).abs() / vendor_bytes;
+        assert!(
+            drift < 0.1,
+            "collector reports {reported_bytes} bytes against vendor {vendor_bytes} ({:.1}% drift)",
+            drift * 100.0
+        );
     }
 
     #[test]
