@@ -383,6 +383,10 @@ export interface SystemSnapshot {
   timestamp: string;
   source: 'windows-agent' | 'tauri-native';
   pollMs: number;
+  /** Cadence the collector aims for. pollMs is the interval it actually got. */
+  targetPollMs?: number;
+  /** Milliseconds since each background collector last began a run. */
+  sampledAgoMs?: Record<string, number | null>;
   hardware: HardwareInfo;
   metrics: Omit<LiveMetrics, 'history'>;
   energy: EnergyEstimate;

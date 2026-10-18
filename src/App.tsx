@@ -215,7 +215,7 @@ function App() {
           {activeView === 'performance' && <Performance metrics={metrics} hardware={visor.snapshot?.hardware} refreshing={visor.refreshing} onRefresh={visor.refresh} />}
           {activeView === 'ai' && <AIWorkloads metrics={metrics} localAI={visor.snapshot?.localAI} hardware={visor.snapshot?.hardware} throughputHistory={visor.throughputHistory} refreshing={visor.refreshing} onRefresh={visor.refresh} />}
           {activeView === 'energy' && <EnergyView energy={visor.snapshot?.energy} processes={visor.processes} agent={visor.snapshot?.agent} />}
-          {activeView === 'history' && <HistoryView metrics={metrics} energy={visor.snapshot?.energy} agent={visor.snapshot?.agent} />}
+          {activeView === 'history' && <HistoryView metrics={metrics} energy={visor.snapshot?.energy} agent={visor.snapshot?.agent} pollMs={visor.snapshot?.pollMs} />}
           {activeView === 'alerts' && <AlertsView alerts={visor.snapshot?.alerts} live={visor.connection === 'live'} onToggle={visor.setAlertRule} />}
           {activeView === 'settings' && <SettingsView theme={theme} setTheme={setTheme} metrics={metrics} hardware={visor.snapshot?.hardware} agent={visor.snapshot?.agent} source={visor.snapshot?.source} />}
         </div>
@@ -896,7 +896,7 @@ function EnergyView({ energy, processes, agent }: { energy?: EnergyEstimate; pro
   );
 }
 
-function HistoryView({ metrics, energy, agent }: MetricsProps & { energy?: EnergyEstimate; agent?: AgentInfo }) {
+function HistoryView({ metrics, energy, agent, pollMs }: MetricsProps & { energy?: EnergyEstimate; agent?: AgentInfo; pollMs?: number }) {
   // The collector keeps one rolling buffer; labeling it as anything longer
   // would fabricate retention we do not have.
   const [range, setRange] = useState('Live buffer');
@@ -904,14 +904,18 @@ function HistoryView({ metrics, energy, agent }: MetricsProps & { energy?: Energ
   const average = (values: number[]) => values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
   const peak = (values: number[]) => values.length ? Math.max(...values) : 0;
   const uptimeMinutes = Math.floor((agent?.uptimeSeconds || 0) / 60);
-  const bufferSeconds = Math.round(history.length * 1.1);
+  // Derived from the interval the collector actually achieved, not the 1.1 s it
+  // asks for: the heavy Windows collectors regularly overrun that target, and a
+  // hardcoded label quietly misstated how far apart the plotted points are.
+  const sampleSeconds = pollMs && pollMs > 0 ? pollMs / 1000 : 1.1;
+  const bufferSeconds = Math.round(history.length * sampleSeconds);
   return (
     <div className="history-grid">
       <section className="panel history-chart-card">
         <div className="panel-header"><div><p className="eyebrow">SYSTEM LOAD</p><h2>Performance timeline</h2></div><div className="segmented-control">{['Live buffer'].map((item) => <button key={item} className={range === item ? 'active' : ''} onClick={() => setRange(item)}>{item}</button>)}</div></div>
         <div className="history-legend"><span><i className="cyan-legend" />CPU average {average(metrics.history.cpu).toFixed(1)}%</span><span><i className="violet-legend" />GPU average {average(metrics.history.gpu).toFixed(1)}%</span></div>
         <div className="history-main-chart"><LineChart values={history} tone="cyan" height={250} /></div>
-        <div className="history-axis"><span>{bufferSeconds} seconds ago</span><span>Last {bufferSeconds} s · 1.1 s samples</span><span>Now</span></div>
+        <div className="history-axis"><span>{bufferSeconds} seconds ago</span><span>Last {bufferSeconds} s · {sampleSeconds.toFixed(1)} s samples</span><span>Now</span></div>
       </section>
       <section className="peak-grid">
         <PeakCard label="Peak CPU" value={`${peak(metrics.history.cpu).toFixed(1)}%`} time="Rolling buffer" icon={<Cpu />} />

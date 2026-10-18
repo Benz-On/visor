@@ -301,8 +301,15 @@ impl Collector {
         let physical_cores =
             System::physical_core_count().unwrap_or(self.system.cpus().len().max(1));
         let cpu_tdp = energy::infer_cpu_tdp(physical_cores, &cpu_brand);
-        let speed_ratio = if cpu_speed_max > 0.0 {
-            cpu_speed / cpu_speed_max
+        // Both operands of the previous ratio came from the same instantaneous
+        // per-core reading, so mean/max sat near 1 whatever the load and the
+        // clock term in the power model did nothing at all — it even fell when a
+        // single core boosted. Live clock is now compared against the
+        // processor's rated clock, which the inventory reports as base
+        // frequency; sustained boost above it is clamped by the model.
+        let rated_clock = rated_clock_ghz(&self.hardware_details, cpu_speed_max);
+        let speed_ratio = if rated_clock > 0.0 {
+            cpu_speed / rated_clock
         } else {
             1.0
         };
@@ -631,10 +638,27 @@ impl Collector {
             Some(collector_errors.join(" "))
         };
 
+        let age_ms =
+            |since: &Option<Instant>| since.map(|moment| moment.elapsed().as_millis() as u64);
         json!({
             "timestamp": chrono::Utc::now().to_rfc3339(),
             "source": "tauri-native",
-            "pollMs": 1100,
+            // The interval actually achieved, not the requested one. The five
+            // Windows collectors cannot all fit inside the 1.1 s target, and
+            // advertising a fixed cadence made every derived rate look fresher
+            // than it was. Each age is measured from when that collector began.
+            "pollMs": (elapsed * 1000.0).round() as u64,
+            "targetPollMs": 1100,
+            "sampledAgoMs": {
+                "gpu": age_ms(&self.last_gpu),
+                "gpuProcesses": age_ms(&self.last_gpu_processes),
+                "processDetails": age_ms(&self.last_process_details),
+                "sensors": age_ms(&self.last_sensors),
+                "memory": age_ms(&self.last_memory_details),
+                "hardware": age_ms(&self.last_hardware_details),
+                "localAI": age_ms(&self.last_local_ai),
+                "modelMetadata": age_ms(&self.last_gguf)
+            },
             "hardware": self.hardware(&cpu_brand, physical_cores, cpu_speed, cpu_speed_max, cpu_tdp),
             "metrics": metrics,
             "energy": energy::as_json(&energy_estimate, self.session_wh),
@@ -882,6 +906,18 @@ impl Collector {
             "displays": array_or(&self.hardware_details, "displays", Vec::new())
         })
     }
+}
+
+/// Clock used to normalise the live frequency for the power model. The inventory
+/// reports the processor's base clock; without it the only comparator left is the
+/// fastest live core, which makes the ratio self-referential and inert.
+fn rated_clock_ghz(hardware_details: &Value, live_max_ghz: f64) -> f64 {
+    hardware_details
+        .get("cpu")
+        .and_then(|cpu| cpu.get("speedMax"))
+        .and_then(Value::as_f64)
+        .filter(|value| *value > 0.0)
+        .unwrap_or(live_max_ghz)
 }
 
 fn stale(last: Option<Instant>, now: Instant, interval: Duration) -> bool {
@@ -1240,6 +1276,22 @@ mod tests {
         assert!(error.contains("no data"), "unexpected error: {error}");
     }
 
+    #[test]
+    fn speed_ratio_uses_the_rated_clock_when_known() {
+        let inventory = json!({ "cpu": { "speedMax": 4.4 } });
+        // Live clock must be compared against the rated clock, not against the
+        // fastest live core, or the ratio is self-referential and always ~1.
+        assert_eq!(rated_clock_ghz(&inventory, 1.0), 4.4);
+        assert_eq!(rated_clock_ghz(&inventory, 4.4), 4.4);
+        // Missing or zero rated clocks fall back to the live maximum rather than
+        // dividing by zero and yielding a runaway ratio.
+        assert_eq!(
+            rated_clock_ghz(&json!({ "cpu": { "speedMax": 0 } }), 3.8),
+            3.8
+        );
+        assert_eq!(rated_clock_ghz(&json!({}), 3.8), 3.8);
+    }
+
     /// End-to-end guard for the silent-empty-collector defect. `committedBytes`
     /// is supplied only by the embedded memory script, so a zero here means the
     /// PowerShell payload produced nothing and the field silently kept its
@@ -1257,6 +1309,26 @@ mod tests {
             "memory collector returned no data; lastError = {:?}",
             snapshot["agent"]["lastError"]
         );
+        // Cadence and staleness are part of the accuracy contract: the reported
+        // interval must be the one actually achieved, and every background
+        // collector must state how old its newest value is.
+        assert!(snapshot["pollMs"].as_u64().unwrap_or_default() > 0);
+        assert_eq!(snapshot["targetPollMs"], 1100);
+        for field in [
+            "gpu",
+            "gpuProcesses",
+            "processDetails",
+            "sensors",
+            "memory",
+            "hardware",
+            "localAI",
+            "modelMetadata",
+        ] {
+            assert!(
+                snapshot["sampledAgoMs"].get(field).is_some(),
+                "sampledAgoMs.{field} missing"
+            );
+        }
     }
 
     #[test]
