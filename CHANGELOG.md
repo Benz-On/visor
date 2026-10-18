@@ -3,28 +3,10 @@
 All notable VISOR changes are documented here. Versions follow Semantic
 Versioning while the product remains in beta.
 
-## [0.9.2-beta.1] - Unreleased
-
-### Added
-
-- Premium design-system surfaces for the measured-AI features: a
-  mint-accented measured-rate strip with per-metric tone gradients and
-  tabular numerals; a layer offload plan rendered as interactive
-  placement cards with FITS/OVER verdict chips, hover lift, and tone
-  theming; a session throughput history card with average/peak/tokens
-  stat row and legend markers.
-- "GGUF exact" provenance tag in the model spec grid, styled as a
-  system chip rather than ad-hoc text.
-- Command palette keyboard-selection highlighting (inset accent bar)
-  matching the hover state.
-- Theme parity for Cyberdeck and Retro terminal across all new
-  surfaces; custom thin scrollbars and cyan text selection globally.
+## [0.9.3-beta.1] - Unreleased
 
 ### Changed
 
-- All ad-hoc inline styles in the AI view were replaced with design
-  system classes; every color now flows through theme tokens so all
-  four themes render the new panels correctly.
 - Tauri moved from the exact `=2.8.5` pin to the `2.12` line, with the
   JavaScript API and CLI updated to match. The lockfiles stay committed,
   so builds remain reproducible while patch releases can reach us again.
@@ -165,7 +147,30 @@ Versioning while the product remains in beta.
 - Apache-2.0 licensing is in place, with a contributor license grant, so the
   public repository no longer accepts contributions without a license.
 
-## [0.9.1-beta.1] - Unreleased
+## [0.9.2-beta.1] - 2026-09-02
+
+### Added
+
+- Premium design-system surfaces for the measured-AI features: a
+  mint-accented measured-rate strip with per-metric tone gradients and
+  tabular numerals; a layer offload plan rendered as interactive
+  placement cards with FITS/OVER verdict chips, hover lift, and tone
+  theming; a session throughput history card with average/peak/tokens
+  stat row and legend markers.
+- "GGUF exact" provenance tag in the model spec grid, styled as a
+  system chip rather than ad-hoc text.
+- Command palette keyboard-selection highlighting (inset accent bar)
+  matching the hover state.
+- Theme parity for Cyberdeck and Retro terminal across all new
+  surfaces; custom thin scrollbars and cyan text selection globally.
+
+### Changed
+
+- All ad-hoc inline styles in the AI view were replaced with design
+  system classes; every color now flows through theme tokens so all
+  four themes render the new panels correctly.
+
+## [0.9.1-beta.1] - 2026-09-02
 
 ### Added
 

@@ -2,7 +2,7 @@
 
 [![Latest release](https://img.shields.io/github/v/release/Benz-On/visor?include_prereleases)](https://github.com/Benz-On/visor/releases)
 
-Development version: **0.9.2-beta.1** · Latest published build: **0.7.0-beta.1**
+Development version: **0.9.3-beta.1** · Latest published build: **0.9.2-beta.1**
 
 VISOR is a premium, local-first system monitor for Windows, macOS, and Linux.
 It combines high-density live telemetry, process control, energy modeling, and
@@ -20,7 +20,7 @@ assets are currently built, tested, and uploaded manually without GitHub Actions
 
 | Platform | Portable | Installer/package | Status |
 | --- | --- | --- | --- |
-| Windows x64 | [Portable `.exe`](https://github.com/Benz-On/visor/releases/download/v0.7.0-beta.1/VISOR-0.7.0-beta.1-windows-x64-portable.exe) | [NSIS setup](https://github.com/Benz-On/visor/releases/download/v0.7.0-beta.1/VISOR-0.7.0-beta.1-windows-x64-setup.exe) | Published beta |
+| Windows x64 | [Portable `.exe`](https://github.com/Benz-On/visor/releases/download/v0.9.2-beta.1/VISOR-0.9.2-beta.1-windows-x64-portable.exe) | [NSIS setup](https://github.com/Benz-On/visor/releases/download/v0.9.2-beta.1/VISOR-0.9.2-beta.1-windows-x64-setup.exe) | Published beta |
 | Windows ARM64 | `VISOR-*-windows-arm64-portable.exe` | `VISOR-*-windows-arm64-setup.exe` | Not published yet |
 | macOS Intel / Apple Silicon | `VISOR-*-macos-*-portable.app.zip` | `VISOR-*-macos-*.dmg` | Not published yet |
 | Linux x64 / ARM64 | `VISOR-*-linux-*-portable.AppImage` | `VISOR-*-linux-*.deb` | Not published yet |
