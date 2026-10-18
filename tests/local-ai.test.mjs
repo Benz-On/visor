@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildLocalAiSnapshot, detectAiApplication, parseComfyQueuePayload, parseLlamaCppPayload, parseLmStudioPayload, parseOllamaManifest, parseOllamaPayload, parseOllamaTagsPayload } from '../agent/local-ai.mjs';
+import { buildCloudProviderCatalog, buildLocalAiSnapshot, detectAiApplication, parseComfyQueuePayload, parseLlamaCppPayload, parseLmStudioPayload, parseOllamaManifest, parseOllamaPayload, parseOllamaTagsPayload } from '../agent/local-ai.mjs';
 
 test('Ollama adapter keeps the exact model identity and allocation', () => {
   const [model] = parseOllamaPayload({
@@ -17,6 +17,9 @@ test('Ollama adapter keeps the exact model identity and allocation', () => {
   assert.equal(model.quantization, 'Q4_K_M');
   assert.equal(model.contextLength, 262144);
   assert.equal(model.confidence, 100);
+  assert.equal(model.sizeBytes, 0);
+  assert.equal(model.allocatedBytes, 18_740_800_387);
+  assert.equal(model.allocatedVramBytes, 8_239_280_291);
 });
 
 test('local AI snapshot connects an exact model to its application workload', () => {
@@ -45,6 +48,14 @@ test('installed Ollama models are inventoried even when they are not running', (
   assert.equal(model.installed, true);
   assert.equal(model.sizeBytes, 18_556_700_761);
   assert.equal(model.parameters, '30.5B');
+});
+
+test('Ollama metadata falls back to quantization encoded after a tag colon', () => {
+  const [model] = parseOllamaTagsPayload({
+    models: [{ name: 'org/Qwen3.6-35B-A3B:Q6_K_P', size: 29_000_000_000, details: { parameter_size: 'unknown', quantization_level: 'unknown', format: 'gguf' } }],
+  });
+  assert.equal(model.parameters, '35B');
+  assert.equal(model.quantization, 'Q6_K_P');
 });
 
 test('offline Ollama manifests preserve model identity and total layer size', () => {
@@ -83,6 +94,10 @@ test('expanded service catalog separates cloud, hybrid and local execution', () 
     [{ name: 'llamafile.exe', path: 'C:\\Models\\llamafile.exe' }, 'llamafile', 'local'],
     [{ name: 'python.exe', command: 'python -m mlx_lm.server --model qwen' }, 'MLX LM', 'local'],
     [{ name: 'tabby.exe', path: 'C:\\TabbyML\\tabby.exe' }, 'Tabby', 'local'],
+    [{ name: 'cursor.exe', path: 'C:\\Users\\me\\AppData\\Local\\Programs\\Cursor\\Cursor.exe' }, 'Cursor', 'hybrid'],
+    [{ name: 'windsurf.exe', path: 'C:\\Program Files\\Windsurf\\Windsurf.exe' }, 'Windsurf', 'cloud'],
+    [{ name: 'perplexity.exe', path: 'C:\\Program Files\\Perplexity\\Perplexity.exe' }, 'Perplexity', 'cloud'],
+    [{ name: 'node.exe', command: 'node extension.js --extensionDevelopmentPath=continue.continue' }, 'Continue', 'hybrid'],
   ];
   for (const [processData, application, execution] of cases) {
     const detected = detectAiApplication(processData);
@@ -106,6 +121,19 @@ test('service totals expose live resource attribution per AI provider', () => {
   assert.equal(snapshot.serviceCount, 2);
   assert.equal(snapshot.applications.find((item) => item.application === 'Codex').execution, 'cloud');
   assert.equal(snapshot.applications.find((item) => item.application === 'Ollama').energyWatts, 74);
+  assert.equal(snapshot.cloudProviders.length, 23);
+  assert.equal(snapshot.cloudProviders.find((item) => item.id === 'openai').localProcessCount, 1);
+});
+
+test('cloud provider catalog reports credential presence without reading secret values', () => {
+  const catalog = buildCloudProviderCatalog([], { OPENAI_API_KEY: 'must-never-be-returned', GEMINI_API_KEY: '' });
+  const openai = catalog.find((item) => item.id === 'openai');
+  const google = catalog.find((item) => item.id === 'google');
+  assert.equal(openai.detected, true);
+  assert.deepEqual(openai.credentialSignals, ['OPENAI_API_KEY']);
+  assert.equal(JSON.stringify(catalog).includes('must-never-be-returned'), false);
+  assert.equal(google.credentialConfigured, true);
+  assert.equal(openai.billingVisible, false);
 });
 
 test('ComfyUI adapter extracts model files from the active queue', () => {

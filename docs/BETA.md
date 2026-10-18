@@ -1,7 +1,9 @@
-# VISOR 0.6 beta
+# VISOR 0.8 beta
 
-VISOR 0.6.0-beta.2 introduces the hardened public multi-platform release pipeline and
-native preview packages for Windows, macOS, and Linux on x64 and ARM64.
+VISOR 0.8.0-beta.1 develops the hardware-intelligence release into a transparent
+local-inference planner. It combines RAM and VRAM, models KV context and memory
+bandwidth, handles MoE active parameters, and keeps a conditional speed estimate
+visible even when a model exceeds fast memory.
 
 ## Delivery matrix
 
@@ -14,8 +16,9 @@ native preview packages for Windows, macOS, and Linux on x64 and ARM64.
 | Linux x64 | Preview | AppImage, Debian package |
 | Linux ARM64 | Preview | AppImage, Debian package |
 
-All assets are built by GitHub Actions on native hosted runners and published
-to one GitHub Release with SHA-256 checksums and a machine-readable manifest.
+Windows assets are built, smoke-tested, checksummed, and published manually
+while hosted-runner quota is unavailable. Cross-platform source remains public;
+macOS, Linux, and ARM64 binary previews resume when native builders are available.
 
 ## Beta guarantees
 
@@ -36,13 +39,23 @@ to one GitHub Release with SHA-256 checksums and a machine-readable manifest.
 - Priority increases on macOS/Linux may require elevated permission.
 - Whole-device and per-process energy remain labeled engineering estimates unless
   a compatible vendor power sensor reports measured values.
-- Model tok/s values remain conservative predictions until a local benchmark runs.
+- Model tok/s ranges now expose context, memory equation, offload, bottleneck,
+  confidence, and paging assumptions, but remain predictions until a local
+  benchmark runs.
+- Exact CPU package, fan, voltage, and motherboard readings depend on firmware
+  exposure or a running LibreHardwareMonitor/OpenHardwareMonitor provider: the
+  WMI namespace on builds that register one, otherwise the loopback web server
+  enabled from Options. CPU package power read from that channel is what moves
+  the energy label from modeled to measured.
 
 ## Release acceptance
 
-1. Frontend lint, production build, and Node tests pass.
-2. Rust formatting and tests pass on Windows, macOS, and Linux CI.
-3. Each matrix runner produces both expected platform artifacts.
+1. Frontend lint, production build, and Node tests pass. These also run
+   automatically on Linux for pushes to `main` and for pull requests.
+2. Rust formatting and tests pass on the release host; the automatic gate covers
+   Linux, and the Windows and macOS legs run on manual dispatch until more
+   hosted-runner quota is available.
+3. Each published platform produces both expected portable and package artifacts.
 4. Checksums match the generated release manifest.
 5. A portable build is smoke-tested on each supported operating-system family.
 6. The interface is checked for unavailable-sensor honesty and console errors.

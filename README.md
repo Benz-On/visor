@@ -1,10 +1,8 @@
 # VISOR
 
-[![CI](https://github.com/Benz-On/visor/actions/workflows/ci.yml/badge.svg)](https://github.com/Benz-On/visor/actions/workflows/ci.yml)
-[![Desktop releases](https://github.com/Benz-On/visor/actions/workflows/release.yml/badge.svg)](https://github.com/Benz-On/visor/actions/workflows/release.yml)
 [![Latest release](https://img.shields.io/github/v/release/Benz-On/visor?include_prereleases)](https://github.com/Benz-On/visor/releases)
 
-Current version: **0.6.0-beta.2**
+Current release: **0.9.3-beta.1** · Published 2026-10-18 · Prerelease, unsigned
 
 VISOR is a premium, local-first system monitor for Windows, macOS, and Linux.
 It combines high-density live telemetry, process control, energy modeling, and
@@ -17,13 +15,15 @@ local AI workload intelligence in a calm desktop interface.
 ## Download
 
 Download published builds from the [GitHub Releases page](https://github.com/Benz-On/visor/releases).
-Every release includes `SHA256SUMS.txt` and `release-manifest.json`.
+Every release includes `SHA256SUMS.txt` and `release-manifest.json`. Release
+assets are currently built, tested, and uploaded manually without GitHub Actions.
 
-| Platform | Portable | Installer/package |
-| --- | --- | --- |
-| Windows x64 / ARM64 | `VISOR-*-windows-*-portable.exe` | `VISOR-*-windows-*-setup.exe` |
-| macOS Intel / Apple Silicon | `VISOR-*-macos-*-portable.app.zip` | `VISOR-*-macos-*.dmg` |
-| Linux x64 / ARM64 | `VISOR-*-linux-*-portable.AppImage` | `VISOR-*-linux-*.deb` |
+| Platform | Portable | Installer/package | Status |
+| --- | --- | --- | --- |
+| Windows x64 | [Portable `.exe`](https://github.com/Benz-On/visor/releases/download/v0.9.3-beta.1/VISOR-0.9.3-beta.1-windows-x64-portable.exe) | [NSIS setup](https://github.com/Benz-On/visor/releases/download/v0.9.3-beta.1/VISOR-0.9.3-beta.1-windows-x64-setup.exe) | Published beta |
+| Windows ARM64 | `VISOR-*-windows-arm64-portable.exe` | `VISOR-*-windows-arm64-setup.exe` | Not published yet |
+| macOS Intel / Apple Silicon | `VISOR-*-macos-*-portable.app.zip` | `VISOR-*-macos-*.dmg` | Not published yet |
+| Linux x64 / ARM64 | `VISOR-*-linux-*-portable.AppImage` | `VISOR-*-linux-*.deb` | Not published yet |
 
 Windows and macOS prerelease artifacts are not yet production-signed. Windows
 may show an unknown-publisher warning. On macOS, use Control-click → Open for
@@ -38,15 +38,27 @@ See [platform support](docs/PLATFORMS.md) for detailed coverage and limitations.
 ## Features
 
 - Live CPU, RAM, disk, network, process, and hardware telemetry
+- HWiNFO-style hardware inventory for motherboard, BIOS, CPU caches/socket,
+  GPU adapters, DIMMs, storage health, physical network adapters, and displays
+- Unified sensor console for temperatures, loads, clocks, fans, voltages,
+  power, and throughput with per-reading source and evidence labels
 - GPU utilization, temperature, power, clocks, and VRAM when vendor telemetry is available
-- Process explorer with termination and priority controls protected by PID confirmation
+- Process explorer with working set, private/virtual RAM, handles, threads,
+  disk throughput, executable path, termination, and priority controls
 - Energy Lens with component estimates, session energy, cost, carbon, and confidence
 - Sustained-load, thermal, and VRAM alerts with game-aware suppression
 - Installed and loaded model inventory for Ollama, LM Studio, llama.cpp, Jan,
   ComfyUI, GGUF/GGML, Safetensors, ONNX, and PyTorch weight folders
-- Hardware-fit advisor with reserved-memory modeling and conservative tok/s ranges
+- Measured decode/prefill tok/s from runtime logs and metrics endpoints, kept strictly separate from modeled ranges
+- Hardware-fit advisor with reserved-memory modeling, exact GGUF header metadata (parameters, KV heads, MoE), and conservative tok/s ranges
 - Live local footprint for Codex, ChatGPT, Claude Code, Kimi Code, Copilot,
-  Ollama, LM Studio, Jan, GPT4All, llama.cpp, and related runtimes
+  Cursor, Windsurf, Continue, Cline, Roo Code, Ollama, LM Studio, Jan, GPT4All,
+  llama.cpp, and related runtimes
+- Safe credential-presence inventory for 23 major cloud AI providers; secret
+  values are never read and billing remains explicitly unavailable
+- Native desktop shell: menu bar with view accelerators, tray icon with a live
+  tooltip, restored window size and position, single-instance launch, and
+  opt-in system notifications for sustained alerts
 - Self-hosted Geist and Geist Mono typography with four persistent themes
 - Local native Tauri IPC; no external telemetry or analytics
 
@@ -63,7 +75,7 @@ tokens, provider charges, or datacenter use. See [AI detection coverage](docs/AI
 | Process priority | Yes | Yes, permission-dependent | Yes, permission-dependent |
 | NVIDIA system telemetry | Yes | Not applicable | Yes when `nvidia-smi` is available |
 | Per-process GPU attribution | Windows counters | Limited | Limited |
-| CPU / storage temperatures | WMI/provider-dependent | Limited | Limited |
+| Hardware inventory and CPU / storage sensors | Deep SMBIOS/WMI coverage; optional LibreHardwareMonitor (WMI or loopback web server) | Limited | Limited |
 | Local runtime API probes | Yes | Yes | Yes |
 | Known local model folders | Yes | Yes | Yes |
 
@@ -75,7 +87,7 @@ telemetry with fabricated values.
 Requirements:
 
 - Node.js 20.19 or newer
-- Rust stable
+- Rust 1.90 or newer (the minimum required by the current Tauri release)
 - Platform prerequisites from the [Tauri documentation](https://v2.tauri.app/start/prerequisites/)
 
 ```bash
@@ -83,8 +95,10 @@ npm install
 npm run desktop
 ```
 
-The compiled application embeds the Rust collector. The optional Node agent is
-only a browser-development fallback and currently targets Windows:
+The compiled application embeds the Rust collector together with the Windows
+sensor scripts in `src-tauri/collectors/`, which are baked into the binary at
+compile time. The optional Node agent in `agent/` is only a browser-development
+fallback and currently targets Windows; it runs the same collector scripts:
 
 ```bash
 npm run agent
@@ -127,9 +141,12 @@ cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 cargo test --manifest-path src-tauri/Cargo.toml --locked
 ```
 
-GitHub CI repeats native tests on Windows, macOS, and Linux. Version tags matching
-`v*` trigger six platform builds and publish their assets on one GitHub Release.
-See the [changelog](CHANGELOG.md) and [release documentation](docs/RELEASING.md).
+GitHub CI runs automatically on pushes to `main` and on pull requests: the
+workflow-pin preflight, the web build with lint and agent tests, and native
+formatting, Clippy and tests on Linux. The Windows and macOS native legs run
+only on a manual dispatch, as do release builds — pushing a version tag does
+not start a build. See the [changelog](CHANGELOG.md) and
+[release documentation](docs/RELEASING.md).
 
 ## Local AI evidence
 
@@ -145,16 +162,30 @@ process tree. An exact model name is shown only when a runtime reports it.
 - Known roots: GGUF, GGML, Safetensors, ONNX, and PyTorch weights
 - Custom roots: use the platform path separator in `VISOR_MODEL_PATHS`
 
-The hardware advisor reserves operating-system and runtime memory before deciding
-whether a model fits in VRAM, split VRAM/RAM, CPU RAM, or is too large. Tok/s is
-an engineering range until a real benchmark is run. Embedding models are not
-misrepresented as text-generation models.
+The hardware advisor combines RAM and dedicated VRAM, reserves operating-system
+and display memory, and accounts for model weights, runtime overhead, KV cache,
+context length, quantization, MoE active parameters, memory bandwidth, and GPU
+offload. It still reports a conditional tok/s range when a model exceeds fast
+memory, with storage paging and lower confidence made explicit. Unified memory
+is counted once. See the [model advisor methodology](docs/MODEL-ADVISOR.md).
+Embedding models are not misrepresented as text-generation models.
 
 ## Energy methodology
 
 VISOR does not claim false measurement precision. Compatible vendor telemetry is
-used when available; CPU, memory, storage, platform, conversion loss, and process
+used when available; memory, storage, platform, conversion loss, and process
 shares remain labeled estimates. The interface exposes the method and confidence.
+
+CPU and GPU each have a measured path: NVIDIA board power through `nvidia-smi`,
+and CPU package power through the optional hardware monitor's on-die sensor.
+When neither is available the CPU figure is modeled from TDP, live load and the
+rated clock, and is prefixed with `~` in the interface. Reading both rails
+raises the confidence label from `estimated` to `hybrid` and then to `measured`.
+
+To enable the CPU side on Windows, run LibreHardwareMonitor and turn on
+**Options → Remote Web Server** (loopback port 8085). Builds that still
+register their WMI namespace work without it; 0.9.x releases only expose the
+web server. Set `VISOR_LHM_PORT` when the port has been changed.
 
 Default projections are `0.25 EUR/kWh` and `56 gCO2e/kWh`. The Windows development
 agent accepts `VISOR_TARIFF_EUR_KWH` and `VISOR_CARBON_G_KWH` overrides.
@@ -164,6 +195,9 @@ agent accepts `VISOR_TARIFF_EUR_KWH` and `VISOR_CARBON_G_KWH` overrides.
 - Hardware, process, and model data remains on the device.
 - Native builds use Tauri IPC and do not start a telemetry web server.
 - Runtime API probes are loopback-only and time-bounded.
+- The optional hardware-monitor sensor channel reads `http://127.0.0.1:8085/data.json`
+  and nothing else; it never connects to a remote address, and it is only used
+  when the user has started that application with its web server enabled.
 - Process mutation requires explicit confirmation and blocks critical processes.
 - Command arguments are passed directly to operating-system tools without shell interpolation.
 
@@ -176,11 +210,11 @@ vulnerabilities in public issues.
 Issues and technical contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md)
 and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) first.
 
-## License status
+## License
 
-An open-source license has not yet been selected. Public visibility alone does
-not grant permission to copy, modify, or redistribute the source. A license must
-be chosen before the repository is presented as open source; see the
-[public-release checklist](docs/PUBLIC_RELEASE_CHECKLIST.md).
+VISOR is licensed under the [Apache License 2.0](LICENSE). Copyright 2026
+Benz Engineering. You may copy, modify, and redistribute it, including for
+commercial purposes, subject to the terms of that license; contributions are
+accepted under the same license (see [CONTRIBUTING.md](CONTRIBUTING.md)).
 
 Third-party components retain their own licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

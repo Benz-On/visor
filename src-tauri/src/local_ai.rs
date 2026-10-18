@@ -1,7 +1,9 @@
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+use crate::gguf;
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -199,6 +201,81 @@ fn detect(process: &Value) -> Option<Identity> {
             "coding-agent",
             "hybrid",
             "Aider",
+        ));
+    }
+    if matches!(name.as_str(), "cursor" | "cursor.exe")
+        || path.contains("/cursor/")
+        || path.contains("\\cursor\\")
+    {
+        return Some(identity(
+            "Cursor",
+            "Configured cloud/local provider",
+            "coding-client",
+            "coding-agent",
+            "hybrid",
+            "Cursor",
+        ));
+    }
+    if matches!(name.as_str(), "windsurf" | "windsurf.exe")
+        || path.contains("/windsurf/")
+        || path.contains("\\windsurf\\")
+        || path.contains("codeium")
+    {
+        return Some(identity(
+            "Windsurf",
+            "Codeium cloud",
+            "coding-client",
+            "coding-agent",
+            "cloud",
+            "Codeium",
+        ));
+    }
+    if matches!(name.as_str(), "q" | "q.exe" | "q-desktop" | "q-desktop.exe")
+        && (path.contains("amazon")
+            || command.contains("amazon q")
+            || command.contains("q developer"))
+    {
+        return Some(identity(
+            "Amazon Q Developer",
+            "AWS cloud",
+            "coding-agent",
+            "coding-agent",
+            "cloud",
+            "AWS",
+        ));
+    }
+    if matches!(name.as_str(), "perplexity" | "perplexity.exe")
+        || path.contains("/perplexity/")
+        || path.contains("\\perplexity\\")
+    {
+        return Some(identity(
+            "Perplexity",
+            "Perplexity cloud",
+            "application",
+            "cloud-client",
+            "cloud",
+            "Perplexity",
+        ));
+    }
+    if node_host
+        && (command.contains("continue.continue")
+            || command.contains("saoudrizwan.claude-dev")
+            || command.contains("rooveterinaryinc.roo-cline"))
+    {
+        let (application, provider) = if command.contains("roo-cline") {
+            ("Roo Code", "Configured provider")
+        } else if command.contains("claude-dev") {
+            ("Cline", "Configured provider")
+        } else {
+            ("Continue", "Configured provider")
+        };
+        return Some(identity(
+            application,
+            "Configured cloud/local provider",
+            "agent-helper",
+            "coding-agent",
+            "hybrid",
+            provider,
         ));
     }
 
@@ -585,6 +662,11 @@ fn parse_ollama(payload: &Value) -> Vec<Value> {
         .map(|row| {
             let model = string(row.get("name")).or_else(|| string(row.get("model")));
             let digest = string(row.get("digest"));
+            let display_model = if model.is_empty() {
+                "Unknown Ollama model".to_string()
+            } else {
+                model.clone()
+            };
             let mut item = model_base(ModelBaseInput {
                 id: format!(
                     "ollama:{}",
@@ -592,21 +674,33 @@ fn parse_ollama(payload: &Value) -> Vec<Value> {
                 ),
                 application: "Ollama",
                 runtime: "Ollama engine",
-                model: if model.is_empty() {
-                    "Unknown Ollama model".to_string()
-                } else {
-                    model
-                },
+                model: display_model.clone(),
                 status: "loaded",
                 source: "Ollama /api/ps",
                 confidence: 100,
-                size_bytes: number(row.get("size")),
+                // `/api/ps.size` is the live allocation, which can include a
+                // large KV context. Weight bytes come from `/api/tags`/manifests.
+                size_bytes: 0.0,
                 location: "Ollama library".to_string(),
             });
             let details = row.get("details").unwrap_or(&Value::Null);
+            let parameters = string(details.get("parameter_size"));
+            let quantization = string(details.get("quantization_level"));
             item["family"] = Value::String(string(details.get("family")));
-            item["parameters"] = Value::String(string(details.get("parameter_size")));
-            item["quantization"] = Value::String(string(details.get("quantization_level")));
+            item["parameters"] = Value::String(
+                if parameters.is_empty() || parameters.eq_ignore_ascii_case("unknown") {
+                    infer_parameters(&display_model)
+                } else {
+                    parameters
+                },
+            );
+            item["quantization"] = Value::String(
+                if quantization.is_empty() || quantization.eq_ignore_ascii_case("unknown") {
+                    infer_quantization(&display_model)
+                } else {
+                    quantization
+                },
+            );
             item["format"] = Value::String(string(details.get("format")));
             item["contextLength"] = json!(number(row.get("context_length")));
             item["allocatedBytes"] = json!(number(row.get("size")));
@@ -626,6 +720,11 @@ fn parse_ollama_tags(payload: &Value) -> Vec<Value> {
         .map(|row| {
             let model = string(row.get("name")).or_else(|| string(row.get("model")));
             let digest = string(row.get("digest"));
+            let display_model = if model.is_empty() {
+                "Unknown Ollama model".to_string()
+            } else {
+                model.clone()
+            };
             let mut item = model_base(ModelBaseInput {
                 id: format!(
                     "ollama:{}",
@@ -633,11 +732,7 @@ fn parse_ollama_tags(payload: &Value) -> Vec<Value> {
                 ),
                 application: "Ollama",
                 runtime: "Ollama engine",
-                model: if model.is_empty() {
-                    "Unknown Ollama model".to_string()
-                } else {
-                    model
-                },
+                model: display_model.clone(),
                 status: "detected",
                 source: "Ollama /api/tags",
                 confidence: 100,
@@ -645,9 +740,23 @@ fn parse_ollama_tags(payload: &Value) -> Vec<Value> {
                 location: "Ollama library".to_string(),
             });
             let details = row.get("details").unwrap_or(&Value::Null);
+            let parameters = string(details.get("parameter_size"));
+            let quantization = string(details.get("quantization_level"));
             item["family"] = Value::String(string(details.get("family")));
-            item["parameters"] = Value::String(string(details.get("parameter_size")));
-            item["quantization"] = Value::String(string(details.get("quantization_level")));
+            item["parameters"] = Value::String(
+                if parameters.is_empty() || parameters.eq_ignore_ascii_case("unknown") {
+                    infer_parameters(&display_model)
+                } else {
+                    parameters
+                },
+            );
+            item["quantization"] = Value::String(
+                if quantization.is_empty() || quantization.eq_ignore_ascii_case("unknown") {
+                    infer_quantization(&display_model)
+                } else {
+                    quantization
+                },
+            );
             item["format"] = Value::String(string(details.get("format")));
             item
         })
@@ -944,21 +1053,21 @@ fn candidate_model_roots() -> Vec<(PathBuf, String)> {
 }
 
 fn infer_quantization(name: &str) -> String {
-    name.split(['-', '_', '.'])
-        .map(str::to_ascii_uppercase)
+    name.split(['-', '.', ':', '/', '\\'])
+        .map(|part| part.trim_matches('_').to_ascii_uppercase())
         .find(|part| {
-            part.starts_with('Q')
+            (part.starts_with('Q')
                 && part[1..]
                     .chars()
                     .next()
-                    .is_some_and(|ch| ch.is_ascii_digit())
+                    .is_some_and(|ch| ch.is_ascii_digit()))
                 || matches!(part.as_str(), "F16" | "F32" | "BF16")
         })
         .unwrap_or_default()
 }
 
 fn infer_parameters(name: &str) -> String {
-    name.split(['-', '_', '.'])
+    name.split(['-', '_', '.', ':', '/', '\\'])
         .find_map(|part| {
             let upper = part.to_ascii_uppercase();
             let value = upper.strip_suffix('B')?;
@@ -1301,6 +1410,313 @@ fn merge_models(collections: Vec<Vec<Value>>) -> Vec<Value> {
     models
 }
 
+fn cloud_provider_catalog(applications: &[Value]) -> Vec<Value> {
+    let providers: [(&str, &str, &[&str]); 23] = [
+        ("openai", "OpenAI", &["OPENAI_API_KEY"]),
+        ("azure-openai", "Azure OpenAI", &["AZURE_OPENAI_API_KEY"]),
+        ("anthropic", "Anthropic", &["ANTHROPIC_API_KEY"]),
+        (
+            "google",
+            "Google Gemini",
+            &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        ),
+        ("mistral", "Mistral AI", &["MISTRAL_API_KEY"]),
+        ("groq", "Groq", &["GROQ_API_KEY"]),
+        ("cohere", "Cohere", &["COHERE_API_KEY"]),
+        ("together", "Together AI", &["TOGETHER_API_KEY"]),
+        ("fireworks", "Fireworks AI", &["FIREWORKS_API_KEY"]),
+        ("openrouter", "OpenRouter", &["OPENROUTER_API_KEY"]),
+        ("deepseek", "DeepSeek", &["DEEPSEEK_API_KEY"]),
+        ("xai", "xAI", &["XAI_API_KEY"]),
+        ("perplexity", "Perplexity", &["PERPLEXITY_API_KEY"]),
+        ("moonshot", "Moonshot AI", &["MOONSHOT_API_KEY"]),
+        ("github-copilot", "GitHub Copilot", &[]),
+        (
+            "aws-bedrock",
+            "Amazon Bedrock",
+            &["AWS_ACCESS_KEY_ID", "AWS_PROFILE"],
+        ),
+        (
+            "vertex-ai",
+            "Google Vertex AI",
+            &["GOOGLE_APPLICATION_CREDENTIALS"],
+        ),
+        (
+            "huggingface",
+            "Hugging Face",
+            &["HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"],
+        ),
+        ("replicate", "Replicate", &["REPLICATE_API_TOKEN"]),
+        ("cerebras", "Cerebras", &["CEREBRAS_API_KEY"]),
+        ("sambanova", "SambaNova", &["SAMBANOVA_API_KEY"]),
+        (
+            "cloudflare-ai",
+            "Cloudflare Workers AI",
+            &["CLOUDFLARE_API_TOKEN"],
+        ),
+        (
+            "nvidia-nim",
+            "NVIDIA NIM",
+            &["NVIDIA_API_KEY", "NGC_API_KEY"],
+        ),
+    ];
+    providers
+        .into_iter()
+        .map(|(id, name, environment_keys)| {
+            let matching = applications
+                .iter()
+                .filter(|application| {
+                    let provider = string(application.get("provider")).to_ascii_lowercase();
+                    let application_name =
+                        string(application.get("application")).to_ascii_lowercase();
+                    match id {
+                        "openai" => provider == "openai",
+                        "anthropic" => provider == "anthropic",
+                        "google" => provider == "google",
+                        "perplexity" => provider == "perplexity",
+                        "github-copilot" => provider == "github",
+                        "aws-bedrock" => provider == "aws",
+                        "vertex-ai" | "nvidia-nim" => false,
+                        _ => provider.contains(id) || application_name.contains(id),
+                    }
+                })
+                .collect::<Vec<_>>();
+            let credential_signals = environment_keys
+                .iter()
+                .filter(|key| std::env::var_os(key).is_some())
+                .copied()
+                .collect::<Vec<_>>();
+            let process_count = matching
+                .iter()
+                .map(|application| {
+                    application
+                        .get("processes")
+                        .and_then(Value::as_array)
+                        .map(Vec::len)
+                        .unwrap_or_default()
+                })
+                .sum::<usize>();
+            let sum = |field: &str| {
+                matching
+                    .iter()
+                    .map(|item| number(item.get(field)))
+                    .sum::<f64>()
+            };
+            json!({
+                "id": id,
+                "name": name,
+                "provider": name,
+                "detected": process_count > 0 || !credential_signals.is_empty(),
+                "credentialConfigured": !credential_signals.is_empty(),
+                "credentialSignals": credential_signals,
+                "localProcessCount": process_count,
+                "cpu": sum("cpu"),
+                "gpu": sum("gpu"),
+                "memoryGb": sum("memoryGb"),
+                "energyWatts": sum("energyWatts"),
+                "billingVisible": false
+            })
+        })
+        .collect()
+}
+
+/// Loopback `/metrics` endpoints for runtimes that expose token counters, as
+/// `(display source, url)` pairs. Ollama is deliberately absent: it serves no
+/// metrics endpoint, so its rates come from the server log instead. Probing a
+/// fixed port blindly previously pointed at whatever local service happened to
+/// own it, which measured nothing while still reporting a provenance.
+pub fn metrics_targets() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("llama.cpp /metrics", "http://127.0.0.1:8080/metrics"),
+        ("vLLM /metrics", "http://127.0.0.1:8000/metrics"),
+        (
+            "Text generation web UI /metrics",
+            "http://127.0.0.1:5000/metrics",
+        ),
+        ("Jan /metrics", "http://127.0.0.1:1337/metrics"),
+        ("LocalAI /metrics", "http://127.0.0.1:8081/metrics"),
+    ]
+}
+
+/// Resolve the primary GGUF blob for each installed Ollama model so the
+/// collector can read exact header metadata. Returns `(path, model_name)`
+/// pairs; missing blobs are skipped by the caller.
+pub fn model_probe_targets() -> Vec<(PathBuf, String)> {
+    let mut targets = Vec::new();
+    for (root, _) in candidate_model_roots().into_iter().filter(|(path, _)| {
+        path.file_name()
+            .and_then(|value| value.to_str())
+            .map(|value| value == "models")
+            .unwrap_or(false)
+            && path
+                .parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|value| value.to_str())
+                .map(|value| value == ".ollama" || value.eq_ignore_ascii_case("Ollama"))
+                .unwrap_or(false)
+    }) {
+        let manifest_root = root.join("manifests");
+        let mut pending = VecDeque::from([(manifest_root.clone(), 0_u8)]);
+        let mut scanned = 0_usize;
+        while let Some((directory, depth)) = pending.pop_front() {
+            if scanned >= 200 {
+                break;
+            }
+            let Ok(items) = fs::read_dir(&directory) else {
+                continue;
+            };
+            for entry in items.flatten() {
+                scanned += 1;
+                if scanned > 200 {
+                    break;
+                }
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                if file_type.is_dir() && depth < 6 {
+                    pending.push_back((entry.path(), depth + 1));
+                    continue;
+                }
+                if !file_type.is_file() {
+                    continue;
+                }
+                let entry_path = entry.path();
+                let Ok(relative) = entry_path.strip_prefix(&manifest_root) else {
+                    continue;
+                };
+                let parts = relative
+                    .components()
+                    .map(|part| part.as_os_str().to_string_lossy().to_string())
+                    .collect::<Vec<_>>();
+                if parts.len() < 3 {
+                    continue;
+                }
+                let tag = parts.last().cloned().unwrap_or_default();
+                let mut model_parts = parts[1..parts.len() - 1].to_vec();
+                if model_parts.first().is_some_and(|part| part == "library") {
+                    model_parts.remove(0);
+                }
+                if tag.is_empty() || model_parts.is_empty() {
+                    continue;
+                }
+                let model = format!("{}:{}", model_parts.join("/"), tag);
+                if let Some(blob) = primary_model_blob(&entry_path) {
+                    targets.push((blob, model));
+                }
+            }
+        }
+    }
+    targets.retain(|(path, _)| path.exists());
+    targets
+}
+
+/// Reads an Ollama manifest and returns the largest model-layer blob path.
+fn primary_model_blob(manifest_path: &Path) -> Option<PathBuf> {
+    let payload = fs::read_to_string(manifest_path).ok()?;
+    let payload: Value = serde_json::from_str(&payload).ok()?;
+    let layers = payload.get("layers")?.as_array()?;
+    let models_dir = manifest_path
+        .ancestors()
+        .find(|ancestor| {
+            ancestor
+                .file_name()
+                .and_then(|value| value.to_str())
+                .map(|value| value == "manifests")
+                .unwrap_or(false)
+        })?
+        .parent()?
+        .join("blobs");
+    layers
+        .iter()
+        .filter(|layer| {
+            layer.get("mediaType").and_then(Value::as_str)
+                == Some("application/vnd.ollama.image.model")
+        })
+        .filter_map(|layer| layer.get("digest").and_then(Value::as_str))
+        .filter_map(|digest| digest.strip_prefix("sha256:"))
+        .map(|hash| models_dir.join(format!("sha256-{hash}")))
+        .max_by_key(|path| {
+            fs::metadata(path)
+                .map(|meta| meta.len())
+                .unwrap_or_default()
+        })
+}
+
+/// Merge exact GGUF header metadata into the model inventory. Measured fields
+/// always win over name-inferred values; the source label tells the UI why.
+pub fn apply_gguf_metadata(models: &mut Value, metadata: &HashMap<String, gguf::GgufMeta>) {
+    let Some(items) = models.get_mut("models").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for model in items.iter_mut() {
+        let name = string(model.get("model")).to_ascii_lowercase();
+        if name.is_empty() {
+            continue;
+        }
+        let exact = metadata.iter().find(|(key, _)| {
+            name == key.to_ascii_lowercase()
+                || name.ends_with(&format!(
+                    ":{}",
+                    key.to_ascii_lowercase().rsplit(':').next().unwrap_or(key)
+                ))
+        });
+        let Some((_, meta)) = exact else {
+            continue;
+        };
+        if let Some(count) = meta.parameter_count {
+            model["parameters"] = json!(format_parameters(count));
+            model["parameterCountExact"] = json!(count);
+        }
+        if let Some(bytes) = meta.tensor_bytes {
+            model["weightBytesExact"] = json!(bytes);
+            if number(model.get("sizeBytes")) == 0.0 {
+                model["sizeBytes"] = json!(bytes as f64);
+            }
+        }
+        model["kvHeads"] = json!(meta.head_count_kv);
+        model["kvHeadCountExact"] = json!(meta.head_count_kv.is_some());
+        // Head dimensions complete the KV-cache equation; without them the
+        // advisor has to assume 128, which is wrong for Gemma (256) and Phi (96).
+        model["kvKeyLength"] = json!(meta.key_length);
+        model["kvValueLength"] = json!(meta.value_length);
+        model["layers"] = json!(meta.block_count);
+        model["experts"] = json!(meta.expert_count);
+        model["activeExperts"] = json!(meta.expert_used_count);
+        if meta.expert_count.is_some() && meta.expert_used_count.unwrap_or(0) > 0 {
+            model["moe"] = json!(true);
+            model["activeParameterRatio"] = json!(
+                meta.expert_used_count.unwrap_or(0) as f64 / meta.expert_count.unwrap_or(1) as f64
+            );
+        }
+        if meta.context_length.is_some() && number(model.get("contextLength")) == 0.0 {
+            model["contextLength"] = json!(meta.context_length.unwrap_or_default());
+        }
+        if let Some(architecture) = &meta.architecture {
+            if string(model.get("family")).is_empty() {
+                model["family"] = json!(architecture);
+            }
+        }
+        let source = string(model.get("source"));
+        if !source.contains("GGUF header") {
+            model["source"] = json!(if source.is_empty() {
+                "GGUF header".to_string()
+            } else {
+                format!("{source} + GGUF header")
+            });
+        }
+    }
+}
+
+fn format_parameters(count: u64) -> String {
+    if count >= 1_000_000_000 {
+        format!("{:.1}B", count as f64 / 1_000_000_000.0)
+    } else if count >= 1_000_000 {
+        format!("{:.0}M", count as f64 / 1_000_000.0)
+    } else {
+        count.to_string()
+    }
+}
+
 pub fn build(processes: &[Value]) -> Value {
     let mut groups: BTreeMap<String, Value> = BTreeMap::new();
     for process in processes {
@@ -1510,12 +1926,23 @@ pub fn build(processes: &[Value]) -> Value {
         } else {
             Value::Null
         };
-        model["applicationCpu"] = json!(application
-            .map(|item| number(item.get("cpu")))
-            .unwrap_or_default());
-        model["applicationGpu"] = json!(application
-            .map(|item| number(item.get("gpu")))
-            .unwrap_or_default());
+        // A runtime hosting several models reports one aggregate. Copying it onto
+        // every model claimed 100% of the same CPU and GPU twice over, so only a
+        // lone loaded model may inherit the application totals.
+        model["applicationCpu"] = if single_loaded_model {
+            json!(application
+                .map(|item| number(item.get("cpu")))
+                .unwrap_or_default())
+        } else {
+            Value::Null
+        };
+        model["applicationGpu"] = if single_loaded_model {
+            json!(application
+                .map(|item| number(item.get("gpu")))
+                .unwrap_or_default())
+        } else {
+            Value::Null
+        };
         model["allocatedRamBytes"] = json!((allocated - vram).max(0.0));
         model["allocatedVramGb"] = json!(vram / GIB);
     }
@@ -1542,6 +1969,7 @@ pub fn build(processes: &[Value]) -> Value {
                 .unwrap_or(false)
         })
         .count();
+    let cloud_providers = cloud_provider_catalog(&applications);
     json!({
         "scannedAt": chrono::Utc::now().to_rfc3339(),
         "adapters": [
@@ -1558,6 +1986,7 @@ pub fn build(processes: &[Value]) -> Value {
         "modelRoots": model_roots,
         "models": models,
         "applications": applications,
+        "cloudProviders": cloud_providers,
         "activeModelCount": active_count,
         "loadedModelCount": loaded_count,
         "installedModelCount": installed_count,
@@ -1568,6 +1997,37 @@ pub fn build(processes: &[Value]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The advisor only avoids its 128-wide head assumption if the header values
+    /// actually reach the payload; a dropped key here silently halves or doubles
+    /// every KV-cache estimate and no test downstream would notice.
+    #[test]
+    fn gguf_head_dimensions_reach_the_advisor_payload() {
+        let meta = gguf::GgufMeta {
+            head_count_kv: Some(4.0),
+            block_count: Some(62),
+            key_length: Some(256),
+            value_length: Some(256),
+            ..Default::default()
+        };
+        let mut models = json!({ "models": [{ "model": "gemma-3:12b", "sizeBytes": 0 }] });
+        let mut table = HashMap::new();
+        table.insert("gemma-3:12b".to_string(), meta);
+        apply_gguf_metadata(&mut models, &table);
+
+        let model = &models["models"][0];
+        assert_eq!(model["kvKeyLength"], 256);
+        assert_eq!(model["kvValueLength"], 256);
+        assert_eq!(model["layers"], 62);
+
+        let mut sparse = json!({ "models": [{ "model": "unknown:1b", "sizeBytes": 0 }] });
+        apply_gguf_metadata(&mut sparse, &HashMap::new());
+        assert_eq!(
+            sparse["models"][0].get("kvKeyLength"),
+            None,
+            "unmatched models must not gain synthetic metadata"
+        );
+    }
 
     #[test]
     fn codex_host_is_not_mistaken_for_chatgpt() {
@@ -1590,6 +2050,16 @@ mod tests {
         assert_eq!(models[0]["status"], "detected");
         assert_eq!(models[0]["parameters"], "8B");
         assert_eq!(models[0]["sizeBytes"], 5_000_000_000_f64);
+    }
+
+    #[test]
+    fn ollama_tag_metadata_falls_back_to_name() {
+        let models = parse_ollama_tags(&json!({ "models": [{
+            "name": "org/Qwen3.6-35B-A3B:Q6_K_P", "size": 29_000_000_000_f64,
+            "details": { "parameter_size": "unknown", "quantization_level": "unknown", "format": "gguf" }
+        }] }));
+        assert_eq!(models[0]["parameters"], "35B");
+        assert_eq!(models[0]["quantization"], "Q6_K_P");
     }
 
     #[test]
@@ -1642,6 +2112,21 @@ mod tests {
                 "Tabby",
                 "local",
             ),
+            (
+                json!({ "name": "cursor.exe", "path": "C:\\Users\\me\\AppData\\Local\\Programs\\Cursor\\Cursor.exe" }),
+                "Cursor",
+                "hybrid",
+            ),
+            (
+                json!({ "name": "windsurf.exe", "path": "C:\\Program Files\\Windsurf\\Windsurf.exe" }),
+                "Windsurf",
+                "cloud",
+            ),
+            (
+                json!({ "name": "perplexity.exe", "path": "C:\\Program Files\\Perplexity\\Perplexity.exe" }),
+                "Perplexity",
+                "cloud",
+            ),
         ];
         for (process, application, execution) in cases {
             let detected = detect(&process).expect("service should be detected");
@@ -1664,5 +2149,27 @@ mod tests {
             "command": "Write-Output 'Gemini OpenCode Aider Open WebUI llamafile Claude Code Kimi Copilot'"
         });
         assert!(detect(&expanded).is_none());
+    }
+
+    #[test]
+    fn cloud_provider_catalog_exposes_footprint_without_claiming_billing() {
+        let snapshot = build(&[json!({
+            "id": 42,
+            "name": "codex.exe",
+            "path": "C:\\Program Files\\OpenAI.Codex\\codex.exe",
+            "cpu": 3.0,
+            "gpu": 1.0,
+            "memory": 0.4,
+            "vram": 0.0,
+            "energyWatts": 8.0
+        })]);
+        let providers = snapshot["cloudProviders"].as_array().unwrap();
+        assert_eq!(providers.len(), 23);
+        let openai = providers
+            .iter()
+            .find(|item| item["id"] == "openai")
+            .unwrap();
+        assert_eq!(openai["localProcessCount"], 1);
+        assert_eq!(openai["billingVisible"], false);
     }
 }

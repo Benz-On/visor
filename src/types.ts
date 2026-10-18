@@ -4,16 +4,40 @@ export type ThemeId = 'studio' | 'porcelain' | 'cyber' | 'retro';
 
 export type MetricKey = 'cpu' | 'gpu' | 'ram' | 'vram';
 
+export interface InferenceThroughputInfo {
+  decodeTokensPerSecond: number | null;
+  prefillTokensPerSecond: number | null;
+  lastTokens: number | null;
+  evidence: 'metrics-endpoint' | 'runtime-log' | 'last-runtime-log' | 'unavailable' | string;
+  observedAt: string | null;
+  /** Age of the logged completion in seconds; set on the log path. */
+  ageSeconds?: number | null;
+  /** Runtime that served the counters, when the metrics path supplied them. */
+  source?: string | null;
+}
+
+/** One measured completion sample from the collector's session history. */
+export interface ThroughputSampleInfo {
+  decodeTps: number;
+  prefillTps: number;
+  tokens: number;
+  at: number;
+  evidence: string;
+}
+
 export interface LiveMetrics {
   cpu: number;
   gpu: number;
   ram: number;
   vram: number;
-  cpuTemp: number;
+  cpuTemp: number | null;
   gpuTemp: number;
   ssdTemp?: number;
   storageTemperatures?: StorageTemperature[];
-  sensorSources?: { cpu: string | null; gpu: string | null; storage: string[] };
+  temperatureReadings?: TemperatureReading[];
+  hardwareSensors?: HardwareSensorReading[];
+  sensorGuidance?: string | null;
+  sensorSources?: { cpu: string | null; gpu: string | null; storage: string[]; hardwareMonitorAvailable?: boolean };
   cpuPower: number;
   gpuPower: number;
   download: number;
@@ -28,10 +52,18 @@ export interface LiveMetrics {
     usedBytes: number;
     availableBytes: number;
     cachedBytes: number;
+    committedBytes?: number;
+    commitLimitBytes?: number;
+    pagedPoolBytes?: number;
+    nonPagedPoolBytes?: number;
+    pagesPerSecond?: number;
+    source?: string;
     swapTotalBytes: number;
     swapUsedBytes: number;
   };
   gpuMemory?: { totalBytes: number; usedBytes: number };
+  /** Measured inference throughput; null rates mean no generation observed. */
+  throughput?: InferenceThroughputInfo;
   history: Record<MetricKey | 'network' | 'disk', number[]>;
 }
 
@@ -44,8 +76,16 @@ export interface ProcessInfo {
   cpu: number;
   gpu: number;
   memory: number;
+  memoryPercent?: number;
+  workingSetBytes?: number;
+  privateBytes?: number;
+  virtualBytes?: number;
   vram: number;
   disk: number;
+  diskRead?: number;
+  diskWrite?: number;
+  diskReadTotalBytes?: number;
+  diskWriteTotalBytes?: number;
   network: number;
   power: 'Very low' | 'Low' | 'Moderate' | 'High';
   kind?: 'AI' | 'Game' | 'Creative';
@@ -56,10 +96,37 @@ export interface ProcessInfo {
   path?: string;
   handles?: number;
   threads?: number;
+  parentId?: number;
+  command?: string;
+  startedAt?: string | null;
+  uptimeSeconds?: number;
+  responding?: boolean | null;
   gpuEngines?: Record<string, number>;
   aiApplication?: string;
   aiRuntime?: string;
   aiRole?: string;
+}
+
+export interface TemperatureReading {
+  component: 'CPU' | 'GPU' | 'Storage' | 'System' | 'Other';
+  name: string;
+  value: number;
+  min: number | null;
+  max: number | null;
+  source: string;
+  accuracy: 'hardware-monitor' | 'graphics-driver' | 'firmware-zone' | string;
+}
+
+export interface HardwareSensorReading {
+  component: 'CPU' | 'GPU' | 'Memory' | 'Storage' | 'Network' | 'System' | 'Other' | string;
+  name: string;
+  sensorType: 'Temperature' | 'Load' | 'Clock' | 'Fan' | 'Voltage' | 'Current' | 'Power' | 'Energy' | 'Throughput' | 'Data' | string;
+  value: number;
+  min: number | null;
+  max: number | null;
+  unit: string;
+  source: string;
+  accuracy: 'hardware-monitor' | 'graphics-driver' | 'os-counter' | 'modeled-estimate' | string;
 }
 
 export interface StorageTemperature {
@@ -105,8 +172,23 @@ export interface LocalModelInfo {
   location?: string;
   process: LocalAiProcess | null;
   applicationEnergyWatts: number | null;
-  applicationCpu: number;
-  applicationGpu: number;
+  /** Null when the runtime holds several models: one aggregate cannot be split. */
+  applicationCpu: number | null;
+  applicationGpu: number | null;
+  /** Exact GGUF header metadata — present only when the blob was readable. */
+  parameterCountExact?: number;
+  weightBytesExact?: number;
+  kvHeads?: number | null;
+  /** Exact K head dimension from the GGUF header, when the blob was read. */
+  kvKeyLength?: number | null;
+  /** Exact V head dimension from the GGUF header, when the blob was read. */
+  kvValueLength?: number | null;
+  kvHeadCountExact?: boolean;
+  layers?: number | null;
+  experts?: number | null;
+  activeExperts?: number | null;
+  moe?: boolean;
+  activeParameterRatio?: number;
 }
 
 export interface LocalAiApplication {
@@ -136,19 +218,63 @@ export interface LocalAiSnapshot {
   loadedModelCount: number;
   installedModelCount?: number;
   serviceCount?: number;
+  cloudProviders?: CloudProviderStatus[];
+}
+
+export interface CloudProviderStatus {
+  id: string;
+  name: string;
+  provider: string;
+  detected: boolean;
+  credentialConfigured: boolean;
+  credentialSignals: string[];
+  localProcessCount: number;
+  cpu: number;
+  gpu: number;
+  memoryGb: number;
+  energyWatts: number;
+  billingVisible: false;
 }
 
 export interface ModelCompatibility {
   workload: 'generation' | 'embedding';
   state: 'excellent' | 'good' | 'limited' | 'too-large' | 'unknown';
   label: string;
-  mode: 'gpu' | 'hybrid' | 'cpu' | 'unavailable';
+  mode: 'gpu' | 'hybrid' | 'cpu' | 'paging' | 'unavailable';
   requiredMemoryGb: number;
+  modelWeightGb: number;
+  runtimeOverheadGb: number;
+  kvCacheGb: number;
+  totalRamGb: number;
+  totalVramGb: number;
+  totalCombinedMemoryGb: number;
   availableVramGb: number;
   availableRamGb: number;
+  usableCombinedMemoryGb: number;
+  ramReserveGb: number;
+  vramReserveGb: number;
+  isUnifiedMemory: boolean;
+  assumedContextTokens: number;
+  gpuOffloadPercent: number;
+  memoryDeficitGb: number;
+  /**
+   * Layer-level offload plan. Exact when the GGUF header exposes the block
+   * count; each step answers "load N of L layers → predicted tok/s".
+   */
+  offloadPlan?: Array<{
+    layersOnGpu: number;
+    layersTotal: number;
+    vramNeededGb: number;
+    fitsVram: boolean;
+    estimatedTpsCenter: number | null;
+  }>;
   estimatedTpsMin: number | null;
   estimatedTpsMax: number | null;
+  estimatedTpsCenter: number | null;
+  effectiveBandwidthGbps: number | null;
   confidence: 'medium' | 'low';
+  confidenceScore: number;
+  bottleneck: 'GPU memory bandwidth' | 'system RAM / split offload' | 'system memory bandwidth' | 'storage paging' | 'metadata';
   reason: string;
 }
 
@@ -187,6 +313,8 @@ export interface EnergyEstimate {
   confidence: 'measured' | 'hybrid' | 'estimated';
   confidenceScore: number;
   methodology: string;
+  cpuMeasured?: boolean;
+  gpuMeasured?: boolean;
   sessionWh: number;
   hourlyKwh: number;
   dailyKwh: number;
@@ -206,7 +334,10 @@ export interface EnergyEstimate {
 }
 
 export interface HardwareInfo {
+  collectedAt?: string | null;
   system: { manufacturer: string; model: string; version: string };
+  motherboard?: { manufacturer: string; model: string; version: string };
+  bios?: { vendor: string; version: string; date: string; smbiosVersion: string };
   os: { platform: string; distro: string; release: string; build: string; arch: string; hostname: string };
   cpu: {
     manufacturer: string;
@@ -215,6 +346,10 @@ export interface HardwareInfo {
     physicalCores: number;
     speed: number;
     speedMax: number;
+    socket?: string;
+    l2CacheBytes?: number;
+    l3CacheBytes?: number;
+    virtualization?: boolean;
     estimatedTdp: number;
   };
   gpu: null | {
@@ -223,9 +358,16 @@ export interface HardwareInfo {
     vramBytes: number;
     driverVersion: string;
     powerLimit: number;
+    driverDate?: string;
+    videoMode?: string;
+    resolution?: string;
+    refreshRate?: number;
+    status?: string;
   };
-  memory: { totalBytes: number; modules: Array<{ sizeBytes: number; type: string; clockMhz: number }> };
-  storage: Array<{ name: string; type: string; sizeBytes: number; smartStatus: string; temperature?: number; temperatureSource?: string | null }>;
+  gpus?: Array<NonNullable<HardwareInfo['gpu']>>;
+  memory: { totalBytes: number; modules: Array<{ sizeBytes: number; type: string; clockMhz: number; ratedClockMhz?: number; manufacturer?: string; partNumber?: string; bank?: string; slot?: string; formFactor?: number }> };
+  storage: Array<{ name: string; type: string; sizeBytes: number; smartStatus: string; busType?: string; firmware?: string; partitions?: number; temperature?: number; temperatureSource?: string | null }>;
+  networks?: Array<{ name: string; manufacturer: string; type: string; speedBits: number; connection: string; status: string }>;
   displays: Array<{ model: string; main: boolean; resolution: string; refreshRate: number }>;
 }
 
@@ -244,6 +386,10 @@ export interface SystemSnapshot {
   timestamp: string;
   source: 'windows-agent' | 'tauri-native';
   pollMs: number;
+  /** Cadence the collector aims for. pollMs is the interval it actually got. */
+  targetPollMs?: number;
+  /** Milliseconds since each background collector last began a run. */
+  sampledAgoMs?: Record<string, number | null>;
   hardware: HardwareInfo;
   metrics: Omit<LiveMetrics, 'history'>;
   energy: EnergyEstimate;

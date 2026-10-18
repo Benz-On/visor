@@ -5,6 +5,7 @@ import {
   ChartNoAxesCombined,
   ChevronLeft,
   ChevronRight,
+  CircuitBoard,
   Cpu,
   History,
   Leaf,
@@ -12,7 +13,7 @@ import {
   Settings,
 } from 'lucide-react';
 
-export type ViewId = 'overview' | 'processes' | 'performance' | 'ai' | 'energy' | 'history' | 'alerts' | 'settings';
+export type ViewId = 'overview' | 'hardware' | 'processes' | 'performance' | 'ai' | 'energy' | 'history' | 'alerts' | 'settings';
 
 interface SidebarProps {
   active: ViewId;
@@ -27,6 +28,7 @@ interface SidebarProps {
 
 const primaryItems = [
   { id: 'overview' as const, label: 'Overview', icon: LayoutDashboard },
+  { id: 'hardware' as const, label: 'Hardware', icon: CircuitBoard },
   { id: 'processes' as const, label: 'Processes', icon: Cpu },
   { id: 'performance' as const, label: 'Performance', icon: ChartNoAxesCombined },
   { id: 'ai' as const, label: 'AI workloads', icon: Bot },
@@ -78,8 +80,8 @@ export function Sidebar({ active, collapsed, onNavigate, onCollapse, connection,
         <div className="collector-status">
           <span className="collector-pulse" />
           <div>
-            <strong>{connection === 'live' ? (collectorSource === 'tauri-native' ? 'Native collector' : 'Development agent') : connection === 'connecting' ? 'Connecting…' : 'Demo fallback'}</strong>
-            <span>{connection === 'live' ? (collectorSource === 'tauri-native' ? 'embedded · local · 1 sec' : 'loopback · local · 1 sec') : 'simulated telemetry'}</span>
+            <strong>{connection === 'live' ? (collectorSource === 'tauri-native' ? 'Native collector' : 'Development agent') : connection === 'connecting' ? 'Connecting…' : connection === 'error' ? 'Collector unavailable' : 'Interface preview'}</strong>
+            <span>{connection === 'live' ? (collectorSource === 'tauri-native' ? 'embedded · local · 1 sec' : 'loopback · local · 1 sec') : connection === 'error' ? 'no simulated native data' : connection === 'demo' ? 'sample interface data' : 'waiting for first sample'}</span>
           </div>
         </div>
         <button

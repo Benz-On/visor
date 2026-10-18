@@ -19,6 +19,7 @@ $result = foreach ($processItem in Get-Process) {
         cpuSeconds = if ($null -ne $processItem.CPU) { [double]$processItem.CPU } else { $null }
         workingSetBytes = [double]$processItem.WorkingSet64
         privateBytes = [double]$processItem.PrivateMemorySize64
+        virtualBytes = [double]$processItem.VirtualMemorySize64
         handles = [int]$processItem.HandleCount
         threads = [int]$processItem.Threads.Count
         priority = $priorityValue

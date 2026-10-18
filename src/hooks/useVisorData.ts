@@ -1,11 +1,27 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { processes as demoProcesses } from '../data';
-import type { LiveMetrics, MetricKey, SystemSnapshot } from '../types';
+import type { LiveMetrics, MetricKey, SystemSnapshot, ThroughputSampleInfo } from '../types';
 import { useTelemetry } from './useTelemetry';
 
 const AGENT_URL = 'http://127.0.0.1:1421';
 const historyKeys: Array<MetricKey | 'network' | 'disk'> = ['cpu', 'gpu', 'ram', 'vram', 'network', 'disk'];
+const emptyHistory = () => Object.fromEntries(historyKeys.map((key) => [key, Array(34).fill(0)])) as LiveMetrics['history'];
+const emptyMetrics: LiveMetrics = {
+  cpu: 0,
+  gpu: 0,
+  ram: 0,
+  vram: 0,
+  cpuTemp: 0,
+  gpuTemp: 0,
+  cpuPower: 0,
+  gpuPower: 0,
+  download: 0,
+  upload: 0,
+  diskRead: 0,
+  diskWrite: 0,
+  history: emptyHistory(),
+};
 
 type ConnectionState = 'connecting' | 'live' | 'demo' | 'error';
 
@@ -13,25 +29,44 @@ const isTauri = () => '__TAURI_INTERNALS__' in window;
 
 export function useVisorData(paused: boolean) {
   const [snapshot, setSnapshot] = useState<SystemSnapshot | null>(null);
+  const [throughputHistory, setThroughputHistory] = useState<ThroughputSampleInfo[]>([]);
   const [connection, setConnection] = useState<ConnectionState>('connecting');
   const [actionError, setActionError] = useState<string | null>(null);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
   const [history, setHistory] = useState<LiveMetrics['history'] | null>(null);
   const connectedRef = useRef(false);
-  const fallback = useTelemetry(paused || connection === 'live');
-
-  const fetchSnapshot = useCallback(async (signal?: AbortSignal) => {
+  const lastStampedRef = useRef<string | null>(null);
+  const nativeRuntime = isTauri();
+  const fallback = useTelemetry(paused || nativeRuntime || connection === 'live');
+  const fetchSnapshot = useCallback(async (signal?: AbortSignal, force = false) => {
     try {
-      const next = isTauri()
-        ? await invoke<SystemSnapshot>('get_system_snapshot')
+      const next = nativeRuntime
+        ? await invoke<SystemSnapshot>(force ? 'refresh_system_snapshot' : 'get_system_snapshot')
         : await fetch(`${AGENT_URL}/api/snapshot`, { cache: 'no-store', signal }).then(async (response) => {
           if (!response.ok) throw new Error(`Agent returned ${response.status}`);
           return response.json() as Promise<SystemSnapshot>;
         });
       setSnapshot(next);
       setConnection('live');
+      setConnectionError(null);
       connectedRef.current = true;
+      if (nativeRuntime) {
+        try {
+          const throughputHistoryPayload = await invoke<{ samples: ThroughputSampleInfo[] }>('get_throughput_history');
+          setThroughputHistory(throughputHistoryPayload.samples || []);
+        } catch {
+          // History is best-effort; the live snapshot remains authoritative.
+        }
+      }
       setHistory((current) => {
-        const base = current || fallback.history;
+        // The native collector refreshes on its own cadence, which the heavy
+        // Windows collectors routinely overrun. Re-appending the same snapshot
+        // every poll drew one real sample as several flat points and compressed
+        // the chart's time axis, so only a new snapshot advances history.
+        if (next.timestamp && next.timestamp === lastStampedRef.current) return current;
+        if (next.timestamp) lastStampedRef.current = next.timestamp;
+        const base = current || (nativeRuntime ? emptyHistory() : fallback.history);
         const nextValues = {
           cpu: next.metrics.cpu,
           gpu: next.metrics.gpu,
@@ -45,10 +80,11 @@ export function useVisorData(paused: boolean) {
       return next;
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') return null;
-      setConnection(connectedRef.current ? 'error' : 'demo');
+      setConnection(connectedRef.current || nativeRuntime ? 'error' : 'demo');
+      setConnectionError(error instanceof Error ? error.message : String(error));
       return null;
     }
-  }, [fallback.history]);
+  }, [fallback.history, nativeRuntime]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -67,7 +103,7 @@ export function useVisorData(paused: boolean) {
 
   const performAction = useCallback(async (path: string, body: Record<string, unknown>) => {
     setActionError(null);
-    if (isTauri()) {
+    if (nativeRuntime) {
       let result: { ok?: boolean; error?: string };
       if (path.endsWith('/kill')) {
         result = await invoke('kill_process', {
@@ -90,7 +126,7 @@ export function useVisorData(paused: boolean) {
       } else {
         throw new Error('Unsupported native VISOR action.');
       }
-      await fetchSnapshot();
+      await fetchSnapshot(undefined, true);
       return result;
     }
     const response = await fetch(`${AGENT_URL}${path}`, {
@@ -109,7 +145,7 @@ export function useVisorData(paused: boolean) {
     }
     await fetchSnapshot();
     return result;
-  }, [fetchSnapshot]);
+  }, [fetchSnapshot, nativeRuntime]);
 
   const killProcess = useCallback((pid: number) => performAction(`/api/processes/${pid}/kill`, {
     confirmation: String(pid),
@@ -123,21 +159,33 @@ export function useVisorData(paused: boolean) {
   const setAlertRule = useCallback((id: string, enabled: boolean) =>
     performAction(`/api/alerts/${id}`, { enabled }), [performAction]);
 
+  const refresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      return await fetchSnapshot(undefined, true);
+    } finally {
+      setRefreshing(false);
+    }
+  }, [fetchSnapshot]);
+
   const metrics = useMemo<LiveMetrics>(() => snapshot ? {
     ...fallback,
     ...snapshot.metrics,
     history: history || fallback.history,
-  } : fallback, [fallback, history, snapshot]);
+  } : nativeRuntime ? emptyMetrics : fallback, [fallback, history, nativeRuntime, snapshot]);
 
   return {
     metrics,
     snapshot,
     connection,
+    connectionError,
     actionError,
-    processes: snapshot?.processes || demoProcesses,
+    refreshing,
+    throughputHistory,
+    processes: snapshot?.processes || (nativeRuntime ? [] : demoProcesses),
     killProcess,
     setProcessPriority,
     setAlertRule,
-    refresh: fetchSnapshot,
+    refresh,
   };
 }

@@ -1,0 +1,49 @@
+# Fixture: vLLM /metrics text exposition.
+#
+# PROVENANCE: metric NAMES are taken from upstream vLLM docs/design/metrics.md
+# (fetched 2026-10-18). VALUES are synthetic - no vLLM instance was reachable on
+# this machine - so tests built on it assert name handling and arithmetic only.
+#
+# The hazard this fixture pins: vLLM exposes BOTH a cumulative counter and a
+# shorter-named variant for the same quantity (`prompt_tokens_total` and
+# `prompt_tokens`), plus per-request histograms whose `_sum` is a genuine seconds
+# total while `_bucket`/`_count`/`_max` are not. Loose matching turns any of those
+# into several-fold inflated throughput.
+# TYPE vllm:prompt_tokens_total counter
+# HELP vllm:prompt_tokens_total Number of prefill tokens processed.
+vllm:prompt_tokens_total{model_name="meta-llama/Llama-3.1-8B-Instruct"} 250000
+# TYPE vllm:prompt_tokens counter
+# HELP vllm:prompt_tokens Number of prefill tokens processed.
+vllm:prompt_tokens{model_name="meta-llama/Llama-3.1-8B-Instruct"} 250000
+# TYPE vllm:generation_tokens_total counter
+# HELP vllm:generation_tokens_total Number of generation tokens processed.
+vllm:generation_tokens_total{model_name="meta-llama/Llama-3.1-8B-Instruct"} 180000
+# TYPE vllm:generation_tokens counter
+vllm:generation_tokens{model_name="meta-llama/Llama-3.1-8B-Instruct"} 180000
+# TYPE vllm:request_generation_tokens histogram
+vllm:request_generation_tokens_bucket{model_name="x",le="1.0"} 12
+vllm:request_generation_tokens_bucket{model_name="x",le="+Inf"} 900
+vllm:request_generation_tokens_sum{model_name="meta-llama/Llama-3.1-8B-Instruct"} 180000
+vllm:request_generation_tokens_count{model_name="x"} 900
+# TYPE vllm:request_max_num_generation_tokens gauge
+vllm:request_max_num_generation_tokens{model_name="x"} 512
+# TYPE vllm:request_prefill_time_seconds histogram
+vllm:request_prefill_time_seconds_sum{model_name="meta-llama/Llama-3.1-8B-Instruct"} 41.25
+vllm:request_prefill_time_seconds_count{model_name="x"} 900
+vllm:request_prefill_time_seconds_bucket{model_name="x",le="1.0"} 880
+# TYPE vllm:request_decode_time_seconds histogram
+vllm:request_decode_time_seconds_sum{model_name="meta-llama/Llama-3.1-8B-Instruct"} 2250.0
+vllm:request_decode_time_seconds_count{model_name="x"} 900
+# TYPE vllm:time_to_first_token_seconds histogram
+vllm:time_to_first_token_seconds_sum{model_name="x"} 37.0
+vllm:time_to_first_token_seconds_count{model_name="x"} 900
+# TYPE vllm:e2e_request_latency_seconds histogram
+vllm:e2e_request_latency_seconds_sum{model_name="x"} 2300.0
+# TYPE vllm:spec_decode_num_draft_tokens counter
+vllm:spec_decode_num_draft_tokens{model_name="x"} 0
+# TYPE vllm:request_success_total counter
+vllm:request_success_total{model_name="x",finished_reason="stop"} 900
+# TYPE vllm:num_requests_running gauge
+vllm:num_requests_running{model_name="x"} 0
+# TYPE vllm:kv_cache_usage_perc gauge
+vllm:kv_cache_usage_perc{model_name="x"} 0.12

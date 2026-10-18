@@ -2,6 +2,10 @@ node_modules/
 dist/
 .vite/
 *.log
+# The throughput tests embed a captured runtime log as a fixture, so the rule
+# above must not keep it out of the repository: include_str! of a missing file
+# fails the build on any machine that clones this repo.
+!src-tauri/tests/fixtures/*.log
 *.tsbuildinfo
 .DS_Store
 Thumbs.db

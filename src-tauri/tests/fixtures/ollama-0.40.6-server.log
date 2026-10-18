@@ -1,0 +1,34 @@
+# Golden fixture: Ollama 0.40.6 server log, llama.cpp backend timing lines.
+#
+# PROVENANCE: captured live from %LOCALAPPDATA%\Ollama\server.log on 2026-10-18
+# during a controlled single generation on an RTX 5070 Ti (model qwen3.5:9b,
+# temperature 0, num_predict 64). The same request returned, from /api/generate:
+#   eval_count=64  eval_duration=1057175999ns  -> 60.54 tok/s
+#   prompt_eval_count=26  prompt_eval_duration=17762899000ns -> 1.46 tok/s
+#   load_duration=15607682300ns  total_duration=34433343500ns
+# so the 59.59 / 1.46 tok/s printed below are real runtime output, cross-checked
+# against the runtime's own API for the same request.
+#
+# The trailing block reproduces the mid-generation "n_gen/tg" lines and the HTTP
+# access lines that keep the file's mtime advancing while no inference happens -
+# the behaviour that previously let a finished request present itself as live.
+#
+# Format reference: llama.cpp server slot print_timing output, as shipped by
+# Ollama 0.40.6. If upstream changes these lines, this fixture must be recaptured
+# from a real server rather than edited by hand.
+2026-10-18 10:28:59 INFO [GIN] 2026-10-18 - 10:28:59 | 200 | 15.6ms | 127.0.0.1 | POST "/api/generate"
+slot print_timing: id  0 | task 0 | prompt processing, n_tokens =     22, progress = 0.85, t =  14.27 s / 1.54 tokens per second
+slot print_timing: id  0 | task 0 | prompt eval time =   17762.90 ms /    26 tokens (  683.19 ms per token,     1.46 tokens per second)
+slot print_timing: id  0 | task 0 |        eval time =    1057.18 ms /    64 tokens (   16.78 ms per token,    59.59 tokens per second)
+slot print_timing: id  0 | task 0 |       total time =   18820.08 ms /    90 tokens
+slot print_timing: id  0 | task 0 |    graphs reused =         63
+slot print_timing: id  0 | task 0 |   graph reallocs =          2    /     0        (same size) / (changed size)
+2026-10-18 10:29:15 INFO [GIN] 2026-10-18 - 10:29:15 | 200 |   34.4349098s | 127.0.0.1 | POST "/api/generate"
+slot print_timing: id  0 | task 1 | prompt processing, n_tokens =     84, progress = 0.95, t =  14.75 s / 5.69 tokens per second
+slot print_timing: id  0 | task 1 | prompt eval time =    14750.00 ms /    88 tokens (  167.61 ms per token,     5.97 tokens per second)
+slot print_timing: id  0 | task 1 | n_gen =    100, tg =   3.57 t/s, tg_3s =   3.61 t/s
+slot print_timing: id  0 | task 1 | n_gen =    113, tg =   3.63 t/s, tg_3s =   4.10 t/s
+slot print_timing: id  0 | task 1 |        eval time =   28000.00 ms /   100 tokens (  280.00 ms per token,     3.57 tokens per second)
+slot print_timing: id  0 | task 1 |       total time =   42750.00 ms /   188 tokens
+2026-10-18 10:31:02 INFO [GIN] 2026-10-18 - 10:31:02 | 200 | 0s | 127.0.0.1 | GET "/api/ps"
+2026-10-18 10:31:02 INFO [GIN] 2026-10-18 - 10:31:02 | 200 | 18.3ms | 127.0.0.1 | GET "/api/tags"

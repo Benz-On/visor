@@ -10,8 +10,18 @@ The collector exposes missing sensors explicitly instead of simulating them.
 - Portable executable and per-user NSIS installer
 - NVIDIA telemetry through `nvidia-smi`
 - Per-process GPU engine and dedicated-memory counters through Windows APIs
-- Optional CPU and storage temperatures through compatible WMI providers
+- SMBIOS/WMI inventory for system, motherboard, BIOS, CPU, DIMMs, GPU adapters,
+  physical storage, network adapters, and connected displays
+- Windows memory-manager counters for cache, commit, paging, and kernel pools
+- Optional temperature, fan, voltage, clock, power, and load sensors through
+  LibreHardwareMonitor/OpenHardwareMonitor, read from their WMI provider or, on
+  builds that do not register one, from their loopback web server on
+  `127.0.0.1:8085`
 - Process tree termination and Windows priority classes
+- Native menu bar with view accelerators, tray icon with a live tooltip, restored
+  window size and position, and a single-instance guard on relaunch
+- System notifications for sustained alerts and start-with-Windows, both off
+  until enabled in Settings and persisted in `settings.json`
 
 The portable executable requires the system WebView2 runtime. The NSIS installer
 contains the WebView2 bootstrapper.
