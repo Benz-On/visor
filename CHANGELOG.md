@@ -3,7 +3,7 @@
 All notable VISOR changes are documented here. Versions follow Semantic
 Versioning while the product remains in beta.
 
-## [0.9.3-beta.1] - Unreleased
+## [0.9.3-beta.1] - 2026-10-18
 
 ### Changed
 

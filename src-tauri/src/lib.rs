@@ -364,6 +364,10 @@ fn collect_snapshot(state: &RuntimeState, force: bool) -> Result<Value, String> 
 }
 
 fn hidden_command(program: &str) -> Command {
+    // The window-hiding flag exists only on Windows, so the binding needs `mut`
+    // there and nowhere else. The allow keeps every platform building under
+    // `-D warnings` without splitting the function per target.
+    #[allow(unused_mut)]
     let mut command = Command::new(program);
     #[cfg(windows)]
     {
