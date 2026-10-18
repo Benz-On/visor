@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { processes as demoProcesses } from '../data';
-import type { LiveMetrics, MetricKey, SystemSnapshot } from '../types';
+import type { LiveMetrics, MetricKey, SystemSnapshot, ThroughputSampleInfo } from '../types';
 import { useTelemetry } from './useTelemetry';
 
 const AGENT_URL = 'http://127.0.0.1:1421';
@@ -29,12 +29,14 @@ const isTauri = () => '__TAURI_INTERNALS__' in window;
 
 export function useVisorData(paused: boolean) {
   const [snapshot, setSnapshot] = useState<SystemSnapshot | null>(null);
+  const [throughputHistory, setThroughputHistory] = useState<ThroughputSampleInfo[]>([]);
   const [connection, setConnection] = useState<ConnectionState>('connecting');
   const [actionError, setActionError] = useState<string | null>(null);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [history, setHistory] = useState<LiveMetrics['history'] | null>(null);
   const connectedRef = useRef(false);
+  const lastStampedRef = useRef<string | null>(null);
   const nativeRuntime = isTauri();
   const fallback = useTelemetry(paused || nativeRuntime || connection === 'live');
   const fetchSnapshot = useCallback(async (signal?: AbortSignal, force = false) => {
@@ -49,7 +51,21 @@ export function useVisorData(paused: boolean) {
       setConnection('live');
       setConnectionError(null);
       connectedRef.current = true;
+      if (nativeRuntime) {
+        try {
+          const throughputHistoryPayload = await invoke<{ samples: ThroughputSampleInfo[] }>('get_throughput_history');
+          setThroughputHistory(throughputHistoryPayload.samples || []);
+        } catch {
+          // History is best-effort; the live snapshot remains authoritative.
+        }
+      }
       setHistory((current) => {
+        // The native collector refreshes on its own cadence, which the heavy
+        // Windows collectors routinely overrun. Re-appending the same snapshot
+        // every poll drew one real sample as several flat points and compressed
+        // the chart's time axis, so only a new snapshot advances history.
+        if (next.timestamp && next.timestamp === lastStampedRef.current) return current;
+        if (next.timestamp) lastStampedRef.current = next.timestamp;
         const base = current || (nativeRuntime ? emptyHistory() : fallback.history);
         const nextValues = {
           cpu: next.metrics.cpu,
@@ -165,6 +181,7 @@ export function useVisorData(paused: boolean) {
     connectionError,
     actionError,
     refreshing,
+    throughputHistory,
     processes: snapshot?.processes || (nativeRuntime ? [] : demoProcesses),
     killProcess,
     setProcessPriority,

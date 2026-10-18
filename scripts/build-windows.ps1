@@ -8,6 +8,20 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $projectRoot
 
+function Get-Sha256Hex {
+    param([Parameter(Mandatory)][string]$LiteralPath)
+
+    $stream = [System.IO.File]::OpenRead($LiteralPath)
+    $algorithm = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $algorithm.Dispose()
+        $stream.Dispose()
+    }
+}
+
 if (-not $IsWindows -and $PSVersionTable.PSEdition -eq 'Core') {
     throw 'VISOR Windows artifacts must be built on Windows.'
 }
@@ -30,9 +44,21 @@ if (-not $visualStudio) {
 }
 $devCommand = Join-Path $visualStudio 'Common7\Tools\VsDevCmd.bat'
 
+# Git for Windows ships /usr/bin/link.exe (coreutils). When the build runs
+# from a Git Bash parent process that directory can precede the MSVC tools in
+# PATH, and rustc then invokes the wrong linker. Pin the MSVC toolchain
+# directory ahead of everything else so link.exe always resolves to LINK.EXE.
+$msvcLink = Get-ChildItem -Path (Join-Path $visualStudio 'VC\Tools\MSVC') -Recurse -Filter 'link.exe' |
+    Where-Object { $_.DirectoryName -like '*Hostx64\x64' } |
+    Select-Object -First 1
+if (-not $msvcLink) {
+    throw 'The MSVC x64 linker (link.exe) was not found.'
+}
+$msvcBin = $msvcLink.DirectoryName
+
 $steps = @(
     ('call "{0}" -no_logo -arch=x64' -f $devCommand),
-    ('set "PATH={0};%PATH%"' -f $cargoBin)
+    ('set "PATH={0};{1};%PATH%"' -f $msvcBin, $cargoBin)
 )
 if (-not $SkipInstall) {
     $steps += 'npm.cmd ci'
@@ -84,11 +110,10 @@ Copy-Item -LiteralPath $installerSource.FullName -Destination $installerTarget -
 
 $files = @($portableTarget, $installerTarget) | ForEach-Object {
     $item = Get-Item -LiteralPath $_
-    $hash = Get-FileHash -LiteralPath $_ -Algorithm SHA256
     [pscustomobject][ordered]@{
         name = $item.Name
         bytes = $item.Length
-        sha256 = $hash.Hash.ToLowerInvariant()
+        sha256 = Get-Sha256Hex -LiteralPath $_
     }
 }
 $releaseManifest = [ordered]@{
@@ -106,8 +131,21 @@ $releaseManifest = [ordered]@{
     generatedAt = [DateTime]::UtcNow.ToString('o')
     files = $files
 }
-$releaseManifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $artifactRoot 'release-manifest.json') -Encoding UTF8
-$files | ForEach-Object { "{0}  {1}" -f $_.sha256, $_.name } | Set-Content -LiteralPath (Join-Path $artifactRoot 'SHA256SUMS.txt') -Encoding ASCII
+# Release metadata is read by CI and by coreutils on Linux, where a UTF-8 BOM
+# breaks JSON parsers and `sha256sum -c` reads the trailing carriage return as
+# part of the file name. Both files are written as UTF-8 without a BOM and with
+# LF separators instead of the Windows PowerShell defaults.
+$utf8NoBom = New-Object System.Text.UTF8Encoding $false
+$lf = [string][char]10
+# ConvertTo-Json emits carriage returns between its own lines on Windows
+# PowerShell, so the manifest is normalized to LF like the checksum file.
+$manifestJson = ($releaseManifest | ConvertTo-Json -Depth 5) -replace "`r`n", "`n"
+$manifestJson = $manifestJson + $lf
+[System.IO.File]::WriteAllText(
+    (Join-Path $artifactRoot 'release-manifest.json'), $manifestJson, $utf8NoBom)
+$checksums = (($files | ForEach-Object { '{0}  {1}' -f $_.sha256, $_.name }) -join $lf) + $lf
+[System.IO.File]::WriteAllText(
+    (Join-Path $artifactRoot 'SHA256SUMS.txt'), $checksums, $utf8NoBom)
 
 Write-Host "VISOR $version Windows artifacts are ready in $artifactRoot"
 $files | Format-Table name, bytes, sha256 -AutoSize

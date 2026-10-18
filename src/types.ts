@@ -4,19 +4,40 @@ export type ThemeId = 'studio' | 'porcelain' | 'cyber' | 'retro';
 
 export type MetricKey = 'cpu' | 'gpu' | 'ram' | 'vram';
 
+export interface InferenceThroughputInfo {
+  decodeTokensPerSecond: number | null;
+  prefillTokensPerSecond: number | null;
+  lastTokens: number | null;
+  evidence: 'metrics-endpoint' | 'runtime-log' | 'last-runtime-log' | 'unavailable' | string;
+  observedAt: string | null;
+  /** Age of the logged completion in seconds; set on the log path. */
+  ageSeconds?: number | null;
+  /** Runtime that served the counters, when the metrics path supplied them. */
+  source?: string | null;
+}
+
+/** One measured completion sample from the collector's session history. */
+export interface ThroughputSampleInfo {
+  decodeTps: number;
+  prefillTps: number;
+  tokens: number;
+  at: number;
+  evidence: string;
+}
+
 export interface LiveMetrics {
   cpu: number;
   gpu: number;
   ram: number;
   vram: number;
-  cpuTemp: number;
+  cpuTemp: number | null;
   gpuTemp: number;
   ssdTemp?: number;
   storageTemperatures?: StorageTemperature[];
   temperatureReadings?: TemperatureReading[];
   hardwareSensors?: HardwareSensorReading[];
   sensorGuidance?: string | null;
-  sensorSources?: { cpu: string | null; gpu: string | null; storage: string[] };
+  sensorSources?: { cpu: string | null; gpu: string | null; storage: string[]; hardwareMonitorAvailable?: boolean };
   cpuPower: number;
   gpuPower: number;
   download: number;
@@ -41,6 +62,8 @@ export interface LiveMetrics {
     swapUsedBytes: number;
   };
   gpuMemory?: { totalBytes: number; usedBytes: number };
+  /** Measured inference throughput; null rates mean no generation observed. */
+  throughput?: InferenceThroughputInfo;
   history: Record<MetricKey | 'network' | 'disk', number[]>;
 }
 
@@ -149,8 +172,23 @@ export interface LocalModelInfo {
   location?: string;
   process: LocalAiProcess | null;
   applicationEnergyWatts: number | null;
-  applicationCpu: number;
-  applicationGpu: number;
+  /** Null when the runtime holds several models: one aggregate cannot be split. */
+  applicationCpu: number | null;
+  applicationGpu: number | null;
+  /** Exact GGUF header metadata — present only when the blob was readable. */
+  parameterCountExact?: number;
+  weightBytesExact?: number;
+  kvHeads?: number | null;
+  /** Exact K head dimension from the GGUF header, when the blob was read. */
+  kvKeyLength?: number | null;
+  /** Exact V head dimension from the GGUF header, when the blob was read. */
+  kvValueLength?: number | null;
+  kvHeadCountExact?: boolean;
+  layers?: number | null;
+  experts?: number | null;
+  activeExperts?: number | null;
+  moe?: boolean;
+  activeParameterRatio?: number;
 }
 
 export interface LocalAiApplication {
@@ -202,13 +240,41 @@ export interface ModelCompatibility {
   workload: 'generation' | 'embedding';
   state: 'excellent' | 'good' | 'limited' | 'too-large' | 'unknown';
   label: string;
-  mode: 'gpu' | 'hybrid' | 'cpu' | 'unavailable';
+  mode: 'gpu' | 'hybrid' | 'cpu' | 'paging' | 'unavailable';
   requiredMemoryGb: number;
+  modelWeightGb: number;
+  runtimeOverheadGb: number;
+  kvCacheGb: number;
+  totalRamGb: number;
+  totalVramGb: number;
+  totalCombinedMemoryGb: number;
   availableVramGb: number;
   availableRamGb: number;
+  usableCombinedMemoryGb: number;
+  ramReserveGb: number;
+  vramReserveGb: number;
+  isUnifiedMemory: boolean;
+  assumedContextTokens: number;
+  gpuOffloadPercent: number;
+  memoryDeficitGb: number;
+  /**
+   * Layer-level offload plan. Exact when the GGUF header exposes the block
+   * count; each step answers "load N of L layers → predicted tok/s".
+   */
+  offloadPlan?: Array<{
+    layersOnGpu: number;
+    layersTotal: number;
+    vramNeededGb: number;
+    fitsVram: boolean;
+    estimatedTpsCenter: number | null;
+  }>;
   estimatedTpsMin: number | null;
   estimatedTpsMax: number | null;
+  estimatedTpsCenter: number | null;
+  effectiveBandwidthGbps: number | null;
   confidence: 'medium' | 'low';
+  confidenceScore: number;
+  bottleneck: 'GPU memory bandwidth' | 'system RAM / split offload' | 'system memory bandwidth' | 'storage paging' | 'metadata';
   reason: string;
 }
 
@@ -247,6 +313,8 @@ export interface EnergyEstimate {
   confidence: 'measured' | 'hybrid' | 'estimated';
   confidenceScore: number;
   methodology: string;
+  cpuMeasured?: boolean;
+  gpuMeasured?: boolean;
   sessionWh: number;
   hourlyKwh: number;
   dailyKwh: number;
@@ -318,6 +386,10 @@ export interface SystemSnapshot {
   timestamp: string;
   source: 'windows-agent' | 'tauri-native';
   pollMs: number;
+  /** Cadence the collector aims for. pollMs is the interval it actually got. */
+  targetPollMs?: number;
+  /** Milliseconds since each background collector last began a run. */
+  sampledAgoMs?: Record<string, number | null>;
   hardware: HardwareInfo;
   metrics: Omit<LiveMetrics, 'history'>;
   energy: EnergyEstimate;

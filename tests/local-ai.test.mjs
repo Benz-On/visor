@@ -17,6 +17,9 @@ test('Ollama adapter keeps the exact model identity and allocation', () => {
   assert.equal(model.quantization, 'Q4_K_M');
   assert.equal(model.contextLength, 262144);
   assert.equal(model.confidence, 100);
+  assert.equal(model.sizeBytes, 0);
+  assert.equal(model.allocatedBytes, 18_740_800_387);
+  assert.equal(model.allocatedVramBytes, 8_239_280_291);
 });
 
 test('local AI snapshot connects an exact model to its application workload', () => {
@@ -45,6 +48,14 @@ test('installed Ollama models are inventoried even when they are not running', (
   assert.equal(model.installed, true);
   assert.equal(model.sizeBytes, 18_556_700_761);
   assert.equal(model.parameters, '30.5B');
+});
+
+test('Ollama metadata falls back to quantization encoded after a tag colon', () => {
+  const [model] = parseOllamaTagsPayload({
+    models: [{ name: 'org/Qwen3.6-35B-A3B:Q6_K_P', size: 29_000_000_000, details: { parameter_size: 'unknown', quantization_level: 'unknown', format: 'gguf' } }],
+  });
+  assert.equal(model.parameters, '35B');
+  assert.equal(model.quantization, 'Q6_K_P');
 });
 
 test('offline Ollama manifests preserve model identity and total layer size', () => {

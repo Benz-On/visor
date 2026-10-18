@@ -1,8 +1,9 @@
-# VISOR 0.7 beta
+# VISOR 0.8 beta
 
-VISOR 0.7.0-beta.1 is the first hardware-intelligence release. Windows now has
-deep SMBIOS/WMI inventory, an HWiNFO-style sensor console, detailed RAM and
-process accounting, and broader local/cloud AI service attribution.
+VISOR 0.8.0-beta.1 develops the hardware-intelligence release into a transparent
+local-inference planner. It combines RAM and VRAM, models KV context and memory
+bandwidth, handles MoE active parameters, and keeps a conditional speed estimate
+visible even when a model exceeds fast memory.
 
 ## Delivery matrix
 
@@ -38,15 +39,22 @@ macOS, Linux, and ARM64 binary previews resume when native builders are availabl
 - Priority increases on macOS/Linux may require elevated permission.
 - Whole-device and per-process energy remain labeled engineering estimates unless
   a compatible vendor power sensor reports measured values.
-- Model tok/s values remain conservative predictions until a local benchmark runs.
+- Model tok/s ranges now expose context, memory equation, offload, bottleneck,
+  confidence, and paging assumptions, but remain predictions until a local
+  benchmark runs.
 - Exact CPU package, fan, voltage, and motherboard readings depend on firmware
-  exposure or a running LibreHardwareMonitor/OpenHardwareMonitor WMI provider.
+  exposure or a running LibreHardwareMonitor/OpenHardwareMonitor provider: the
+  WMI namespace on builds that register one, otherwise the loopback web server
+  enabled from Options. CPU package power read from that channel is what moves
+  the energy label from modeled to measured.
 
 ## Release acceptance
 
-1. Frontend lint, production build, and Node tests pass.
-2. Rust formatting and tests pass on the release host; cross-platform tests run
-   again when hosted-runner quota is restored.
+1. Frontend lint, production build, and Node tests pass. These also run
+   automatically on Linux for pushes to `main` and for pull requests.
+2. Rust formatting and tests pass on the release host; the automatic gate covers
+   Linux, and the Windows and macOS legs run on manual dispatch until more
+   hosted-runner quota is available.
 3. Each published platform produces both expected portable and package artifacts.
 4. Checksums match the generated release manifest.
 5. A portable build is smoke-tested on each supported operating-system family.

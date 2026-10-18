@@ -165,45 +165,57 @@ function modelBase({ id, application, runtime, model, status = 'detected', sourc
 }
 
 export function parseOllamaPayload(payload = {}) {
-  return (Array.isArray(payload.models) ? payload.models : []).map((model) => ({
-    ...modelBase({
-      id: `ollama:${model.digest || model.model || model.name}`,
-      application: 'Ollama',
-      runtime: 'Ollama engine',
-      model: model.name || model.model || 'Unknown Ollama model',
-      status: 'loaded',
-      source: 'Ollama /api/ps',
-      confidence: 100,
-      sizeBytes: model.size,
-    }),
-    family: model.details?.family || model.details?.families?.join(', ') || '',
-    parameters: model.details?.parameter_size || '',
-    quantization: model.details?.quantization_level || '',
-    format: model.details?.format || '',
-    contextLength: finite(model.context_length),
-    allocatedBytes: finite(model.size),
-    allocatedVramBytes: finite(model.size_vram),
-    expiresAt: model.expires_at || null,
-  }));
+  return (Array.isArray(payload.models) ? payload.models : []).map((model) => {
+    const name = model.name || model.model || 'Unknown Ollama model';
+    const detailParameters = String(model.details?.parameter_size || '');
+    const detailQuantization = String(model.details?.quantization_level || '');
+    return ({
+      ...modelBase({
+        id: `ollama:${model.digest || model.model || model.name}`,
+        application: 'Ollama',
+        runtime: 'Ollama engine',
+        model: name,
+        status: 'loaded',
+        source: 'Ollama /api/ps',
+        confidence: 100,
+        // /api/ps `size` is the live allocation (weights + context/runtime), not
+        // a reliable on-disk weight size. /api/tags or manifests provide weights.
+        sizeBytes: 0,
+      }),
+      family: model.details?.family || model.details?.families?.join(', ') || '',
+      parameters: detailParameters && detailParameters.toLowerCase() !== 'unknown' ? detailParameters : parametersFromName(name),
+      quantization: detailQuantization && detailQuantization.toLowerCase() !== 'unknown' ? detailQuantization : quantizationFromName(name),
+      format: model.details?.format || '',
+      contextLength: finite(model.context_length),
+      allocatedBytes: finite(model.size),
+      allocatedVramBytes: finite(model.size_vram),
+      expiresAt: model.expires_at || null,
+    });
+  });
 }
 
 export function parseOllamaTagsPayload(payload = {}) {
-  return (Array.isArray(payload.models) ? payload.models : []).map((model) => ({
-    ...modelBase({
-      id: `ollama:${model.digest || model.model || model.name}`,
-      application: 'Ollama',
-      runtime: 'Ollama engine',
-      model: model.name || model.model || 'Unknown Ollama model',
-      source: 'Ollama /api/tags',
-      confidence: 100,
-      sizeBytes: model.size,
-    }),
-    family: model.details?.family || model.details?.families?.join(', ') || '',
-    parameters: model.details?.parameter_size || '',
-    quantization: model.details?.quantization_level || '',
-    format: model.details?.format || '',
-    location: 'Ollama library',
-  }));
+  return (Array.isArray(payload.models) ? payload.models : []).map((model) => {
+    const name = model.name || model.model || 'Unknown Ollama model';
+    const detailParameters = String(model.details?.parameter_size || '');
+    const detailQuantization = String(model.details?.quantization_level || '');
+    return ({
+      ...modelBase({
+        id: `ollama:${model.digest || model.model || model.name}`,
+        application: 'Ollama',
+        runtime: 'Ollama engine',
+        model: name,
+        source: 'Ollama /api/tags',
+        confidence: 100,
+        sizeBytes: model.size,
+      }),
+      family: model.details?.family || model.details?.families?.join(', ') || '',
+      parameters: detailParameters && detailParameters.toLowerCase() !== 'unknown' ? detailParameters : parametersFromName(name),
+      quantization: detailQuantization && detailQuantization.toLowerCase() !== 'unknown' ? detailQuantization : quantizationFromName(name),
+      format: model.details?.format || '',
+      location: 'Ollama library',
+    });
+  });
 }
 
 export function parseOllamaManifest(payload = {}, relativeParts = []) {
@@ -322,11 +334,11 @@ export function parseComfyQueuePayload(payload = {}) {
 }
 
 function quantizationFromName(name) {
-  return String(name).match(/(?:^|[-_.])(Q\d(?:_[A-Z0-9]+)+|Q\d_K|F16|F32|BF16)(?:[-_.]|$)/i)?.[1]?.toUpperCase() || '';
+  return String(name).match(/(?:^|[-_.:/])(Q\d(?:_[A-Z0-9]+)+|Q\d_K|F16|F32|BF16)(?:[-_.:/]|$)/i)?.[1]?.toUpperCase() || '';
 }
 
 function parametersFromName(name) {
-  const match = String(name).match(/(?:^|[-_.])(\d+(?:\.\d+)?)\s*[bB](?:[-_.]|$)/);
+  const match = String(name).match(/(?:^|[-_.:/])(\d+(?:\.\d+)?)\s*[bB](?:[-_.:/]|$)/);
   return match ? `${match[1]}B` : '';
 }
 

@@ -1,20 +1,25 @@
 use crate::alerts::AlertEngine;
 use crate::energy::{self, EnergyEstimate};
+use crate::gguf;
 use crate::local_ai;
+use crate::throughput::{self, InferenceThroughput};
 use crate::timed_command;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::process::Command;
 use std::time::{Duration, Instant};
-use sysinfo::{Disks, Networks, System};
+use sysinfo::{Disks, Networks, ProcessesToUpdate, System};
 
 const GIB: f64 = 1_073_741_824.0;
 const MIB: f64 = 1_048_576.0;
-const SENSOR_SCRIPT: &str = include_str!("../../agent/sensors.ps1");
-const GPU_COUNTER_SCRIPT: &str = include_str!("../../agent/gpu-counters.ps1");
-const PROCESS_SNAPSHOT_SCRIPT: &str = include_str!("../../agent/process-snapshot.ps1");
-const MEMORY_SNAPSHOT_SCRIPT: &str = include_str!("../../agent/memory-snapshot.ps1");
-const HARDWARE_SNAPSHOT_SCRIPT: &str = include_str!("../../agent/hardware-snapshot.ps1");
+const SENSOR_SCRIPT: &str = include_str!("../collectors/sensors.ps1");
+// Only the Windows reader consumes this script, so an ungated constant is dead
+// code on the Linux and macOS legs, which build with `-D warnings`.
+#[cfg(windows)]
+const GPU_COUNTER_SCRIPT: &str = include_str!("../collectors/gpu-counters.ps1");
+const PROCESS_SNAPSHOT_SCRIPT: &str = include_str!("../collectors/process-snapshot.ps1");
+const MEMORY_SNAPSHOT_SCRIPT: &str = include_str!("../collectors/memory-snapshot.ps1");
+const HARDWARE_SNAPSHOT_SCRIPT: &str = include_str!("../collectors/hardware-snapshot.ps1");
 
 #[derive(Clone, Default)]
 struct GpuInfo {
@@ -26,6 +31,8 @@ struct GpuInfo {
     temperature: f64,
     power: f64,
     power_limit: f64,
+    /// Populated when more than one discrete GPU answers the vendor query.
+    pub siblings: Vec<GpuInfo>,
 }
 
 pub struct Collector {
@@ -43,6 +50,12 @@ pub struct Collector {
     memory_details: Value,
     hardware_details: Value,
     local_ai: Value,
+    /// Measured inference throughput (metrics endpoint or runtime log).
+    inference: InferenceThroughput,
+    /// Exact GGUF metadata keyed by model name, refreshed every 10 minutes.
+    gguf_meta: HashMap<String, gguf::GgufMeta>,
+    last_gguf: Option<Instant>,
+    last_error: Option<String>,
     last_gpu: Option<Instant>,
     last_gpu_processes: Option<Instant>,
     last_process_details: Option<Instant>,
@@ -50,6 +63,11 @@ pub struct Collector {
     last_memory_details: Option<Instant>,
     last_hardware_details: Option<Instant>,
     last_local_ai: Option<Instant>,
+    /// Electricity price and grid carbon intensity, editable from Settings. They
+    /// live here rather than in `energy` so a running collector changes its
+    /// projection without a restart.
+    tariff_per_kwh: f64,
+    carbon_grams_per_kwh: f64,
 }
 
 impl Collector {
@@ -65,10 +83,14 @@ impl Collector {
             gpu: GpuInfo::default(),
             gpu_processes: HashMap::new(),
             process_details: HashMap::new(),
-            sensors: json!({ "cpuTemperature": 0, "cpuSource": null, "storage": [], "hardwareMonitorAvailable": false }),
+            sensors: json!({ "cpuTemperature": null, "cpuSource": null, "storage": [], "hardwareMonitorAvailable": false }),
             memory_details: json!({}),
             hardware_details: json!({}),
             local_ai: json!({ "scannedAt": null, "adapters": [], "models": [], "applications": [], "activeModelCount": 0, "loadedModelCount": 0 }),
+            inference: InferenceThroughput::default(),
+            gguf_meta: HashMap::new(),
+            last_gguf: None,
+            last_error: None,
             last_gpu: None,
             last_gpu_processes: None,
             last_process_details: None,
@@ -76,11 +98,29 @@ impl Collector {
             last_memory_details: None,
             last_hardware_details: None,
             last_local_ai: None,
+            tariff_per_kwh: energy::DEFAULT_TARIFF,
+            carbon_grams_per_kwh: energy::DEFAULT_CARBON,
         }
+    }
+
+    /// Settings changes these; the projection follows on the next sample.
+    pub fn set_price_factors(&mut self, tariff: f64, carbon: f64) {
+        self.tariff_per_kwh = tariff;
+        self.carbon_grams_per_kwh = carbon;
     }
 
     pub fn set_alert_rule(&mut self, id: &str, enabled: bool) -> bool {
         self.alert_engine.set_enabled(id, enabled)
+    }
+
+    /// Refreshes only the process table for action-time validation.
+    pub fn refresh_processes_only(&mut self) {
+        self.system.refresh_processes(ProcessesToUpdate::All, true);
+    }
+
+    /// Read access to the process table for live action validation.
+    pub fn system_ref(&self) -> &System {
+        &self.system
     }
 
     pub fn force_refresh(&mut self) {
@@ -91,6 +131,19 @@ impl Collector {
         self.last_memory_details = None;
         self.last_hardware_details = None;
         self.last_local_ai = None;
+        self.last_gguf = None;
+    }
+
+    /// Reads GGUF headers for installed Ollama models and caches exact
+    /// metadata (parameter count, KV heads, MoE, tensor bytes). Bounded: one
+    /// header read per model, refreshed at most every 10 minutes.
+    fn probe_model_files(&mut self) {
+        self.gguf_meta.clear();
+        for (path, model_name) in local_ai::model_probe_targets() {
+            if let Some(meta) = gguf::probe(&path) {
+                self.gguf_meta.insert(model_name, meta);
+            }
+        }
     }
 
     pub fn collect(&mut self) -> Value {
@@ -101,48 +154,76 @@ impl Collector {
         self.system.refresh_all();
         self.networks.refresh(true);
         self.disks.refresh(true);
+        let mut collector_errors: Vec<String> = Vec::new();
 
         if stale(self.last_gpu, now, Duration::from_secs(2)) {
-            if let Some(gpu) = read_nvidia() {
-                self.gpu = gpu;
+            match read_nvidia() {
+                Some(gpu) => self.gpu = gpu,
+                None => {
+                    if self.gpu.temperature > 0.0 || self.gpu.utilization > 0.0 {
+                        collector_errors.push(
+                            "nvidia-smi stopped responding; GPU telemetry is unavailable."
+                                .to_string(),
+                        );
+                    }
+                }
             }
             self.last_gpu = Some(now);
         }
+        // A failed counter read keeps the previous map rather than silently
+        // zeroing every process's GPU and VRAM share.
         if stale(self.last_gpu_processes, now, Duration::from_secs(3)) {
-            self.gpu_processes = read_gpu_processes();
+            match read_gpu_processes() {
+                Ok(processes) => self.gpu_processes = processes,
+                Err(error) => collector_errors.push(error),
+            }
             self.last_gpu_processes = Some(now);
         }
         if stale(self.last_process_details, now, Duration::from_secs(2)) {
-            if let Some(details) = run_powershell_json(PROCESS_SNAPSHOT_SCRIPT) {
-                self.process_details = details
-                    .as_array()
-                    .cloned()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter_map(|item| {
-                        item.get("pid")
-                            .and_then(Value::as_u64)
-                            .map(|pid| (pid as u32, item))
-                    })
-                    .collect();
+            match run_powershell_json(PROCESS_SNAPSHOT_SCRIPT, "Process", Duration::from_secs(8)) {
+                Ok(Some(details)) => {
+                    self.process_details = details
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter_map(|item| {
+                            item.get("pid")
+                                .and_then(Value::as_u64)
+                                .map(|pid| (pid as u32, item))
+                        })
+                        .collect();
+                }
+                Ok(None) => {}
+                Err(error) => collector_errors.push(error),
             }
             self.last_process_details = Some(now);
         }
         if stale(self.last_sensors, now, Duration::from_secs(12)) {
-            if let Some(sensors) = run_powershell_json(SENSOR_SCRIPT) {
-                self.sensors = sensors;
+            match run_powershell_json(SENSOR_SCRIPT, "Sensor", Duration::from_secs(12)) {
+                Ok(Some(sensors)) => self.sensors = sensors,
+                Ok(None) => {}
+                Err(error) => collector_errors.push(error),
             }
             self.last_sensors = Some(now);
         }
         if stale(self.last_memory_details, now, Duration::from_secs(2)) {
-            if let Some(memory) = run_powershell_json(MEMORY_SNAPSHOT_SCRIPT) {
-                self.memory_details = memory;
+            match run_powershell_json(MEMORY_SNAPSHOT_SCRIPT, "Memory", Duration::from_secs(8)) {
+                Ok(Some(memory)) => self.memory_details = memory,
+                Ok(None) => {}
+                Err(error) => collector_errors.push(error),
             }
             self.last_memory_details = Some(now);
         }
         if stale(self.last_hardware_details, now, Duration::from_secs(300)) {
-            if let Some(hardware) = run_powershell_json(HARDWARE_SNAPSHOT_SCRIPT) {
-                self.hardware_details = hardware;
+            match run_powershell_json(
+                HARDWARE_SNAPSHOT_SCRIPT,
+                "Hardware inventory",
+                Duration::from_secs(15),
+            ) {
+                Ok(Some(hardware)) => self.hardware_details = hardware,
+                Ok(None) => {}
+                Err(error) => collector_errors.push(error),
             }
             self.last_hardware_details = Some(now);
         }
@@ -225,20 +306,37 @@ impl Collector {
             .flatten()
             .filter_map(|item| item.get("temperature").and_then(Value::as_f64))
             .fold(0.0_f64, f64::max);
+        // A missing temperature stays absent; encoding it as 0 would be
+        // indistinguishable from a genuine freezing-cold reading.
         let cpu_temp = self
             .sensors
             .get("cpuTemperature")
             .and_then(Value::as_f64)
-            .unwrap_or_default();
+            .filter(|value| *value > 0.0);
 
         let physical_cores =
             System::physical_core_count().unwrap_or(self.system.cpus().len().max(1));
         let cpu_tdp = energy::infer_cpu_tdp(physical_cores, &cpu_brand);
-        let speed_ratio = if cpu_speed_max > 0.0 {
-            cpu_speed / cpu_speed_max
+        // Both operands of the previous ratio came from the same instantaneous
+        // per-core reading, so mean/max sat near 1 whatever the load and the
+        // clock term in the power model did nothing at all — it even fell when a
+        // single core boosted. Live clock is now compared against the
+        // processor's rated clock, which the inventory reports as base
+        // frequency; sustained boost above it is clamped by the model.
+        let rated_clock = rated_clock_ghz(&self.hardware_details, cpu_speed_max);
+        let speed_ratio = if rated_clock > 0.0 {
+            cpu_speed / rated_clock
         } else {
             1.0
         };
+        // Package power from the hardware monitor is a real on-die reading, so it
+        // supersedes the TDP curve; a host without one keeps the modeled value.
+        let measured_cpu_power = self
+            .sensors
+            .get("cpuPower")
+            .and_then(Value::as_f64)
+            .filter(|value| (0.0..1000.0).contains(value))
+            .unwrap_or_default();
         let energy_estimate = energy::estimate(energy::EnergyInputs {
             cpu_load: cpu,
             gpu_load: self.gpu.utilization,
@@ -246,6 +344,7 @@ impl Collector {
             disk_activity,
             cpu_tdp,
             speed_ratio,
+            measured_cpu_power,
             measured_gpu_power: self.gpu.power,
             gpu_power_limit: if self.gpu.power_limit > 0.0 {
                 self.gpu.power_limit
@@ -268,10 +367,16 @@ impl Collector {
                 .total_cmp(&number(left, "energyWatts"))
                 .then_with(|| number(right, "cpu").total_cmp(&number(left, "cpu")))
         });
-        processes.truncate(180);
 
         if stale(self.last_local_ai, now, Duration::from_secs(4)) {
             self.local_ai = local_ai::build(&processes);
+            if stale(self.last_gguf, now, Duration::from_secs(600)) {
+                self.probe_model_files();
+                self.last_gguf = Some(now);
+            }
+            if !self.gguf_meta.is_empty() {
+                local_ai::apply_gguf_metadata(&mut self.local_ai, &self.gguf_meta);
+            }
             self.last_local_ai = Some(now);
         }
         let gaming = processes
@@ -301,7 +406,15 @@ impl Collector {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        if self.gpu.temperature > 0.0 {
+        // LibreHardwareMonitor publishes the same GPU core temperature through
+        // NVAPI, so adding the driver reading again would list one adapter twice
+        // in the sensor table. Matching on the name keeps the driver value on
+        // boards where the monitor only reports a hotspot or memory junction.
+        let gpu_core_already_listed = temperature_readings.iter().any(|reading| {
+            reading.get("component").and_then(Value::as_str) == Some("GPU")
+                && reading.get("name").and_then(Value::as_str) == Some("GPU Core")
+        });
+        if self.gpu.temperature > 0.0 && !gpu_core_already_listed {
             temperature_readings.push(json!({
                 "component": "GPU",
                 "name": "GPU Core",
@@ -445,21 +558,51 @@ impl Collector {
                     "modeled-estimate"
                 },
             ));
+            for (index, sibling) in self.gpu.siblings.iter().enumerate() {
+                hardware_sensors.push(sensor_row(
+                    "GPU",
+                    &format!("GPU {index} utilization"),
+                    "Load",
+                    sibling.utilization,
+                    "%",
+                    "nvidia-smi",
+                    "graphics-driver",
+                ));
+                hardware_sensors.push(sensor_row(
+                    "GPU",
+                    &format!("GPU {index} memory"),
+                    "Load",
+                    if sibling.total_bytes > 0.0 {
+                        sibling.used_bytes / sibling.total_bytes * 100.0
+                    } else {
+                        0.0
+                    },
+                    "%",
+                    "nvidia-smi",
+                    "graphics-driver",
+                ));
+            }
         }
         let metrics = json!({
             "cpu": energy::round(cpu, 1),
             "gpu": energy::round(self.gpu.utilization, 1),
             "ram": energy::round(if memory_total > 0.0 { memory_used / memory_total * 100.0 } else { 0.0 }, 1),
             "vram": energy::round(if self.gpu.total_bytes > 0.0 { self.gpu.used_bytes / self.gpu.total_bytes * 100.0 } else { 0.0 }, 1),
-            "cpuTemp": energy::round(cpu_temp, 1),
+            "cpuTemp": cpu_temp.map(|value| json!(energy::round(value, 1))).unwrap_or(Value::Null),
             "gpuTemp": energy::round(self.gpu.temperature, 1),
             "ssdTemp": energy::round(ssd_temp, 1),
             "storageTemperatures": storage_temperatures,
             "temperatureReadings": temperature_readings,
             "hardwareSensors": hardware_sensors,
             "sensorGuidance": self.sensors.get("cpuSensorGuidance").cloned().unwrap_or(Value::Null),
+            "throughput": throughput::as_json(&self.inference),
             "sensorSources": {
                 "cpu": self.sensors.get("cpuSource").cloned().unwrap_or(Value::Null),
+                "hardwareMonitorAvailable": self
+                    .sensors
+                    .get("hardwareMonitorAvailable")
+                    .and_then(Value::as_bool)
+                    .unwrap_or_default(),
                 "gpu": if self.gpu.temperature > 0.0 { json!("nvidia-smi") } else { Value::Null },
                 "storage": self.sensors.get("storage").and_then(Value::as_array).map(|items| items.iter().filter_map(|item| item.get("source").and_then(Value::as_str)).collect::<Vec<_>>()).unwrap_or_default()
             },
@@ -486,27 +629,83 @@ impl Collector {
                 "swapTotalBytes": self.system.total_swap(),
                 "swapUsedBytes": self.system.used_swap()
             },
-            "gpuMemory": { "totalBytes": self.gpu.total_bytes, "usedBytes": self.gpu.used_bytes }
+            "gpuMemory": { "totalBytes": self.gpu.total_bytes, "usedBytes": self.gpu.used_bytes },
+            "gpuCount": 1 + self.gpu.siblings.len(),
+            "gpus": {
+                "primary": {
+                    "model": self.gpu.model,
+                    "utilization": energy::round(self.gpu.utilization, 1),
+                    "totalBytes": self.gpu.total_bytes,
+                    "usedBytes": self.gpu.used_bytes,
+                    "temperature": energy::round(self.gpu.temperature, 1),
+                    "power": energy::round(self.gpu.power, 1),
+                    "powerLimit": energy::round(self.gpu.power_limit, 1)
+                },
+                "siblings": self.gpu.siblings.iter().map(|gpu| json!({
+                    "model": gpu.model,
+                    "utilization": energy::round(gpu.utilization, 1),
+                    "totalBytes": gpu.total_bytes,
+                    "usedBytes": gpu.used_bytes,
+                    "temperature": energy::round(gpu.temperature, 1),
+                    "power": energy::round(gpu.power, 1),
+                    "powerLimit": energy::round(gpu.power_limit, 1)
+                })).collect::<Vec<_>>()
+            }
         });
         let alerts = self.alert_engine.evaluate(&metrics, gaming);
+        self.inference = throughput::measure();
         let current_pid = std::process::id();
-        let current_process = processes
+        let (self_cpu, self_memory_mb) = processes
             .iter()
-            .find(|process| process.get("id").and_then(Value::as_u64) == Some(current_pid as u64));
+            .find(|process| process.get("id").and_then(Value::as_u64) == Some(current_pid as u64))
+            .map(|process| (number(process, "cpu"), number(process, "memory") * 1024.0))
+            .unwrap_or_default();
         let blocked = self
             .system
             .processes()
             .values()
             .filter(|process| format!("{:?}", process.status()).eq_ignore_ascii_case("Stop"))
             .count();
+        self.last_error = if collector_errors.is_empty() {
+            None
+        } else {
+            Some(collector_errors.join(" "))
+        };
 
+        // The display budget is applied last. Truncating before attribution let a
+        // runtime with a small working set drop out of the process list the AI
+        // snapshot is built from, and its loaded model then vanished from counts.
+        processes.truncate(180);
+
+        let age_ms =
+            |since: &Option<Instant>| since.map(|moment| moment.elapsed().as_millis() as u64);
         json!({
             "timestamp": chrono::Utc::now().to_rfc3339(),
             "source": "tauri-native",
-            "pollMs": 1100,
+            // The interval actually achieved, not the requested one. The five
+            // Windows collectors cannot all fit inside the 1.1 s target, and
+            // advertising a fixed cadence made every derived rate look fresher
+            // than it was. Each age is measured from when that collector began.
+            "pollMs": (elapsed * 1000.0).round() as u64,
+            "targetPollMs": 1100,
+            "sampledAgoMs": {
+                "gpu": age_ms(&self.last_gpu),
+                "gpuProcesses": age_ms(&self.last_gpu_processes),
+                "processDetails": age_ms(&self.last_process_details),
+                "sensors": age_ms(&self.last_sensors),
+                "memory": age_ms(&self.last_memory_details),
+                "hardware": age_ms(&self.last_hardware_details),
+                "localAI": age_ms(&self.last_local_ai),
+                "modelMetadata": age_ms(&self.last_gguf)
+            },
             "hardware": self.hardware(&cpu_brand, physical_cores, cpu_speed, cpu_speed_max, cpu_tdp),
             "metrics": metrics,
-            "energy": energy::as_json(&energy_estimate, self.session_wh),
+            "energy": energy::as_json(
+                &energy_estimate,
+                self.session_wh,
+                self.tariff_per_kwh,
+                self.carbon_grams_per_kwh,
+            ),
             "processes": processes,
             "processCounts": {
                 "all": self.system.processes().len(),
@@ -517,14 +716,14 @@ impl Collector {
             "localAI": self.local_ai,
             "alerts": alerts,
             "agent": {
-                "cpuPercent": current_process.map(|process| number(process, "cpu")).unwrap_or_default(),
-                "memoryMb": current_process.map(|process| number(process, "memory") * 1024.0).unwrap_or_default(),
+                "cpuPercent": self_cpu,
+                "memoryMb": self_memory_mb,
                 "pid": current_pid,
                 "uptimeSeconds": self.started.elapsed().as_secs(),
                 "sampleDurationMs": collection_started.elapsed().as_millis(),
                 "gpuAttributionAvailable": !self.gpu_processes.is_empty(),
-                "sensorAttributionAvailable": cpu_temp > 0.0 || ssd_temp > 0.0,
-                "lastError": null
+                "sensorAttributionAvailable": cpu_temp.is_some() || ssd_temp > 0.0,
+                "lastError": self.last_error.clone()
             }
         })
     }
@@ -670,10 +869,32 @@ impl Collector {
                 "powerLimit": self.gpu.power_limit
             });
         }
+        let mut all_gpus = Vec::with_capacity(1 + self.gpu.siblings.len());
+        if !self.gpu.model.is_empty() {
+            all_gpus.push(json!({
+                "vendor": "NVIDIA",
+                "model": self.gpu.model,
+                "vramBytes": self.gpu.total_bytes,
+                "driverVersion": self.gpu.driver,
+                "status": "OK",
+                "powerLimit": self.gpu.power_limit
+            }));
+            for sibling in &self.gpu.siblings {
+                all_gpus.push(json!({
+                    "vendor": "NVIDIA",
+                    "model": sibling.model,
+                    "vramBytes": sibling.total_bytes,
+                    "driverVersion": sibling.driver,
+                    "status": "OK",
+                    "powerLimit": sibling.power_limit
+                }));
+            }
+        }
+        if all_gpus.is_empty() {
+            all_gpus = detail_gpus.clone();
+        }
         let fallback_networks = self
-            .networks
-            .iter()
-            .map(|(name, _)| {
+            .networks.keys().map(|name| {
                 json!({ "name": name, "manufacturer": "", "type": "Network interface", "speedBits": 0, "connection": name, "status": "Connected" })
             })
             .collect::<Vec<_>>();
@@ -719,7 +940,7 @@ impl Collector {
                 "estimatedTdp": tdp
             },
             "gpu": primary_gpu,
-            "gpus": detail_gpus,
+            "gpus": all_gpus,
             "memory": {
                 "totalBytes": positive_or(number(details_memory, "totalBytes"), self.system.total_memory() as f64),
                 "modules": details_memory.get("modules").and_then(Value::as_array).cloned().unwrap_or_default()
@@ -729,6 +950,18 @@ impl Collector {
             "displays": array_or(&self.hardware_details, "displays", Vec::new())
         })
     }
+}
+
+/// Clock used to normalise the live frequency for the power model. The inventory
+/// reports the processor's base clock; without it the only comparator left is the
+/// fastest live core, which makes the ratio self-referential and inert.
+fn rated_clock_ghz(hardware_details: &Value, live_max_ghz: f64) -> f64 {
+    hardware_details
+        .get("cpu")
+        .and_then(|cpu| cpu.get("speedMax"))
+        .and_then(Value::as_f64)
+        .filter(|value| *value > 0.0)
+        .unwrap_or(live_max_ghz)
 }
 
 fn stale(last: Option<Instant>, now: Instant, interval: Duration) -> bool {
@@ -921,7 +1154,7 @@ fn attribute_energy(
 }
 
 fn read_nvidia() -> Option<GpuInfo> {
-    let fields = "name,driver_version,utilization.gpu,memory.total,memory.used,temperature.gpu,power.draw,power.limit";
+    let fields = "index,name,driver_version,utilization.gpu,memory.total,memory.used,temperature.gpu,power.draw,power.limit";
     let output = timed_command::output(
         hidden_command(if cfg!(windows) {
             "nvidia-smi.exe"
@@ -940,48 +1173,75 @@ fn read_nvidia() -> Option<GpuInfo> {
         return None;
     }
     let text = String::from_utf8_lossy(&output.stdout);
-    let row = text
+    let mut gpus: Vec<GpuInfo> = text
         .lines()
-        .next()?
-        .split(',')
-        .map(str::trim)
-        .collect::<Vec<_>>();
-    if row.len() < 8 {
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let row = line.split(',').map(str::trim).collect::<Vec<_>>();
+            if row.len() < 9 {
+                return GpuInfo::default();
+            }
+            GpuInfo {
+                model: row[1].to_string(),
+                driver: row[2].to_string(),
+                utilization: row[3].parse().unwrap_or_default(),
+                total_bytes: row[4].parse::<f64>().unwrap_or_default() * MIB,
+                used_bytes: row[5].parse::<f64>().unwrap_or_default() * MIB,
+                temperature: row[6].parse().unwrap_or_default(),
+                power: row[7].parse().unwrap_or_default(),
+                power_limit: row[8].parse().unwrap_or_default(),
+                siblings: Vec::new(),
+            }
+        })
+        .collect();
+    if gpus.iter().any(|gpu| gpu.model.is_empty()) || gpus.is_empty() {
         return None;
     }
-    Some(GpuInfo {
-        model: row[0].to_string(),
-        driver: row[1].to_string(),
-        utilization: row[2].parse().unwrap_or_default(),
-        total_bytes: row[3].parse::<f64>().unwrap_or_default() * MIB,
-        used_bytes: row[4].parse::<f64>().unwrap_or_default() * MIB,
-        temperature: row[5].parse().unwrap_or_default(),
-        power: row[6].parse().unwrap_or_default(),
-        power_limit: row[7].parse().unwrap_or_default(),
-    })
+    // Prefer the adapter with real memory use as the primary; expose the rest.
+    gpus.sort_by(|left, right| {
+        right
+            .used_bytes
+            .total_cmp(&left.used_bytes)
+            .then_with(|| right.total_bytes.total_cmp(&left.total_bytes))
+    });
+    let mut primary = gpus.remove(0);
+    primary.siblings = gpus;
+    Some(primary)
 }
 
 #[cfg(windows)]
-fn read_gpu_processes() -> HashMap<u32, Value> {
-    run_powershell_json(GPU_COUNTER_SCRIPT)
+fn read_gpu_processes() -> Result<HashMap<u32, Value>, String> {
+    let items = run_powershell_json(GPU_COUNTER_SCRIPT, "GPU counter", Duration::from_secs(15))?
         .and_then(|value| value.as_array().cloned())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    Ok(items
         .into_iter()
         .filter_map(|item| {
             item.get("pid")
                 .and_then(Value::as_u64)
                 .map(|pid| (pid as u32, item))
         })
-        .collect()
+        .collect())
 }
 
 #[cfg(not(windows))]
-fn read_gpu_processes() -> HashMap<u32, Value> {
-    HashMap::new()
+fn read_gpu_processes() -> Result<HashMap<u32, Value>, String> {
+    Ok(HashMap::new())
 }
 
+/// Runs one of the embedded Windows collectors and decodes its JSON.
+/// `Ok(None)` means the collector does not exist on this platform, which is
+/// reported as absence rather than as a failure.
 #[cfg(windows)]
-fn run_powershell_json(script: &str) -> Option<Value> {
+fn run_powershell_json(
+    script: &str,
+    label: &str,
+    timeout: Duration,
+) -> Result<Option<Value>, String> {
+    // `powershell.exe -Command -` only flushes the final pipeline once it sees
+    // an empty line, so scripts ending in `} | ConvertTo-Json` return zero bytes
+    // unless the stdin payload carries a trailing blank line.
+    let payload = format!("{script}\n");
     let output = timed_command::output(
         hidden_command("powershell.exe").args([
             "-NoProfile",
@@ -991,22 +1251,43 @@ fn run_powershell_json(script: &str) -> Option<Value> {
             "-Command",
             "-",
         ]),
-        Some(script.as_bytes()),
-        Duration::from_secs(8),
+        Some(payload.as_bytes()),
+        timeout,
     )
-    .ok()?;
+    .map_err(|error| format!("{label} collector could not run: {error}"))?;
     if !output.status.success() {
-        return None;
+        let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if message.is_empty() {
+            format!(
+                "{label} collector exited with code {}.",
+                output.status.code().unwrap_or_default()
+            )
+        } else {
+            format!("{label} collector failed: {message}")
+        });
     }
-    serde_json::from_slice(&output.stdout).ok()
+    if output.stdout.iter().all(u8::is_ascii_whitespace) {
+        return Err(format!("{label} collector returned no data."));
+    }
+    serde_json::from_slice(&output.stdout)
+        .map(Some)
+        .map_err(|error| format!("{label} collector returned unreadable JSON: {error}"))
 }
 
 #[cfg(not(windows))]
-fn run_powershell_json(_script: &str) -> Option<Value> {
-    None
+fn run_powershell_json(
+    _script: &str,
+    _label: &str,
+    _timeout: Duration,
+) -> Result<Option<Value>, String> {
+    Ok(None)
 }
 
 fn hidden_command(program: &str) -> Command {
+    // The window-hiding flag exists only on Windows, so the binding needs `mut`
+    // there and nowhere else. The allow keeps every platform building under
+    // `-D warnings` without splitting the function per target.
+    #[allow(unused_mut)]
     let mut command = Command::new(program);
     #[cfg(windows)]
     {
@@ -1019,6 +1300,180 @@ fn hidden_command(program: &str) -> Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression guard for the silent-data-loss defect: `powershell -Command -`
+    /// buffers the final pipeline until an empty line, so a script shaped like
+    /// the embedded collectors must still decode, and an empty reply must be
+    /// reported instead of looking like a healthy collector.
+    #[cfg(windows)]
+    #[test]
+    fn powershell_collector_decodes_a_trailing_pipeline() {
+        let script = "$result = [ordered]@{ totalBytes = 1; availableBytes = 2 }\n$result | ConvertTo-Json -Compress -Depth 3\n";
+        let value = run_powershell_json(script, "Test", Duration::from_secs(30))
+            .expect("collector should report its own failures")
+            .expect("PowerShell collectors apply on Windows");
+        assert_eq!(value["totalBytes"], 1);
+        assert_eq!(value["availableBytes"], 2);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_collector_reports_empty_output_as_an_error() {
+        let error = run_powershell_json("exit 0\n", "Silent", Duration::from_secs(30))
+            .expect_err("empty stdout must not look like a healthy collector");
+        assert!(error.contains("no data"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn speed_ratio_uses_the_rated_clock_when_known() {
+        let inventory = json!({ "cpu": { "speedMax": 4.4 } });
+        // Live clock must be compared against the rated clock, not against the
+        // fastest live core, or the ratio is self-referential and always ~1.
+        assert_eq!(rated_clock_ghz(&inventory, 1.0), 4.4);
+        assert_eq!(rated_clock_ghz(&inventory, 4.4), 4.4);
+        // Missing or zero rated clocks fall back to the live maximum rather than
+        // dividing by zero and yielding a runaway ratio.
+        assert_eq!(
+            rated_clock_ghz(&json!({ "cpu": { "speedMax": 0 } }), 3.8),
+            3.8
+        );
+        assert_eq!(rated_clock_ghz(&json!({}), 3.8), 3.8);
+    }
+
+    /// End-to-end guard for the silent-empty-collector defect. `committedBytes`
+    /// is supplied only by the embedded memory script, so a zero here means the
+    /// PowerShell payload produced nothing and the field silently kept its
+    /// default. Skipped off Windows, where the collectors do not exist.
+    #[cfg(windows)]
+    #[test]
+    fn collect_receives_data_from_the_embedded_collectors() {
+        let snapshot = Collector::new().collect();
+        assert_eq!(snapshot["source"], "tauri-native");
+        let committed = snapshot["metrics"]["memory"]["committedBytes"]
+            .as_f64()
+            .unwrap_or_default();
+        assert!(
+            committed > 0.0,
+            "memory collector returned no data; lastError = {:?}",
+            snapshot["agent"]["lastError"]
+        );
+        // Cadence and staleness are part of the accuracy contract: the reported
+        // interval must be the one actually achieved, and every background
+        // collector must state how old its newest value is.
+        assert!(snapshot["pollMs"].as_u64().unwrap_or_default() > 0);
+        assert_eq!(snapshot["targetPollMs"], 1100);
+        for field in [
+            "gpu",
+            "gpuProcesses",
+            "processDetails",
+            "sensors",
+            "memory",
+            "hardware",
+            "localAI",
+            "modelMetadata",
+        ] {
+            assert!(
+                snapshot["sampledAgoMs"].get(field).is_some(),
+                "sampledAgoMs.{field} missing"
+            );
+        }
+    }
+
+    /// Accuracy harness for the hardware-monitor channel. It only passes while
+    /// LibreHardwareMonitor (or OpenHardwareMonitor) is running with a readable
+    /// sensor source, so it stays ignored. Run on that host with
+    /// `cargo test live_snapshot_reads -- --ignored --nocapture`.
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn live_snapshot_reads_the_cpu_package_sensor() {
+        // Sensors refresh on their own cadence, so keep one collector polling
+        // until a reading lands.
+        let mut collector = Collector::new();
+        let mut snapshot = collector.collect();
+        for _ in 0..15 {
+            if snapshot["metrics"]["cpuTemp"].as_f64().is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(900));
+            snapshot = collector.collect();
+        }
+        let cpu_temp = snapshot["metrics"]["cpuTemp"].as_f64().unwrap_or_default();
+        let source = snapshot["metrics"]["sensorSources"]["cpu"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        let cpu_power = snapshot["metrics"]["cpuPower"].as_f64().unwrap_or_default();
+        let confidence = snapshot["energy"]["confidence"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        println!("cpuTemp={cpu_temp} source={source} cpuPower={cpu_power} energy={confidence}");
+        assert!(
+            cpu_temp > 0.0,
+            "no CPU package temperature reached the snapshot"
+        );
+        // A per-core or firmware-zone reading would be a mislabeled package
+        // temperature, which is the defect this channel exists to avoid.
+        assert!(
+            source.contains("Tctl") || source.contains("Package") || source.contains("Die"),
+            "CPU temperature attributed to {source}"
+        );
+        assert!(
+            snapshot["energy"]["cpuMeasured"].as_bool().unwrap_or(false),
+            "package power was read but the energy model still claims a modeled CPU"
+        );
+        assert!(
+            cpu_power > 0.0,
+            "package power missing while a sensor source is live"
+        );
+    }
+
+    /// Accuracy harness: compares the shipped collector against the vendor tool
+    /// rather than a fixture. Ignored because it needs real NVIDIA telemetry.
+    /// Run on a Windows host with
+    /// `cargo test live_snapshot_matches -- --ignored --nocapture`.
+    ///
+    /// Utilisation is printed but not asserted: the collector samples on a
+    /// interval while nvidia-smi answers for a fresh one, so any difference is
+    /// legitimate. Resident VRAM changes slowly enough to compare directly, and
+    /// a large gap means the two are not looking at the same adapter.
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn live_snapshot_matches_nvidia_telemetry() {
+        let snapshot = Collector::new().collect();
+        let reported_bytes = snapshot["metrics"]["gpuMemory"]["usedBytes"]
+            .as_f64()
+            .unwrap_or_default();
+        let reported_utilization = snapshot["metrics"]["gpu"].as_f64().unwrap_or_default();
+        let vendor = Command::new("nvidia-smi")
+            .args([
+                "--query-gpu=memory.used,utilization.gpu",
+                "--format=csv,noheader,nounits",
+            ])
+            .output()
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .unwrap_or_default();
+        println!("collector: {reported_bytes} bytes used, {reported_utilization}% busy");
+        println!("nvidia-smi: {vendor}");
+        assert!(!vendor.is_empty(), "nvidia-smi unavailable on this host");
+        let vendor_mib: Vec<f64> = vendor
+            .split(',')
+            .map(|part| part.trim().parse::<f64>().unwrap_or_default())
+            .collect();
+        assert!(
+            vendor_mib.first().is_some_and(|used| *used > 0.0),
+            "vendor reports no resident memory: {vendor}"
+        );
+        let vendor_bytes = vendor_mib[0] * MIB;
+        let drift = (reported_bytes - vendor_bytes).abs() / vendor_bytes;
+        assert!(
+            drift < 0.1,
+            "collector reports {reported_bytes} bytes against vendor {vendor_bytes} ({:.1}% drift)",
+            drift * 100.0
+        );
+    }
 
     #[test]
     fn protects_critical_system_processes() {

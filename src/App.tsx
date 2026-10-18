@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Activity,
   Bell,
@@ -9,7 +9,6 @@ import {
   CircleGauge,
   CircuitBoard,
   Clock3,
-  Command,
   Cpu,
   Gauge,
   Gamepad2,
@@ -35,11 +34,14 @@ import {
   Zap,
 } from 'lucide-react';
 import { Donut, LineChart } from './components/Charts';
+import { niceCeiling } from './chartScale';
 import { ProcessTable } from './components/ProcessTable';
 import { Sidebar, type ViewId } from './components/Sidebar';
+import { applyAutostart, applyPriceFactors, applyShellFlags, isDesktop, subscribeShell } from './desktop';
 import { useVisorData } from './hooks/useVisorData';
 import { analyzeLocalModel } from './modelAdvisor';
-import type { AgentInfo, AlertsSnapshot, EnergyEstimate, HardwareInfo, LocalAiSnapshot, LocalModelInfo, MetricKey, MetricTone, ProcessInfo, TemperatureReading, ThemeId } from './types';
+import { defaultSettings, loadSettings, saveSettings, type VisorSettings } from './settings';
+import type { AgentInfo, AlertsSnapshot, EnergyEstimate, HardwareInfo, LocalAiSnapshot, LocalModelInfo, MetricKey, MetricTone, ProcessInfo, TemperatureReading, ThemeId, ThroughputSampleInfo } from './types';
 
 const themeOrder: ThemeId[] = ['studio', 'porcelain', 'cyber', 'retro'];
 const themeNames: Record<ThemeId, string> = {
@@ -48,6 +50,19 @@ const themeNames: Record<ThemeId, string> = {
   cyber: 'Cyberdeck',
   retro: 'Retro terminal',
 };
+
+/// A metric the user asked to look at closely, carried whole so the overlay can
+/// repeat every figure the card already showed.
+interface FocusMetric {
+  label: string;
+  detail: string;
+  value: number;
+  tone: MetricTone;
+  history: number[];
+  stats: [string, string][];
+}
+
+type Attention = 'none' | 'alerts' | 'health';
 
 const viewTitles: Record<ViewId, { eyebrow: string; title: string; description: string }> = {
   overview: {
@@ -101,32 +116,111 @@ function App() {
   const [activeView, setActiveView] = useState<ViewId>('overview');
   const [collapsed, setCollapsed] = useState(false);
   const [paused, setPaused] = useState(false);
-  const [theme, setTheme] = useState<ThemeId>(() => {
-    const saved = window.localStorage.getItem('visor-theme');
-    return themeOrder.includes(saved as ThemeId) ? saved as ThemeId : 'studio';
-  });
+  const [settings, setSettings] = useState<VisorSettings>(defaultSettings);
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
+  const [focusMetric, setFocusMetric] = useState<FocusMetric | null>(null);
+  const [attention, setAttention] = useState<Attention>('none');
   const visor = useVisorData(paused);
   const metrics = visor.metrics;
 
   useEffect(() => {
+    let cancelled = false;
+    void loadSettings().then((loaded) => {
+      if (cancelled) return;
+      setSettings(loaded);
+      setSettingsLoaded(true);
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (!settingsLoaded) return;
+    void applyShellFlags({
+      paused,
+      notifications: settings.notifications,
+      closeToTray: settings.closeToTray,
+    });
+  }, [paused, settings.closeToTray, settings.notifications, settingsLoaded]);
+
+  useEffect(() => {
+    if (!settingsLoaded || !isDesktop()) return;
+    void applyPriceFactors(settings.tariffPerKwh, settings.carbonGramsPerKwh);
+  }, [settings.carbonGramsPerKwh, settings.tariffPerKwh, settingsLoaded]);
+
+  const updateSettings = useCallback((patch: Partial<VisorSettings>) => {
+    setSettings((current) => {
+      const next = { ...current, ...patch };
+      void saveSettings(next);
+      if (patch.autostart !== undefined) void applyAutostart(patch.autostart);
+      return next;
+    });
+  }, []);
+
+  const togglePause = useCallback(() => setPaused((value) => !value), []);
+
+  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+      // In the desktop shell the native menu owns Ctrl+K and delivers it as a
+      // shell event; handling the key here as well would toggle the palette open
+      // and immediately shut it again.
+      if (!isDesktop() && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault();
         setCommandOpen((open) => !open);
       }
-      if (event.key === 'Escape') setCommandOpen(false);
+      if (event.key === 'Escape') {
+        setCommandOpen(false);
+        setAttention('none');
+        setFocusMetric(null);
+      }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
+  // The subscription is installed once and reads the current handlers through a
+  // ref, because the refresh callback changes identity with every snapshot and
+  // would otherwise re-listen roughly once per second.
+  const shellActions = useRef({
+    navigate: (view: string) => setActiveView(view as ViewId),
+    search: () => setCommandOpen(true),
+    refresh: () => void visor.refresh(),
+    togglePause,
+  });
+
   useEffect(() => {
-    window.localStorage.setItem('visor-theme', theme);
-  }, [theme]);
+    shellActions.current = {
+      navigate: (view: string) => setActiveView(view as ViewId),
+      search: () => setCommandOpen(true),
+      refresh: () => void visor.refresh(),
+      togglePause,
+    };
+  });
+
+  useEffect(() => {
+    let disposed = false;
+    let stop: (() => void) | undefined;
+    void subscribeShell((action) => {
+      if (disposed) return;
+      if (action.action === 'navigate') shellActions.current.navigate(action.view);
+      else if (action.action === 'search') shellActions.current.search();
+      else if (action.action === 'refresh') shellActions.current.refresh();
+      else if (action.action === 'toggle-pause') shellActions.current.togglePause();
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else stop = unlisten;
+    });
+    return () => {
+      disposed = true;
+      stop?.();
+    };
+  }, []);
 
   const title = viewTitles[activeView];
-  const thermalAlert = metrics.cpuTemp >= 90 || metrics.gpuTemp >= 86;
+  // Derived from the interval the collector actually achieved, so the overlays
+  // label their buffer with the real spacing between points rather than 1.1 s.
+  const sampleSeconds = visor.snapshot?.pollMs && visor.snapshot.pollMs > 0 ? visor.snapshot.pollMs / 1000 : 1.1;
+  const thermalAlert = (metrics.cpuTemp ?? 0) >= 90 || metrics.gpuTemp >= 86;
   const activeAlertCount = visor.snapshot?.alerts?.active.length || 0;
   const healthLabel = visor.connection === 'demo'
     ? 'Demo mode'
@@ -137,10 +231,12 @@ function App() {
         : activeAlertCount > 0 || thermalAlert
           ? 'Attention'
           : 'Telemetry active';
-  const cycleTheme = () => setTheme((current) => themeOrder[(themeOrder.indexOf(current) + 1) % themeOrder.length]);
+  const cycleTheme = () => updateSettings({
+    theme: themeOrder[(themeOrder.indexOf(settings.theme) + 1) % themeOrder.length],
+  });
 
   return (
-    <div className="app-shell" data-theme={theme}>
+    <div className="app-shell" data-theme={settings.theme}>
       <Sidebar
         active={activeView}
         collapsed={collapsed}
@@ -170,14 +266,19 @@ function App() {
             <button className="icon-button" onClick={() => setPaused((value) => !value)} aria-label={paused ? 'Resume monitoring' : 'Pause monitoring'}>
               {paused ? <Play size={17} /> : <Pause size={17} />}
             </button>
-            <button className="icon-button theme-cycle" onClick={cycleTheme} aria-label={`Change theme. Current: ${themeNames[theme]}`} title={`Theme: ${themeNames[theme]}`}>
+            <button className="icon-button theme-cycle" onClick={cycleTheme} aria-label={`Change theme. Current: ${themeNames[settings.theme]}`} title={`Theme: ${themeNames[settings.theme]}`}>
               <Palette size={17} />
             </button>
-            <button className="icon-button notification-button" aria-label="Notifications">
+            <button
+              className={`icon-button notification-button ${attention === 'alerts' ? 'button-active' : ''}`}
+              aria-label={`Attention items: ${activeAlertCount}`}
+              aria-expanded={attention === 'alerts'}
+              title="Active alerts and recent resolutions"
+              onClick={() => setAttention((current) => (current === 'alerts' ? 'none' : 'alerts'))}
+            >
               <Bell size={17} />
-              <span />
+              {activeAlertCount > 0 && <span title={`${activeAlertCount} sustained conditions`} />}
             </button>
-            <div className="avatar">AB</div>
           </div>
         </header>
 
@@ -199,28 +300,48 @@ function App() {
               <p className="page-description">{title.description}</p>
             </div>
             {activeView !== 'settings' && (
-              <div className="system-health">
+              <button
+                className={`system-health ${attention === 'health' ? 'button-active' : ''}`}
+                aria-expanded={attention === 'health'}
+                aria-label={`System health: ${healthLabel}. Show details`}
+                onClick={() => setAttention((current) => (current === 'health' ? 'none' : 'health'))}
+              >
                 <div className="health-icon"><ShieldCheck size={20} /></div>
                 <div>
                   <span>System health</span>
                   <strong>{healthLabel}</strong>
                 </div>
                 <ChevronDown size={16} />
-              </div>
+              </button>
             )}
           </section>
 
-          {activeView === 'overview' && <Overview metrics={metrics} energy={visor.snapshot?.energy} hardware={visor.snapshot?.hardware} localAI={visor.snapshot?.localAI} processes={visor.processes} live={visor.connection === 'live'} refreshing={visor.refreshing} onRefresh={visor.refresh} onViewProcesses={() => setActiveView('processes')} onKill={visor.killProcess} onPriority={visor.setProcessPriority} />}
+          {activeView === 'overview' && <Overview metrics={metrics} energy={visor.snapshot?.energy} hardware={visor.snapshot?.hardware} localAI={visor.snapshot?.localAI} processes={visor.processes} live={visor.connection === 'live'} refreshing={visor.refreshing} onRefresh={visor.refresh} onViewProcesses={() => setActiveView('processes')} onKill={visor.killProcess} onPriority={visor.setProcessPriority} onExpand={setFocusMetric} />}
           {activeView === 'hardware' && <HardwareView metrics={metrics} hardware={visor.snapshot?.hardware} refreshing={visor.refreshing} onRefresh={visor.refresh} />}
           {activeView === 'processes' && <ProcessExplorer metrics={metrics} processes={visor.processes} counts={visor.snapshot?.processCounts} live={visor.connection === 'live'} refreshing={visor.refreshing} onRefresh={visor.refresh} onKill={visor.killProcess} onPriority={visor.setProcessPriority} />}
-          {activeView === 'performance' && <Performance metrics={metrics} hardware={visor.snapshot?.hardware} refreshing={visor.refreshing} onRefresh={visor.refresh} />}
-          {activeView === 'ai' && <AIWorkloads metrics={metrics} localAI={visor.snapshot?.localAI} hardware={visor.snapshot?.hardware} refreshing={visor.refreshing} onRefresh={visor.refresh} />}
+          {activeView === 'performance' && <Performance metrics={metrics} hardware={visor.snapshot?.hardware} refreshing={visor.refreshing} onRefresh={visor.refresh} onExpand={setFocusMetric} />}
+          {activeView === 'ai' && <AIWorkloads metrics={metrics} localAI={visor.snapshot?.localAI} hardware={visor.snapshot?.hardware} throughputHistory={visor.throughputHistory} refreshing={visor.refreshing} onRefresh={visor.refresh} />}
           {activeView === 'energy' && <EnergyView energy={visor.snapshot?.energy} processes={visor.processes} agent={visor.snapshot?.agent} />}
-          {activeView === 'history' && <HistoryView metrics={metrics} energy={visor.snapshot?.energy} agent={visor.snapshot?.agent} />}
+          {activeView === 'history' && <HistoryView metrics={metrics} energy={visor.snapshot?.energy} agent={visor.snapshot?.agent} pollMs={visor.snapshot?.pollMs} />}
           {activeView === 'alerts' && <AlertsView alerts={visor.snapshot?.alerts} live={visor.connection === 'live'} onToggle={visor.setAlertRule} />}
-          {activeView === 'settings' && <SettingsView theme={theme} setTheme={setTheme} metrics={metrics} hardware={visor.snapshot?.hardware} agent={visor.snapshot?.agent} source={visor.snapshot?.source} />}
+          {activeView === 'settings' && <SettingsView settings={settings} onUpdate={updateSettings} metrics={metrics} energy={visor.snapshot?.energy} hardware={visor.snapshot?.hardware} agent={visor.snapshot?.agent} source={visor.snapshot?.source} alerts={visor.snapshot?.alerts} />}
         </div>
+
+        {attention !== 'none' && (
+          <AttentionPanel
+            kind={attention}
+            metrics={metrics}
+            energy={visor.snapshot?.energy}
+            alerts={visor.snapshot?.alerts}
+            healthLabel={healthLabel}
+            sampleSeconds={sampleSeconds}
+            onClose={() => setAttention('none')}
+            onNavigate={(view) => { setActiveView(view); setAttention('none'); }}
+          />
+        )}
       </main>
+
+      {focusMetric && <MetricOverlay metric={focusMetric} sampleSeconds={sampleSeconds} onClose={() => setFocusMetric(null)} />}
 
       {commandOpen && <CommandPalette onClose={() => setCommandOpen(false)} onNavigate={(view) => { setActiveView(view); setCommandOpen(false); }} />}
     </div>
@@ -248,15 +369,16 @@ interface OverviewProps extends MetricsProps, ProcessActions {
   hardware?: HardwareInfo;
   localAI?: LocalAiSnapshot;
   onViewProcesses: () => void;
+  onExpand: (metric: FocusMetric) => void;
 }
 
 const bytesToGb = (bytes = 0) => bytes / 1024 ** 3;
 const formatBytes = (bytes = 0) => bytes >= 1024 ** 3
   ? `${bytesToGb(bytes).toFixed(2)} GB`
   : `${(bytes / 1024 ** 2).toFixed(bytes >= 100 * 1024 ** 2 ? 0 : 1)} MB`;
-const sensorValue = (value: number, suffix: string) => value > 0 ? `${value.toFixed(1)}${suffix}` : 'Unavailable';
+const sensorValue = (value: number | null | undefined, suffix: string) => typeof value === 'number' && value > 0 ? `${value.toFixed(1)}${suffix}` : 'Unavailable';
 
-function Overview({ metrics, energy, hardware, localAI, processes, live, refreshing, onRefresh, onViewProcesses, onKill, onPriority }: OverviewProps) {
+function Overview({ metrics, energy, hardware, localAI, processes, live, refreshing, onRefresh, onViewProcesses, onKill, onPriority, onExpand }: OverviewProps) {
   const memoryUsed = bytesToGb(metrics.memory?.usedBytes);
   const memoryTotal = bytesToGb(metrics.memory?.totalBytes || hardware?.memory.totalBytes);
   const vramUsed = bytesToGb(metrics.gpuMemory?.usedBytes);
@@ -270,10 +392,11 @@ function Overview({ metrics, energy, hardware, localAI, processes, live, refresh
           value={metrics.cpu}
           tone="cyan"
           history={metrics.history.cpu}
+          onExpand={onExpand}
           stats={[
             ['Clock', metrics.cpuSpeedGhz ? `${metrics.cpuSpeedGhz.toFixed(2)} GHz` : 'Unavailable'],
             ['Temp', sensorValue(metrics.cpuTemp, '°C')],
-            ['Power', `~${Math.round(metrics.cpuPower)} W`],
+            ['Power', `${energy?.cpuMeasured ? '' : '~'}${Math.round(metrics.cpuPower)} W`],
           ]}
         />
         <MetricHero
@@ -282,6 +405,7 @@ function Overview({ metrics, energy, hardware, localAI, processes, live, refresh
           value={metrics.gpu}
           tone="violet"
           history={metrics.history.gpu}
+          onExpand={onExpand}
           stats={[
             ['VRAM', vramTotal ? `${vramTotal.toFixed(1)} GB` : 'Unavailable'],
             ['Temp', sensorValue(metrics.gpuTemp, '°C')],
@@ -343,9 +467,10 @@ interface MetricHeroProps {
   tone: MetricTone;
   history: number[];
   stats: [string, string][];
+  onExpand: (metric: FocusMetric) => void;
 }
 
-function MetricHero({ label, detail, value, tone, history, stats }: MetricHeroProps) {
+function MetricHero({ label, detail, value, tone, history, stats, onExpand }: MetricHeroProps) {
   const loadState = value >= 90 ? 'metric-critical' : value >= 75 ? 'metric-elevated' : '';
   return (
     <article className={`panel metric-hero tone-${tone} ${loadState}`}>
@@ -354,7 +479,7 @@ function MetricHero({ label, detail, value, tone, history, stats }: MetricHeroPr
           <div className="metric-label-line"><span className="metric-dot" />{label}{loadState && <em>{value >= 90 ? 'CRITICAL LOAD' : 'HIGH LOAD'}</em>}</div>
           <p>{detail}</p>
         </div>
-        <button className="expand-button" aria-label={`Expand ${label}`}><Maximize2 size={15} /></button>
+        <button className="expand-button" aria-label={`Expand ${label}`} title={`Expand ${label}`} onClick={() => onExpand({ label, detail, value, tone, history, stats })}><Maximize2 size={15} /></button>
       </div>
       <div className="metric-hero-body">
         <Donut value={value} tone={tone} label={label} size="large" />
@@ -395,6 +520,10 @@ function AIInsight({ processes, localAI }: { processes: ProcessInfo[]; localAI?:
   const model = localAI?.models.find((item) => item.status === 'active') || localAI?.models[0];
   const application = localAI?.applications.find((item) => item.application === model?.application) || (!model ? localAI?.applications[0] : undefined);
   const modelDetected = Boolean(model || application || workload);
+  // A runtime holding several models exposes one aggregate. Substituting it into
+  // a model-level row would let each model claim 100% of the same CPU, GPU and
+  // VRAM, so those rows say the figure is not separated instead of guessing.
+  const separable = (localAI?.loadedModelCount ?? 0) <= 1;
   return (
     <article className="panel insight-card ai-insight">
       <div className="insight-card-head">
@@ -404,9 +533,9 @@ function AIInsight({ processes, localAI }: { processes: ProcessInfo[]; localAI?:
       </div>
       <div className="model-name"><Sparkles size={16} /><strong>{model?.model || 'Waiting for a runtime API'}</strong><span>{model ? `${model.confidence}% exact` : workload ? `PID ${workload.id}` : 'LOCAL'}</span></div>
       <div className="model-stats">
-        <div><span>Application power</span><strong>~{(model?.applicationEnergyWatts ?? application?.energyWatts ?? workload?.energyWatts ?? 0).toFixed(1)} <small>W</small></strong></div>
-        <div><span>GPU activity</span><strong>{(model?.applicationGpu ?? application?.gpu ?? workload?.gpu ?? 0).toFixed(1)}%</strong></div>
-        <div><span>Model VRAM</span><strong>{(model?.allocatedVramGb ?? application?.vramGb ?? workload?.vram ?? 0).toFixed(1)} <small>GB</small></strong></div>
+        <div><span>Application power</span><strong>{model && !separable ? 'Not separated' : <>~{(model?.applicationEnergyWatts ?? application?.energyWatts ?? workload?.energyWatts ?? 0).toFixed(1)} <small>W</small></>}</strong></div>
+        <div><span>GPU activity</span><strong>{model && !separable ? 'Not separated' : <>{(model?.applicationGpu ?? application?.gpu ?? workload?.gpu ?? 0).toFixed(1)}%</>}</strong></div>
+        <div><span>Model VRAM</span><strong>{model && !separable ? 'Not separated' : <>{(model?.allocatedVramGb ?? application?.vramGb ?? workload?.vram ?? 0).toFixed(1)} <small>GB</small></>}</strong></div>
       </div>
     </article>
   );
@@ -430,7 +559,7 @@ function EfficiencyCard({ metrics, energy }: MetricsProps & { energy?: EnergyEst
 
 function ThermalCard({ metrics }: MetricsProps) {
   const sensedTemperatures = (metrics.temperatureReadings || []).map((reading) => reading.value).filter((value) => value > 0);
-  if (!sensedTemperatures.length) sensedTemperatures.push(...[metrics.cpuTemp, metrics.gpuTemp, metrics.ssdTemp || 0].filter((value) => value > 0));
+  if (!sensedTemperatures.length) sensedTemperatures.push(...[metrics.cpuTemp ?? 0, metrics.gpuTemp, metrics.ssdTemp || 0].filter((value) => value > 0));
   const hottestTemperature = sensedTemperatures.length ? Math.max(...sensedTemperatures) : 0;
   const thermalStatus = !hottestTemperature
     ? 'Sensors unavailable'
@@ -441,7 +570,7 @@ function ThermalCard({ metrics }: MetricsProps) {
         : 'Within range';
   const preferredReading = (component: 'CPU' | 'GPU' | 'Storage') => metrics.temperatureReadings?.find((reading) => reading.component === component);
   const thermalReadings = [
-    { label: 'CPU', value: preferredReading('CPU')?.value || metrics.cpuTemp, source: preferredReading('CPU')?.source || metrics.sensorSources?.cpu },
+    { label: 'CPU', value: preferredReading('CPU')?.value || (metrics.cpuTemp ?? 0), source: preferredReading('CPU')?.source || metrics.sensorSources?.cpu },
     { label: 'GPU', value: preferredReading('GPU')?.value || metrics.gpuTemp, source: preferredReading('GPU')?.source || metrics.sensorSources?.gpu },
     { label: 'SSD', value: preferredReading('Storage')?.value || metrics.ssdTemp || 0, source: preferredReading('Storage')?.source || metrics.storageTemperatures?.[0]?.name },
   ];
@@ -599,7 +728,7 @@ function HardwareView({ metrics, hardware, refreshing, onRefresh }: MetricsProps
 function ThermalMatrix({ metrics, refreshing, onRefresh }: MetricsProps & RefreshControls) {
   const readings = metrics.temperatureReadings?.filter((reading) => reading.value > 0) || [];
   const fallbackReadings: TemperatureReading[] = [
-    { component: 'CPU' as const, name: 'CPU package', value: metrics.cpuTemp, min: null, max: null, source: metrics.sensorSources?.cpu || 'Hardware monitor', accuracy: 'hardware-monitor' },
+    { component: 'CPU' as const, name: 'CPU package', value: metrics.cpuTemp ?? 0, min: null, max: null, source: metrics.sensorSources?.cpu || 'Sensor unavailable', accuracy: metrics.sensorSources?.cpu ? 'hardware-monitor' : 'unavailable' },
     { component: 'GPU' as const, name: 'GPU core', value: metrics.gpuTemp, min: null, max: null, source: metrics.sensorSources?.gpu || 'Graphics driver', accuracy: 'graphics-driver' },
     { component: 'Storage' as const, name: metrics.storageTemperatures?.[0]?.name || 'Primary storage', value: metrics.ssdTemp || 0, min: null, max: null, source: metrics.storageTemperatures?.[0]?.source || 'Storage health', accuracy: 'storage-health' },
   ].filter((reading) => reading.value > 0);
@@ -623,25 +752,36 @@ function ThermalMatrix({ metrics, refreshing, onRefresh }: MetricsProps & Refres
   );
 }
 
-function Performance({ metrics, hardware, refreshing, onRefresh }: MetricsProps & { hardware?: HardwareInfo } & RefreshControls) {
+function Performance({ metrics, hardware, refreshing, onRefresh, onExpand }: MetricsProps & { hardware?: HardwareInfo; onExpand: (metric: FocusMetric) => void } & RefreshControls) {
   const memoryUsed = bytesToGb(metrics.memory?.usedBytes);
   const memoryTotal = bytesToGb(metrics.memory?.totalBytes || hardware?.memory.totalBytes);
   const vramUsed = bytesToGb(metrics.gpuMemory?.usedBytes);
   const vramTotal = bytesToGb(metrics.gpuMemory?.totalBytes || hardware?.gpu?.vramBytes);
   const coreCount = hardware?.cpu.physicalCores || hardware?.cpu.cores;
-  const cards: Array<{ key: MetricKey | 'network' | 'disk'; label: string; value: string; detail: string; tone: MetricTone; icon: React.ReactNode }> = [
-    { key: 'cpu', label: hardware?.cpu.brand.trim() || 'Processor', value: `${metrics.cpu.toFixed(1)}%`, detail: `${sensorValue(metrics.cpuTemp, '°C')} · ${metrics.cpuSpeedGhz ? `${metrics.cpuSpeedGhz.toFixed(2)} GHz` : 'Clock unavailable'} · ${coreCount ? `${coreCount} cores` : 'Core count unavailable'}`, tone: 'cyan', icon: <Cpu /> },
-    { key: 'gpu', label: hardware?.gpu?.model || 'Graphics', value: `${Math.round(metrics.gpu)}%`, detail: `${sensorValue(metrics.gpuTemp, '°C')} · ${Math.round(metrics.gpuPower)} W`, tone: 'violet', icon: <Gauge /> },
-    { key: 'ram', label: 'Memory', value: `${Math.round(metrics.ram)}%`, detail: memoryTotal ? `${memoryUsed.toFixed(1)} / ${memoryTotal.toFixed(1)} GB` : 'Capacity unavailable', tone: 'mint', icon: <MemoryStick /> },
-    { key: 'vram', label: 'Video memory', value: `${Math.round(metrics.vram)}%`, detail: vramTotal ? `${vramUsed.toFixed(1)} / ${vramTotal.toFixed(1)} GB` : 'Capacity unavailable', tone: 'amber', icon: <CircleGauge /> },
-    { key: 'disk', label: hardware?.storage[0]?.name || 'Storage', value: `${metrics.diskRead.toFixed(1)} MB/s`, detail: `${sensorValue(metrics.ssdTemp || 0, '°C')} · ${metrics.diskWrite.toFixed(1)} MB/s write`, tone: 'rose', icon: <HardDrive /> },
-    { key: 'network', label: 'Network', value: `${metrics.download.toFixed(1)} Mbps`, detail: `${metrics.upload.toFixed(1)} Mbps upload`, tone: 'cyan', icon: <Network /> },
+  const cards: Array<{
+    key: MetricKey | 'network' | 'disk';
+    label: string;
+    value: string;
+    detail: string;
+    tone: MetricTone;
+    icon: React.ReactNode;
+    /// The figure the chart is drawn against, so the overlay's dial and the card
+    /// cannot disagree about the same instant.
+    numeric: number;
+    stats: [string, string][];
+  }> = [
+    { key: 'cpu', label: hardware?.cpu.brand.trim() || 'Processor', value: `${metrics.cpu.toFixed(1)}%`, detail: `${sensorValue(metrics.cpuTemp, '°C')} · ${metrics.cpuSpeedGhz ? `${metrics.cpuSpeedGhz.toFixed(2)} GHz` : 'Clock unavailable'} · ${coreCount ? `${coreCount} cores` : 'Core count unavailable'}`, tone: 'cyan', icon: <Cpu />, numeric: metrics.cpu, stats: [['Load', `${metrics.cpu.toFixed(1)}%`], ['Clock', metrics.cpuSpeedGhz ? `${metrics.cpuSpeedGhz.toFixed(2)} GHz` : 'Unavailable'], ['Temp', sensorValue(metrics.cpuTemp, '°C')], ['Power', `${Math.round(metrics.cpuPower)} W`]] },
+    { key: 'gpu', label: hardware?.gpu?.model || 'Graphics', value: `${Math.round(metrics.gpu)}%`, detail: `${sensorValue(metrics.gpuTemp, '°C')} · ${Math.round(metrics.gpuPower)} W`, tone: 'violet', icon: <Gauge />, numeric: metrics.gpu, stats: [['Load', `${metrics.gpu.toFixed(1)}%`], ['VRAM', vramTotal ? `${vramUsed.toFixed(1)} / ${vramTotal.toFixed(1)} GB` : 'Unavailable'], ['Temp', sensorValue(metrics.gpuTemp, '°C')], ['Power', `${Math.round(metrics.gpuPower)} W`]] },
+    { key: 'ram', label: 'Memory', value: `${Math.round(metrics.ram)}%`, detail: memoryTotal ? `${memoryUsed.toFixed(1)} / ${memoryTotal.toFixed(1)} GB` : 'Capacity unavailable', tone: 'mint', icon: <MemoryStick />, numeric: metrics.ram, stats: [['In use', memoryTotal ? `${memoryUsed.toFixed(1)} GB` : 'Unavailable'], ['Available', memoryTotal ? `${(memoryTotal - memoryUsed).toFixed(1)} GB` : 'Unavailable'], ['Committed', metrics.memory ? formatBytes(metrics.memory.committedBytes) : 'Unavailable']] },
+    { key: 'vram', label: 'Video memory', value: `${Math.round(metrics.vram)}%`, detail: vramTotal ? `${vramUsed.toFixed(1)} / ${vramTotal.toFixed(1)} GB` : 'Capacity unavailable', tone: 'amber', icon: <CircleGauge />, numeric: metrics.vram, stats: [['Used', vramTotal ? `${vramUsed.toFixed(2)} GB` : 'Unavailable'], ['Total', vramTotal ? `${vramTotal.toFixed(1)} GB` : 'Unavailable']] },
+    { key: 'disk', label: hardware?.storage[0]?.name || 'Storage', value: `${metrics.diskRead.toFixed(1)} MB/s`, detail: `${sensorValue(metrics.ssdTemp || 0, '°C')} · ${metrics.diskWrite.toFixed(1)} MB/s write`, tone: 'rose', icon: <HardDrive />, numeric: metrics.diskActivity || (metrics.diskRead + metrics.diskWrite) / 4, stats: [['Read', `${metrics.diskRead.toFixed(1)} MB/s`], ['Write', `${metrics.diskWrite.toFixed(1)} MB/s`], ['Drive temp', sensorValue(metrics.ssdTemp || 0, '°C')]] },
+    { key: 'network', label: 'Network', value: `${metrics.download.toFixed(1)} Mbps`, detail: `${metrics.upload.toFixed(1)} Mbps upload`, tone: 'cyan', icon: <Network />, numeric: Math.min(100, metrics.download * 1.5), stats: [['Download', `${metrics.download.toFixed(1)} Mbps`], ['Upload', `${metrics.upload.toFixed(1)} Mbps`]] },
   ];
   return (
     <div className="performance-grid">
       {cards.map((card) => (
         <article key={card.label} className={`panel performance-card tone-${card.tone}`}>
-          <div className="performance-card-head"><span>{card.icon}</span><div><p>{card.label}</p><strong>{card.value}</strong><small>{card.detail}</small></div><button className="expand-button"><Maximize2 size={15} /></button></div>
+          <div className="performance-card-head"><span>{card.icon}</span><div><p>{card.label}</p><strong>{card.value}</strong><small>{card.detail}</small></div><button className="expand-button" aria-label={`Expand ${card.label}`} title={`Expand ${card.label}`} onClick={() => onExpand({ label: card.label, detail: card.detail, value: card.numeric, tone: card.tone, history: metrics.history[card.key], stats: card.stats })}><Maximize2 size={15} /></button></div>
           <div className="performance-chart"><LineChart values={metrics.history[card.key]} tone={card.tone} height={156} /></div>
           <div className="chart-axis"><span>60 seconds ago</span><span>Now</span></div>
         </article>
@@ -665,23 +805,40 @@ const tokenSpeed = (minimum: number | null, maximum: number | null, workload: 'g
   ? 'Embedding model'
   : minimum !== null && maximum !== null ? `${minimum}–${maximum} tok/s` : 'Speed unknown';
 
-function AIWorkloads({ metrics, localAI, hardware, refreshing, onRefresh }: MetricsProps & { localAI?: LocalAiSnapshot; hardware?: HardwareInfo } & RefreshControls) {
+function AIWorkloads({ metrics, localAI, hardware, throughputHistory, refreshing, onRefresh }: MetricsProps & { localAI?: LocalAiSnapshot; hardware?: HardwareInfo; throughputHistory: ThroughputSampleInfo[] } & RefreshControls) {
   const preferredModel = localAI?.models.find((item) => item.status === 'active') || localAI?.models.find((item) => item.status === 'loaded') || localAI?.models[0];
   const [selectedModelId, setSelectedModelId] = useState('');
+  const [plannerContext, setPlannerContext] = useState(4096);
   const model = localAI?.models.find((item) => item.id === selectedModelId) || preferredModel;
   const application = localAI?.applications.find((item) => item.application === model?.application) || (!model ? localAI?.applications[0] : undefined);
   const runtimeProcess = model?.process || application?.processes.find((item) => item.role === 'model-runner' || item.role === 'runtime') || application?.processes[0];
   const allocatedRamGb = bytesToGb(model?.allocatedRamBytes);
-  const modelVramGb = model?.allocatedVramGb || (model?.status !== 'detected' ? application?.vramGb : 0) || 0;
+  // The application's total VRAM may only stand in for a model when that runtime
+  // holds exactly one loaded model; otherwise both models claim the same memory.
+  const modelSeparable = (localAI?.loadedModelCount ?? 0) <= 1;
+  const modelVramGb = model?.allocatedVramGb || (modelSeparable && model?.status !== 'detected' ? application?.vramGb : 0) || 0;
   const totalVramGb = bytesToGb(metrics.gpuMemory?.totalBytes);
   const appEnergy = model?.applicationEnergyWatts ?? application?.energyWatts ?? 0;
   const exactModel = Boolean(model);
-  const compatibility = model ? analyzeLocalModel(model, hardware) : null;
+  const compatibility = model ? analyzeLocalModel(model, hardware, { contextTokens: plannerContext }) : null;
   const selectedModelSize = model ? modelSizeParts(model) : null;
   const installedModels = localAI?.models || [];
   const services = localAI?.applications || [];
   const cloudProviders = localAI?.cloudProviders || [];
   const detectedProviderCount = cloudProviders.filter((provider) => provider.detected).length;
+  const throughput = metrics.throughput;
+  const measuredDecode = throughput?.decodeTokensPerSecond ?? null;
+  const measuredPrefill = throughput?.prefillTokensPerSecond ?? null;
+  const throughputEvidence = throughput?.evidence || 'unavailable';
+  const throughputAgeSeconds = throughput?.ageSeconds ?? null;
+  // A logged completion stays readable after the request ends; that is the last
+  // measured result, not a live rate, and the chip has to say so.
+  const throughputChip = throughputEvidence === 'last-runtime-log'
+    ? `LOG · LAST COMPLETION${throughputAgeSeconds !== null ? ` ${Math.round(throughputAgeSeconds)}s ago` : ''}`
+    : throughputEvidence === 'runtime-log' ? 'LOG MEASURED' : 'METRICS MEASURED';
+  const throughputOrigin = throughputEvidence === 'metrics-endpoint'
+    ? `metrics endpoint${throughput?.source ? ` · ${throughput.source}` : ''}`
+    : 'Ollama server log';
   return (
     <div className="ai-page-grid">
       <section className="panel ai-model-card">
@@ -695,12 +852,54 @@ function AIWorkloads({ metrics, localAI, hardware, refreshing, onRefresh }: Metr
           <div><span>RUNTIME</span><strong>{model?.runtime || application?.runtime || '—'}</strong></div><em>→</em>
           <div><span>MODEL</span><strong>{model?.model || 'Not reported'}</strong></div>
         </div>
-        {compatibility && <div className={`compatibility-banner fit-${compatibility.state}`}><div><span>HARDWARE FIT</span><strong>{compatibility.label}</strong><small>{compatibility.requiredMemoryGb.toFixed(1)} GB estimated · {compatibility.mode.toUpperCase()}</small></div><div><span>{compatibility.workload === 'embedding' ? 'EMBEDDING WORKLOAD' : 'ESTIMATED GENERATION'}</span><strong>{tokenSpeed(compatibility.estimatedTpsMin, compatibility.estimatedTpsMax, compatibility.workload)}</strong><small>{compatibility.workload === 'embedding' ? 'generation tok/s does not apply' : `${compatibility.confidence} confidence · not a benchmark`}</small></div></div>}
+        {compatibility && <>
+          <div className={`compatibility-banner fit-${compatibility.state}`}>
+            <div><span>HARDWARE FIT</span><strong>{compatibility.label}</strong><small>{compatibility.requiredMemoryGb.toFixed(1)} GB required · {compatibility.mode.toUpperCase()}</small></div>
+            <div><span>{compatibility.workload === 'embedding' ? 'EMBEDDING WORKLOAD' : 'ESTIMATED GENERATION'}</span><strong>{tokenSpeed(compatibility.estimatedTpsMin, compatibility.estimatedTpsMax, compatibility.workload)}</strong><small>{compatibility.workload === 'embedding' ? 'generation tok/s does not apply' : `${compatibility.estimatedTpsCenter ?? '—'} tok/s center · ${compatibility.confidenceScore}% input confidence`}</small></div>
+            <div><span>PRIMARY BOTTLENECK</span><strong>{compatibility.bottleneck}</strong><small>{compatibility.gpuOffloadPercent.toFixed(0)}% GPU offload · {compatibility.effectiveBandwidthGbps?.toFixed(1) || '—'} effective GB/s</small></div>
+          </div>
+          <section className="inference-planner" aria-label="Inference memory and context planner">
+            <div className="planner-header"><div><span>INFERENCE PLANNER</span><strong>RAM + VRAM capacity model</strong></div><div className="context-presets" aria-label="Assumed context length">{[2048, 4096, 8192, 16384, 32768].map((tokens) => <button key={tokens} className={plannerContext === tokens ? 'active' : ''} onClick={() => setPlannerContext(tokens)}>{tokens / 1024}K</button>)}</div></div>
+            <div className="memory-equation">
+              <div><span>Model weights</span><strong>{compatibility.modelWeightGb.toFixed(1)} GB</strong></div><em>+</em>
+              <div><span>KV cache · {(compatibility.assumedContextTokens / 1024).toFixed(compatibility.assumedContextTokens % 1024 ? 1 : 0)}K</span><strong>{compatibility.kvCacheGb.toFixed(2)} GB</strong></div><em>+</em>
+              <div><span>Runtime</span><strong>{compatibility.runtimeOverheadGb.toFixed(1)} GB</strong></div><em>=</em>
+              <div className="memory-total"><span>Required</span><strong>{compatibility.requiredMemoryGb.toFixed(1)} GB</strong></div>
+            </div>
+            <div className="memory-capacity-track"><i style={{ width: `${Math.min(100, compatibility.requiredMemoryGb / Math.max(.1, compatibility.usableCombinedMemoryGb) * 100)}%` }} /><span className="vram-boundary" style={{ left: `${Math.min(100, compatibility.availableVramGb / Math.max(.1, compatibility.usableCombinedMemoryGb) * 100)}%` }} /></div>
+            <div className="memory-capacity-legend"><span><i className="legend-vram" />{compatibility.isUnifiedMemory ? 'Unified memory pool' : `${compatibility.availableVramGb.toFixed(1)} GB usable VRAM`}</span><span><i className="legend-ram" />{compatibility.availableRamGb.toFixed(1)} GB usable RAM</span><strong>{compatibility.usableCombinedMemoryGb.toFixed(1)} GB usable combined</strong></div>
+            {compatibility.offloadPlan && (
+              <div className="offload-plan" aria-label="Layer offload plan">
+                <div className="offload-plan-head">
+                  <span>LAYER OFFLOAD PLAN</span>
+                  <small>Predicted speed per placement · modeled from exact GGUF layers + weights</small>
+                </div>
+                <div className="offload-plan-grid">
+                  {compatibility.offloadPlan.map((step) => (
+                    <button
+                      key={step.layersOnGpu}
+                      type="button"
+                      className={`offload-step tone-${step.fitsVram ? 'mint' : 'rose'}${step.fitsVram ? ' fits' : ' over'}`}
+                      title={step.fitsVram ? 'Fits in usable VRAM' : 'Exceeds usable VRAM'}
+                    >
+                      <i>{step.fitsVram ? 'FITS' : 'OVER'}</i>
+                      <strong>{step.layersOnGpu}<small>/{step.layersTotal} layers</small></strong>
+                      <em>{step.estimatedTpsCenter ?? '—'} <small>tok/s</small></em>
+                      <span>{step.vramNeededGb.toFixed(1)} GB on GPU</span>
+                    </button>
+                  ))}
+                </div>
+                <small className="offload-plan-note">The best fitting placement is a starting point for <code>num_gpu</code>; a local benchmark remains authoritative.</small>
+              </div>
+            )}
+            <p className={compatibility.memoryDeficitGb > 0 ? 'planner-warning' : ''}>{compatibility.memoryDeficitGb > 0 ? `${compatibility.memoryDeficitGb.toFixed(1)} GB beyond fast memory. Speed is still modeled using conditional mmap/pagefile access and may vary sharply.` : `${(compatibility.ramReserveGb + compatibility.vramReserveGb).toFixed(1)} GB reserved for the OS/display. ${compatibility.reason}`}</p>
+          </section>
+        </>}
         <div className="ai-primary-stats">
           {model?.status === 'detected' ? <>
             <div><span>Installed model size</span><strong>{selectedModelSize?.value || '—'}</strong><small>{selectedModelSize?.unit === 'size unavailable' ? selectedModelSize.unit : `${selectedModelSize?.unit} on disk`}</small></div>
             <div><span>Estimated memory need</span><strong>{compatibility?.requiredMemoryGb.toFixed(1) || '—'}</strong><small>GB including runtime overhead</small></div>
-            <div><span>{compatibility?.workload === 'embedding' ? 'Workload type' : 'Estimated generation'}</span><strong>{compatibility?.workload === 'embedding' ? 'EMBED' : compatibility?.estimatedTpsMax ?? '—'}</strong><small>{compatibility?.workload === 'embedding' ? 'generation speed is not applicable' : 'tok/s upper range · not loaded'}</small></div>
+            <div><span>{compatibility?.workload === 'embedding' ? 'Workload type' : 'Estimated generation'}</span><strong>{compatibility?.workload === 'embedding' ? 'EMBED' : compatibility?.estimatedTpsCenter ?? '—'}</strong><small>{compatibility?.workload === 'embedding' ? 'generation speed is not applicable' : 'tok/s modeled center · not loaded'}</small></div>
           </> : <>
             <div><span>Model VRAM allocation</span><strong>{modelVramGb.toFixed(2)}</strong><small>GB reported by {model?.application || 'process counters'}</small></div>
             <div><span>Model RAM allocation</span><strong>{allocatedRamGb.toFixed(2)}</strong><small>GB outside VRAM</small></div>
@@ -709,11 +908,44 @@ function AIWorkloads({ metrics, localAI, hardware, refreshing, onRefresh }: Metr
         </div>
         <div className="model-spec-grid">
           <div><span>Family</span><strong>{model?.family || 'Not reported'}</strong></div>
-          <div><span>Parameters</span><strong>{model?.parameters || 'Not reported'}</strong></div>
+          <div><span>Parameters</span><strong>{model?.parameters || 'Not reported'}{model?.parameterCountExact ? <em className="exact-tag">GGUF exact</em> : null}</strong></div>
           <div><span>Quantization</span><strong>{model?.quantization || 'Not reported'}</strong></div>
           <div><span>Context capacity</span><strong>{model?.contextLength ? `${model.contextLength.toLocaleString()} tokens` : 'Not reported'}</strong></div>
+          {model?.moe && <div><span>MoE routing</span><strong>{model.activeExperts} of {model.experts} experts</strong></div>}
         </div>
-        <div className="inference-chart-head"><div><strong>System GPU activity</strong><span>Live context while this runtime is present — not claimed as token throughput.</span></div><span className="source-chip">{model?.source || 'Operating system process counters'}</span></div>
+        <div className="inference-chart-head"><div><strong>{measuredDecode !== null ? (throughputEvidence === 'last-runtime-log' ? 'Last measured generation speed' : 'Measured generation speed') : 'System GPU activity'}</strong><span>{measuredDecode !== null ? `Exact per-request rates from the runtime (${throughputOrigin})${throughputEvidence === 'last-runtime-log' ? ' — no generation in progress' : ''}.` : 'Live context while this runtime is present — not claimed as token throughput.'}</span></div><span className={`source-chip${measuredDecode !== null ? ' source-measured' : ''}`}>{measuredDecode !== null ? throughputChip : model?.source || 'Operating system process counters'}</span></div>
+        {measuredDecode !== null && (
+          <div className="measured-strip">
+            <div className="measured-cell tone-mint">
+              <span>Decode · measured</span>
+              <strong>{measuredDecode.toFixed(1)}<small> tok/s</small></strong>
+            </div>
+            <div className="measured-cell tone-cyan">
+              <span>Prefill · measured</span>
+              <strong>{measuredPrefill !== null ? measuredPrefill.toFixed(1) : '—'}<small> tok/s</small></strong>
+            </div>
+            <div className="measured-cell tone-violet">
+              <span>Last request</span>
+              <strong>{throughput?.lastTokens ?? '—'}<small> tokens</small></strong>
+            </div>
+          </div>
+        )}
+        {throughputHistory.length > 1 && (
+          <section className="throughput-history" aria-label="Measured throughput history">
+            <div className="throughput-history-head">
+              <span>SESSION THROUGHPUT · {throughputHistory.length} measured samples</span>
+              <small>in-memory · this collector session only</small>
+            </div>
+            <div className="throughput-history-chart">
+              <LineChart values={throughputHistory.map((sample) => sample.decodeTps)} tone="mint" height={90} compact maximum={niceCeiling(throughputHistory.map((sample) => sample.decodeTps))} ariaLabel="Measured decode tokens per second history" />
+            </div>
+            <div className="throughput-history-stats">
+              <span><i className="avg" />Mean of samples <strong>{Math.round(throughputHistory.reduce((sum, sample) => sum + sample.decodeTps, 0) / throughputHistory.length)} tok/s</strong></span>
+              <span><i className="peak" />Peak <strong>{throughputHistory.reduce((highest, sample) => Math.max(highest, sample.decodeTps), 0).toFixed(1)} tok/s</strong></span>
+              <span><i className="total" /><strong>{throughputHistory.reduce((sum, sample) => sum + sample.tokens, 0).toLocaleString()}</strong> tokens total</span>
+            </div>
+          </section>
+        )}
         <div className="inference-chart"><LineChart values={metrics.history.gpu} tone="violet" height={180} /></div>
       </section>
       <aside className="ai-side-column">
@@ -723,15 +955,15 @@ function AIWorkloads({ metrics, localAI, hardware, refreshing, onRefresh }: Metr
       </aside>
       <section className="panel ai-inventory-card">
         <div className="panel-header"><div><p className="eyebrow">LOCAL MODEL CHECKER</p><h2>What this machine can actually run</h2></div><span>{localAI?.installedModelCount || installedModels.length} models inventoried</span></div>
-        <div className="inventory-hardware-strip"><span><Server size={15} /><strong>{hardware?.gpu?.model || 'GPU unavailable'}</strong><small>{bytesToGb(hardware?.gpu?.vramBytes).toFixed(1)} GB VRAM</small></span><span><Cpu size={15} /><strong>{hardware?.cpu.brand || 'CPU unavailable'}</strong><small>{hardware?.cpu.physicalCores || hardware?.cpu.cores || 0} physical cores</small></span><span><MemoryStick size={15} /><strong>{bytesToGb(hardware?.memory.totalBytes).toFixed(1)} GB RAM</strong><small>OS reserve included in every verdict</small></span></div>
+        <div className="inventory-hardware-strip"><span><Server size={15} /><strong>{hardware?.gpu?.model || 'GPU unavailable'}</strong><small>{bytesToGb(hardware?.gpu?.vramBytes).toFixed(1)} GB VRAM</small></span><span><Cpu size={15} /><strong>{hardware?.cpu.brand || 'CPU unavailable'}</strong><small>{hardware?.cpu.physicalCores || hardware?.cpu.cores || 0} physical cores</small></span><span><MemoryStick size={15} /><strong>{compatibility?.totalCombinedMemoryGb.toFixed(1) || bytesToGb(hardware?.memory.totalBytes).toFixed(1)} GB combined</strong><small>{compatibility?.isUnifiedMemory ? 'shared unified pool · counted once' : `${compatibility?.totalRamGb.toFixed(1) || '—'} RAM + ${compatibility?.totalVramGb.toFixed(1) || '—'} VRAM`}</small></span></div>
         <div className="model-inventory-list">
           {installedModels.length === 0 && <div className="ai-empty-state"><Bot size={20} /><div><strong>No local model found yet</strong><span>VISOR checked nine loopback adapters, Ollama manifests, common model libraries and known weight formats.</span></div></div>}
           {installedModels.map((item) => {
-            const fit = analyzeLocalModel(item, hardware);
+            const fit = analyzeLocalModel(item, hardware, { contextTokens: plannerContext });
             return <button key={item.id} className={item.id === model?.id ? 'selected' : ''} onClick={() => setSelectedModelId(item.id)}><div className="model-inventory-name"><strong>{item.model}</strong><span>{item.application} · {item.quantization || item.format?.toUpperCase() || 'metadata partial'}</span></div><span className="model-size-cell">{modelSize(item)}<small>{item.status}</small></span><span className={`fit-badge fit-${fit.state}`}>{fit.label}<small>{fit.mode}</small></span><span className="speed-cell">{tokenSpeed(fit.estimatedTpsMin, fit.estimatedTpsMax, fit.workload)}<small>{fit.workload === 'embedding' ? 'no generation tok/s' : `${fit.confidence} confidence`}</small></span></button>;
           })}
         </div>
-        <p className="advisor-disclaimer">Predictions are conservative engineering ranges based on model weight, quantization, usable VRAM/RAM, CPU class and execution mode. Run a benchmark to replace the estimate with measured throughput.</p>
+        <p className="advisor-disclaimer">Generation ranges model weight streaming, KV context, detected RAM topology, GPU memory bandwidth, quantization and offload mode. Models beyond RAM + VRAM still receive a conditional paging estimate. A local benchmark remains the authoritative measurement.</p>
       </section>
       <section className="panel ai-services-card">
         <div className="panel-header"><div><p className="eyebrow">AI SERVICE ATTRIBUTION</p><h2>Detected local runtimes and cloud clients</h2></div><span>{services.length} services · live process totals</span></div>
@@ -808,19 +1040,26 @@ function EnergyView({ energy, processes, agent }: { energy?: EnergyEstimate; pro
   );
 }
 
-function HistoryView({ metrics, energy, agent }: MetricsProps & { energy?: EnergyEstimate; agent?: AgentInfo }) {
-  const [range, setRange] = useState('1 hour');
+function HistoryView({ metrics, energy, agent, pollMs }: MetricsProps & { energy?: EnergyEstimate; agent?: AgentInfo; pollMs?: number }) {
+  // The collector keeps one rolling buffer; labeling it as anything longer
+  // would fabricate retention we do not have. There is no range picker because
+  // there is nothing older to show.
   const history = metrics.history.cpu;
   const average = (values: number[]) => values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
   const peak = (values: number[]) => values.length ? Math.max(...values) : 0;
   const uptimeMinutes = Math.floor((agent?.uptimeSeconds || 0) / 60);
+  // Derived from the interval the collector actually achieved, not the 1.1 s it
+  // asks for: the heavy Windows collectors regularly overrun that target, and a
+  // hardcoded label quietly misstated how far apart the plotted points are.
+  const sampleSeconds = pollMs && pollMs > 0 ? pollMs / 1000 : 1.1;
+  const bufferSeconds = Math.round(history.length * sampleSeconds);
   return (
     <div className="history-grid">
       <section className="panel history-chart-card">
-        <div className="panel-header"><div><p className="eyebrow">SYSTEM LOAD</p><h2>Performance timeline</h2></div><div className="segmented-control">{['1 hour', '24 hours', '7 days'].map((item) => <button key={item} className={range === item ? 'active' : ''} onClick={() => setRange(item)}>{item}</button>)}</div></div>
+        <div className="panel-header"><div><p className="eyebrow">SYSTEM LOAD</p><h2>Performance timeline</h2></div><span className="history-buffer-chip">Live buffer only</span></div>
         <div className="history-legend"><span><i className="cyan-legend" />CPU average {average(metrics.history.cpu).toFixed(1)}%</span><span><i className="violet-legend" />GPU average {average(metrics.history.gpu).toFixed(1)}%</span></div>
         <div className="history-main-chart"><LineChart values={history} tone="cyan" height={250} /></div>
-        <div className="history-axis"><span>{history.length} samples ago</span><span>Rolling live buffer</span><span>Now</span></div>
+        <div className="history-axis"><span>{bufferSeconds} seconds ago</span><span>Last {bufferSeconds} s · {sampleSeconds.toFixed(1)} s samples</span><span>Now</span></div>
       </section>
       <section className="peak-grid">
         <PeakCard label="Peak CPU" value={`${peak(metrics.history.cpu).toFixed(1)}%`} time="Rolling buffer" icon={<Cpu />} />
@@ -874,7 +1113,17 @@ function AlertsView({ alerts, live, onToggle }: { alerts?: AlertsSnapshot; live:
   );
 }
 
-function SettingsView({ theme, setTheme, metrics, hardware, agent, source }: { theme: ThemeId; setTheme: (theme: ThemeId) => void; metrics: MetricsProps['metrics']; hardware?: HardwareInfo; agent?: AgentInfo; source?: 'windows-agent' | 'tauri-native' }) {
+function SettingsView({ settings, onUpdate, metrics, energy, hardware, agent, source, alerts }: {
+  settings: VisorSettings;
+  onUpdate: (patch: Partial<VisorSettings>) => void;
+  metrics: MetricsProps['metrics'];
+  energy?: EnergyEstimate;
+  hardware?: HardwareInfo;
+  agent?: AgentInfo;
+  source?: 'windows-agent' | 'tauri-native';
+  alerts?: AlertsSnapshot;
+}) {
+  const desktop = isDesktop();
   const platform = hardware?.os.platform || 'operating system';
   const themes: Array<{ id: ThemeId; name: string; description: string; icon: React.ReactNode }> = [
     { id: 'studio', name: 'Studio', description: 'Graphite glass, restrained color', icon: <Sparkles size={15} /> },
@@ -884,29 +1133,208 @@ function SettingsView({ theme, setTheme, metrics, hardware, agent, source }: { t
   ];
   return (
     <div className="settings-grid">
-      <section className="panel settings-card appearance-card"><div className="settings-heading"><span><Palette /></span><div><h2>Appearance</h2><p>Four distinct art directions. The information hierarchy and contrast stay consistent.</p></div></div><div className="theme-choices">{themes.map((item) => <button key={item.id} aria-pressed={theme === item.id} className={theme === item.id ? 'active' : ''} onClick={() => setTheme(item.id)}><span className={`theme-preview theme-${item.id}`}><i /><b /><em /></span><strong>{item.icon}{item.name}</strong><small>{item.description}</small></button>)}</div></section>
-      <section className="panel settings-card"><div className="settings-heading"><span><Activity /></span><div><h2>Live data sources</h2><p>VISOR exposes coverage honestly. Missing hardware sensors are never replaced with invented values.</p></div></div><SettingStatus label="Collector runtime" detail={`One batched ${platform} snapshot every second`} value={agent ? (source === 'tauri-native' ? 'NATIVE' : 'LOOPBACK') : 'OFFLINE'} tone={agent ? 'live' : 'off'} /><SettingStatus label="Collector overhead" detail={agent ? `${agent.sampleDurationMs} ms last sample · PID ${agent.pid}` : 'Waiting for collector diagnostics'} value={agent ? `${agent.cpuPercent.toFixed(1)}% · ${agent.memoryMb.toFixed(0)} MB` : 'UNAVAILABLE'} tone={agent ? 'live' : 'off'} /><SettingStatus label="Per-process GPU attribution" detail={`Vendor and ${platform} GPU counters when available`} value={agent?.gpuAttributionAvailable ? 'AVAILABLE' : 'UNAVAILABLE'} tone={agent?.gpuAttributionAvailable ? 'live' : 'off'} /><SettingStatus label="CPU temperature" detail={metrics.sensorSources?.cpu || 'No compatible native hardware sensor is exposed on this system'} value={metrics.cpuTemp > 0 ? `${Math.round(metrics.cpuTemp)}°C` : 'UNAVAILABLE'} tone={metrics.cpuTemp > 0 ? 'live' : 'off'} /><SettingStatus label="SSD temperature" detail={metrics.storageTemperatures?.[0]?.source || 'No compatible storage temperature sensor is exposed on this system'} value={(metrics.ssdTemp || 0) > 0 ? `${Math.round(metrics.ssdTemp || 0)}°C` : 'UNAVAILABLE'} tone={(metrics.ssdTemp || 0) > 0 ? 'live' : 'off'} /></section>
-      <section className="panel settings-card"><div className="settings-heading"><span><ShieldCheck /></span><div><h2>Privacy and trust</h2><p>Telemetry and runtime probes stay on this device.</p></div></div><SettingStatus label="Network boundary" detail={source === 'tauri-native' ? 'Native IPC; no telemetry HTTP server is started' : 'Browser agent bound to IPv4 loopback only'} value={source === 'tauri-native' ? 'IPC ONLY' : '127.0.0.1'} tone="live" /><SettingStatus label="External telemetry" detail="VISOR sends no hardware or model data to a remote service" value="OFF" tone="live" /></section>
+      <section className="panel settings-card appearance-card"><div className="settings-heading"><span><Palette /></span><div><h2>Appearance</h2><p>Four distinct art directions. The information hierarchy and contrast stay consistent.</p></div></div><div className="theme-choices">{themes.map((item) => <button key={item.id} aria-pressed={settings.theme === item.id} className={settings.theme === item.id ? 'active' : ''} onClick={() => onUpdate({ theme: item.id })}><span className={`theme-preview theme-${item.id}`}><i /><b /><em /></span><strong>{item.icon}{item.name}</strong><small>{item.description}</small></button>)}</div></section>
+
+      <section className="panel settings-card">
+        <div className="settings-heading"><span><Bell /></span><div><h2>Desktop behaviour</h2><p>How VISOR works when the window is not in front.</p></div></div>
+        <SettingSwitch label="System notifications" detail="Fires once per sustained alert, when the condition first trips." checked={settings.notifications} disabled={!desktop} onChange={(value) => onUpdate({ notifications: value })} />
+        <SettingSwitch label="Keep monitoring when the window closes" detail="The close button hides VISOR to the tray instead of quitting. Quit from the tray menu or File ‣ Quit." checked={settings.closeToTray} disabled={!desktop} onChange={(value) => onUpdate({ closeToTray: value })} />
+        <SettingSwitch label="Start with the system" detail="Launches VISOR minimized when you sign in. Off unless you turn it on." checked={settings.autostart} disabled={!desktop} onChange={(value) => onUpdate({ autostart: value })} />
+        {!desktop && <p className="setting-note">These three need the desktop shell. In the browser preview against the development agent there is no tray, menu or system notification to configure.</p>}
+        {desktop && <p className="setting-note">{activeAlertHint(alerts)}</p>}
+      </section>
+
+      <section className="panel settings-card">
+        <div className="settings-heading"><span><Leaf /></span><div><h2>Energy assumptions</h2><p>The projection multiplies live watts by these figures. They are assumptions, not measurements of your meter.</p></div></div>
+        <div className="setting-fields">
+          <label className="setting-field"><span>Electricity price</span><input type="number" min={0} max={5} step={0.01} inputMode="decimal" value={settings.tariffPerKwh} disabled={!desktop} onChange={(event) => onUpdate({ tariffPerKwh: Number(event.target.value) })} /><small>EUR per kWh</small></label>
+          <label className="setting-field"><span>Grid carbon intensity</span><input type="number" min={0} max={5000} step={1} inputMode="numeric" value={settings.carbonGramsPerKwh} disabled={!desktop} onChange={(event) => onUpdate({ carbonGramsPerKwh: Number(event.target.value) })} /><small>gCO₂e per kWh</small></label>
+        </div>
+        <p className="setting-note">{desktop ? 'Saved to the application data directory and applied on the next sample.' : 'The development agent reads VISOR_TARIFF_EUR_KWH and VISOR_CARBON_G_KWH from its environment instead.'}</p>
+      </section>
+
+      <section className="panel settings-card"><div className="settings-heading"><span><Activity /></span><div><h2>Live data sources</h2><p>VISOR exposes coverage honestly. Missing hardware sensors are never replaced with invented values.</p></div></div><SettingStatus label="Collector runtime" detail={`One batched ${platform} snapshot every second`} value={agent ? (source === 'tauri-native' ? 'NATIVE' : 'LOOPBACK') : 'OFFLINE'} tone={agent ? 'live' : 'off'} /><SettingStatus label="Collector overhead" detail={agent ? `${agent.sampleDurationMs} ms last sample · PID ${agent.pid}` : 'Waiting for collector diagnostics'} value={agent ? `${agent.cpuPercent.toFixed(1)}% · ${agent.memoryMb.toFixed(0)} MB` : 'UNAVAILABLE'} tone={agent ? 'live' : 'off'} /><SettingStatus label="Per-process GPU attribution" detail={`Vendor and ${platform} GPU counters when available`} value={agent?.gpuAttributionAvailable ? 'AVAILABLE' : 'UNAVAILABLE'} tone={agent?.gpuAttributionAvailable ? 'live' : 'off'} /><SettingStatus label="CPU temperature" detail={metrics.sensorSources?.cpu || 'No compatible native hardware sensor is exposed on this system'} value={(metrics.cpuTemp ?? 0) > 0 ? `${Math.round(metrics.cpuTemp ?? 0)}°C` : 'UNAVAILABLE'} tone={(metrics.cpuTemp ?? 0) > 0 ? 'live' : 'off'} /><SettingStatus label="CPU package power" detail={energy?.cpuMeasured ? 'Measured on-die, replacing the TDP model' : 'Modeled from live load and rated clock'} value={`${Math.round(metrics.cpuPower)} W`} tone={energy?.cpuMeasured ? 'live' : 'off'} /><SettingStatus label="SSD temperature" detail={metrics.storageTemperatures?.[0]?.source || 'No compatible storage temperature sensor is exposed on this system'} value={(metrics.ssdTemp || 0) > 0 ? `${Math.round(metrics.ssdTemp || 0)}°C` : 'UNAVAILABLE'} tone={(metrics.ssdTemp || 0) > 0 ? 'live' : 'off'} /></section>
+      <section className="panel settings-card"><div className="settings-heading"><span><ShieldCheck /></span><div><h2>Privacy and trust</h2><p>Telemetry and runtime probes stay on this device.</p></div></div><SettingStatus label="Network boundary" detail={source === 'tauri-native' ? 'Native IPC; no telemetry HTTP server is started' : 'Browser agent bound to IPv4 loopback only'} value={source === 'tauri-native' ? 'IPC ONLY' : '127.0.0.1'} tone="live" /><SettingStatus label="External telemetry" detail="VISOR sends no hardware or model data to a remote service" value="OFF" tone="live" /><SettingStatus label="Settings storage" detail={desktop ? 'settings.json inside the application data directory' : 'Browser localStorage for this preview'} value={desktop ? 'LOCAL FILE' : 'LOCAL STORAGE'} tone="live" /></section>
     </div>
   );
 }
 
+function activeAlertHint(alerts?: AlertsSnapshot) {
+  const active = alerts?.active.length || 0;
+  if (!active) return 'No condition is tripped right now, so nothing would arrive in the next minute.';
+  return `${active} sustained condition${active === 1 ? ' is' : 's are'} tripped now; a further trip would notify only after it clears and returns.`;
+}
+
+function SettingSwitch({ label, detail, checked, disabled, onChange }: { label: string; detail: string; checked: boolean; disabled: boolean; onChange: (value: boolean) => void }) {
+  return (
+    <div className={`setting-row setting-row-switch ${disabled ? 'setting-disabled' : ''}`}>
+      <div><strong>{label}</strong><span>{detail}</span></div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        aria-label={label}
+        disabled={disabled}
+        className={`switch ${checked ? 'switch-on' : ''}`}
+        onClick={() => onChange(!checked)}
+      ><span /></button>
+    </div>
+  );
+}
 function SettingStatus({ label, detail, value, tone }: { label: string; detail: string; value: string; tone: 'live' | 'off' }) {
   return <div className="setting-row"><div><strong>{label}</strong><span>{detail}</span></div><em className={`setting-status setting-status-${tone}`}>{value}</em></div>;
 }
 
+const commandItems: Array<{ view: ViewId; label: string; hint: string; icon: React.ReactNode }> = [
+  { view: 'processes', label: 'View all processes', hint: 'Resource attribution', icon: <Cpu size={18} /> },
+  { view: 'ai', label: 'Open AI workloads', hint: 'Local adapters', icon: <Bot size={18} /> },
+  { view: 'performance', label: 'Inspect GPU performance', hint: 'Live telemetry', icon: <Gauge size={18} /> },
+  { view: 'hardware', label: 'Hardware inventory', hint: 'SMBIOS + sensors', icon: <CircuitBoard size={18} /> },
+  { view: 'energy', label: 'Energy Lens', hint: 'Power and carbon', icon: <Leaf size={18} /> },
+  { view: 'history', label: 'Performance history', hint: 'Rolling buffer', icon: <Clock3 size={18} /> },
+  { view: 'alerts', label: 'Configure smart alerts', hint: 'Sustained policies', icon: <Bell size={18} /> },
+  { view: 'settings', label: 'Settings', hint: 'Themes and sources', icon: <Info size={18} /> },
+];
+
 function CommandPalette({ onClose, onNavigate }: { onClose: () => void; onNavigate: (view: ViewId) => void }) {
+  const [query, setQuery] = useState('');
+  const [cursor, setCursor] = useState(0);
+  const matches = commandItems.filter((item) =>
+    `${item.label} ${item.hint} ${item.view}`.toLowerCase().includes(query.toLowerCase()),
+  );
+  const safeCursor = Math.min(cursor, Math.max(0, matches.length - 1));
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        setCursor((current) => Math.min(current + 1, matches.length - 1));
+      } else if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        setCursor((current) => Math.max(current - 1, 0));
+      } else if (event.key === 'Enter') {
+        event.preventDefault();
+        const target = matches[safeCursor];
+        if (target) onNavigate(target.view);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [matches, safeCursor, onNavigate]);
+
   return (
     <div className="command-backdrop" onMouseDown={onClose}>
       <div className="command-palette" onMouseDown={(event) => event.stopPropagation()}>
-        <div className="command-search"><Search size={18} /><input autoFocus placeholder="Search VISOR or type a command…" /><button onClick={onClose}><X size={16} /></button></div>
-        <p>QUICK NAVIGATION</p>
-        <button onClick={() => onNavigate('processes')}><span><Cpu size={18} /> View all processes</span><Command size={14} /></button>
-        <button onClick={() => onNavigate('ai')}><span><Bot size={18} /> Open AI workloads</span><em>Local adapters</em></button>
-        <button onClick={() => onNavigate('performance')}><span><Gauge size={18} /> Inspect GPU performance</span><em>Live telemetry</em></button>
-        <button onClick={() => onNavigate('alerts')}><span><Bell size={18} /> Configure smart alerts</span></button>
+        <div className="command-search">
+          <Search size={18} />
+          <input
+            autoFocus
+            value={query}
+            onChange={(event) => { setQuery(event.target.value); setCursor(0); }}
+            placeholder="Search VISOR or type a command…"
+            aria-label="Search commands"
+          />
+          <button onClick={onClose}><X size={16} /></button>
+        </div>
+        <p>{query ? `${matches.length} MATCH${matches.length === 1 ? '' : 'ES'}` : 'QUICK NAVIGATION'}</p>
+        {matches.map((item, index) => (
+          <button
+            key={item.view}
+            className={index === safeCursor ? 'command-active' : ''}
+            onMouseEnter={() => setCursor(index)}
+            onClick={() => onNavigate(item.view)}
+          >
+            <span>{item.icon} {item.label}</span><em>{item.hint}</em>
+          </button>
+        ))}
+        {matches.length === 0 && <p className="planner-warning">No command matches “{query}”.</p>}
         <div className="command-footer"><span><kbd>↑↓</kbd> Navigate</span><span><kbd>Enter</kbd> Select</span><span><kbd>Esc</kbd> Close</span></div>
       </div>
+    </div>
+  );
+}
+
+/// The detail view behind a metric's expand control. It repeats the card's own
+/// figures and adds what only a wider plot can show.
+function MetricOverlay({ metric, sampleSeconds, onClose }: { metric: FocusMetric; sampleSeconds: number; onClose: () => void }) {
+  const peak = metric.history.length ? Math.max(...metric.history) : 0;
+  const mean = metric.history.length ? metric.history.reduce((sum, value) => sum + value, 0) / metric.history.length : 0;
+  return (
+    <div className="overlay-backdrop" onMouseDown={onClose} role="presentation">
+      <section className="panel metric-overlay" role="dialog" aria-modal="true" aria-label={`${metric.label} detail`} onMouseDown={(event) => event.stopPropagation()}>
+        <div className="overlay-head">
+          <div><p className="eyebrow">METRIC DETAIL</p><h2>{metric.label}</h2><span>{metric.detail}</span></div>
+          <button className="icon-button" onClick={onClose} aria-label={`Close ${metric.label} detail`}><X size={17} /></button>
+        </div>
+        <div className="overlay-body">
+          <Donut value={metric.value} tone={metric.tone} label={metric.label} size="large" />
+          <div className="overlay-chart">
+            <LineChart values={metric.history} tone={metric.tone} height={220} ariaLabel={`${metric.label} history`} />
+            <div className="chart-axis"><span>{Math.round(metric.history.length * sampleSeconds)} seconds ago</span><span>Now</span></div>
+          </div>
+        </div>
+        <div className="overlay-stats">
+          {metric.stats.map(([name, value]) => <div key={name}><span>{name}</span><strong>{value}</strong></div>)}
+          <div><span>Buffer peak</span><strong>{peak.toFixed(1)}%</strong></div>
+          <div><span>Buffer average</span><strong>{mean.toFixed(1)}%</strong></div>
+          <div><span>Samples held</span><strong>{metric.history.length}</strong></div>
+        </div>
+        <p className="overlay-note">The buffer holds the most recent {metric.history.length} samples of this collector session. Nothing here is interpolated.</p>
+      </section>
+    </div>
+  );
+}
+
+function AttentionPanel({ kind, metrics, energy, alerts, healthLabel, sampleSeconds, onClose, onNavigate }: {
+  kind: Exclude<Attention, 'none'>;
+  metrics: MetricsProps['metrics'];
+  energy?: EnergyEstimate;
+  alerts?: AlertsSnapshot;
+  healthLabel: string;
+  sampleSeconds: number;
+  onClose: () => void;
+  onNavigate: (view: ViewId) => void;
+}) {
+  const active = alerts?.active || [];
+  const watch = alerts?.watch || [];
+  const recent = alerts?.recent || [];
+  const hottest = (metrics.temperatureReadings || []).reduce((top, reading) => Math.max(top, reading.value), 0);
+  const hottestReading = (metrics.temperatureReadings || []).find((reading) => reading.value === hottest);
+  const commit = metrics.memory?.commitLimitBytes
+    ? ((metrics.memory.committedBytes || 0) / metrics.memory.commitLimitBytes * 100)
+    : null;
+  return (
+    <div className="overlay-backdrop backdrop-plain" onMouseDown={onClose} role="presentation">
+      <section className="panel attention-panel" role="dialog" aria-modal="true" aria-label={kind === 'alerts' ? 'Attention items' : 'System health detail'} onMouseDown={(event) => event.stopPropagation()}>
+        <div className="overlay-head">
+          <div>
+            <p className="eyebrow">{kind === 'alerts' ? 'ATTENTION' : 'HEALTH'}</p>
+            <h2>{kind === 'alerts' ? (active.length ? `${active.length} sustained condition${active.length === 1 ? '' : 's'}` : 'No sustained conditions') : healthLabel}</h2>
+            <span>{kind === 'alerts' ? 'Only conditions that held past their duration appear here.' : `Live figures from the last ${Math.round(metrics.history.cpu.length * sampleSeconds)} seconds.`}</span>
+          </div>
+          <button className="icon-button" onClick={onClose} aria-label="Close panel"><X size={17} /></button>
+        </div>
+
+        {kind === 'alerts' ? (
+          <div className="attention-list">
+            {active.map((item) => <div className="attention-row attention-active" key={item.id}><span>{item.title}</span><strong>{item.value}{item.unit}</strong></div>)}
+            {watch.map((item) => <div className="attention-row attention-watch" key={item.id}><span>{item.title}</span><strong>{item.progress}% of its sustained window</strong></div>)}
+            {recent.map((item) => <div className="attention-row attention-recent" key={`${item.id}-${item.resolvedAt}`}><span>{item.title} · resolved</span><strong>peak {item.peak}{item.unit}</strong></div>)}
+            {!active.length && !watch.length && !recent.length && <p className="attention-empty">Nothing has crossed a threshold in this session. Short spikes are ignored on purpose, so the alert history stays meaningful.</p>}
+            <button className="ghost-button" onClick={() => onNavigate('alerts')}><Bell size={15} /> Alert policies</button>
+          </div>
+        ) : (
+          <div className="attention-grid">
+            <div><span>CPU</span><strong>{metrics.cpu.toFixed(1)}%</strong><small>{sensorValue(metrics.cpuTemp, '°C')} · {Math.round(metrics.cpuPower)} W</small></div>
+            <div><span>GPU</span><strong>{metrics.gpu.toFixed(1)}%</strong><small>{sensorValue(metrics.gpuTemp, '°C')} · {Math.round(metrics.gpuPower)} W</small></div>
+            <div><span>Memory</span><strong>{metrics.ram.toFixed(1)}%</strong><small>{commit === null ? 'Commit unavailable' : `${commit.toFixed(1)}% committed`}</small></div>
+            <div><span>Video memory</span><strong>{metrics.vram.toFixed(1)}%</strong><small>{metrics.gpuMemory ? `${formatBytes(metrics.gpuMemory.usedBytes)} resident` : 'Unavailable'}</small></div>
+            <div><span>Hottest sensor</span><strong>{hottest > 0 ? `${hottest.toFixed(1)}°C` : 'Unavailable'}</strong><small>{hottestReading ? `${hottestReading.component} ${hottestReading.name}` : 'No temperature sensor reported'}</small></div>
+            <div><span>Power at the wall</span><strong>{energy ? `${energy.watts.toFixed(0)} W` : 'Unavailable'}</strong><small>{energy ? `${energy.confidenceScore}% confidence` : 'Collector offline'}</small></div>
+            <button className="ghost-button" onClick={() => onNavigate('performance')}><Activity size={15} /> Full performance view</button>
+          </div>
+        )}
+      </section>
     </div>
   );
 }
