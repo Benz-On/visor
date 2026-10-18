@@ -43,7 +43,10 @@ macOS, Linux, and ARM64 binary previews resume when native builders are availabl
   confidence, and paging assumptions, but remain predictions until a local
   benchmark runs.
 - Exact CPU package, fan, voltage, and motherboard readings depend on firmware
-  exposure or a running LibreHardwareMonitor/OpenHardwareMonitor WMI provider.
+  exposure or a running LibreHardwareMonitor/OpenHardwareMonitor provider: the
+  WMI namespace on builds that register one, otherwise the loopback web server
+  enabled from Options. CPU package power read from that channel is what moves
+  the energy label from modeled to measured.
 
 ## Release acceptance
 

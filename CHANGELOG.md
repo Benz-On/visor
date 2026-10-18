@@ -3,39 +3,46 @@
 All notable VISOR changes are documented here. Versions follow Semantic
 Versioning while the product remains in beta.
 
-## [0.9.2-beta.1] - Unreleased
-
-### Added
-
-- Premium design-system surfaces for the measured-AI features: a
-  mint-accented measured-rate strip with per-metric tone gradients and
-  tabular numerals; a layer offload plan rendered as interactive
-  placement cards with FITS/OVER verdict chips, hover lift, and tone
-  theming; a session throughput history card with average/peak/tokens
-  stat row and legend markers.
-- "GGUF exact" provenance tag in the model spec grid, styled as a
-  system chip rather than ad-hoc text.
-- Command palette keyboard-selection highlighting (inset accent bar)
-  matching the hover state.
-- Theme parity for Cyberdeck and Retro terminal across all new
-  surfaces; custom thin scrollbars and cyan text selection globally.
+## [0.9.3-beta.1] - Unreleased
 
 ### Changed
 
-- All ad-hoc inline styles in the AI view were replaced with design
-  system classes; every color now flows through theme tokens so all
-  four themes render the new panels correctly.
 - Tauri moved from the exact `=2.8.5` pin to the `2.12` line, with the
   JavaScript API and CLI updated to match. The lockfiles stay committed,
   so builds remain reproducible while patch releases can reach us again.
 - The declared Rust floor is now 1.90, matching what the current Tauri
   release requires.
+- Energy confidence now reflects both rails. CPU package power read from the
+  hardware monitor replaces the TDP curve, so the label goes `estimated` to
+  `hybrid` for one measured rail and `measured` when the CPU package and the GPU
+  are both instrumented. The overview stops prefixing a measured CPU figure
+  with `~`.
 - The Windows sensor scripts live in `src-tauri/collectors/`. They are
   embedded into the native binary at compile time, so they are no longer
   stored in the directory the README describes as a development fallback.
 
 ### Fixed
 
+- CPU temperature is read again. The collector only asked the LibreHardwareMonitor
+  WMI namespace, which 0.9.x releases stopped registering, so every host running
+  that version reported no CPU sensor at all. The script now reads the loopback
+  `data.json` of the Remote Web Server first and keeps WMI as the fallback for
+  older builds and OpenHardwareMonitor. Values arrive as culture-formatted text
+  ("55,6 degC"), so they are parsed with the host culture instead of assuming a
+  dot, and the AMD "Core (Tctl/Tdie)" row is selected as the package reading; the
+  previous filter looked for "CPU (Tctl/Tdie)" and could not match it even when
+  its WMI channel was answering.
+- Release checksums verify outside Windows too. `SHA256SUMS.txt` was written with
+  CRLF line endings, so `sha256sum -c` read the carriage return as part of every
+  file name and reported all assets missing, and `release-manifest.json` began
+  with a UTF-8 BOM that `JSON.parse` rejects. Both files are now written without
+  a BOM, with LF separators.
+- Drive, memory and threshold sensors are told apart. A solid-state drive reports
+  its warning and critical setpoints as Temperature sensors and a memory module
+  reports its probe resolution; those were forwarded as readings and could be
+  selected as a drive or CPU temperature. Storage rows now carry the model name of
+  the drive that owns them, and per-core sensor rows are trimmed before any
+  temperature or power row so the table shipped with every snapshot stays bounded.
 - Counter names are matched exactly, so reported throughput is no longer
   inflated by unrelated series. The substring matcher had been written before any
   real metrics endpoint was reachable; against authoritative runtime output it
@@ -165,7 +172,30 @@ Versioning while the product remains in beta.
 - Apache-2.0 licensing is in place, with a contributor license grant, so the
   public repository no longer accepts contributions without a license.
 
-## [0.9.1-beta.1] - Unreleased
+## [0.9.2-beta.1] - 2026-09-02
+
+### Added
+
+- Premium design-system surfaces for the measured-AI features: a
+  mint-accented measured-rate strip with per-metric tone gradients and
+  tabular numerals; a layer offload plan rendered as interactive
+  placement cards with FITS/OVER verdict chips, hover lift, and tone
+  theming; a session throughput history card with average/peak/tokens
+  stat row and legend markers.
+- "GGUF exact" provenance tag in the model spec grid, styled as a
+  system chip rather than ad-hoc text.
+- Command palette keyboard-selection highlighting (inset accent bar)
+  matching the hover state.
+- Theme parity for Cyberdeck and Retro terminal across all new
+  surfaces; custom thin scrollbars and cyan text selection globally.
+
+### Changed
+
+- All ad-hoc inline styles in the AI view were replaced with design
+  system classes; every color now flows through theme tokens so all
+  four themes render the new panels correctly.
+
+## [0.9.1-beta.1] - 2026-09-02
 
 ### Added
 

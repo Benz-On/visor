@@ -70,7 +70,7 @@ let lastAgentCpu = process.cpuUsage();
 let lastAgentCpuAt = process.hrtime.bigint();
 let previousProcessCpu = new Map();
 let lastProcessSampleAt = Date.now();
-let sensorCache = { cpuTemperature: 0, cpuSource: null, storage: [], readings: [], sensors: [], hardwareMonitorAvailable: false, cpuSensorGuidance: null };
+let sensorCache = { cpuTemperature: 0, cpuPower: 0, cpuSource: null, storage: [], readings: [], sensors: [], hardwareMonitorAvailable: false, cpuSensorGuidance: null };
 let sensorPending = false;
 let lastSensorAt = 0;
 let localAiDiscovery = { scannedAt: null, adapters: [], models: [], modelRoots: [] };
@@ -389,6 +389,7 @@ async function pollSensorSnapshot() {
     const parsed = JSON.parse(String(stdout || '{}').trim() || '{}');
     sensorCache = {
       cpuTemperature: Math.max(0, finite(parsed.cpuTemperature)),
+      cpuPower: Math.max(0, finite(parsed.cpuPower)),
       cpuSource: parsed.cpuSource || null,
       storage: Array.isArray(parsed.storage) ? parsed.storage : parsed.storage ? [parsed.storage] : [],
       readings: Array.isArray(parsed.readings) ? parsed.readings : parsed.readings ? [parsed.readings] : [],
@@ -585,6 +586,7 @@ async function collectSnapshot() {
       gpuLoad,
       cpuTdp: hardware.cpu.estimatedTdp,
       cpuSpeedRatio,
+      measuredCpuPower: sensorCache.cpuPower,
       measuredGpuPower: finite(gpu?.powerDraw),
       gpuPowerLimit: finite(gpu?.powerLimit, hardware.gpu?.powerLimit || 220),
       memoryTotalGb: memoryTotal / GiB,
