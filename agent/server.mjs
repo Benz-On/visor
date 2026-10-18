@@ -16,10 +16,13 @@ const POLL_MS = Math.min(5000, Math.max(650, Number.parseInt(process.env.VISOR_P
 const GPU_COUNTER_INTERVAL_MS = 5000;
 const SENSOR_INTERVAL_MS = 5000;
 const LOCAL_AI_INTERVAL_MS = 2500;
-const GPU_COUNTER_SCRIPT = fileURLToPath(new URL('./gpu-counters.ps1', import.meta.url));
-const PROCESS_SNAPSHOT_SCRIPT = fileURLToPath(new URL('./process-snapshot.ps1', import.meta.url));
-const SENSOR_SCRIPT = fileURLToPath(new URL('./sensors.ps1', import.meta.url));
-const MEMORY_SCRIPT = fileURLToPath(new URL('./memory-snapshot.ps1', import.meta.url));
+// Shared with the native build: src-tauri/collectors/*.ps1 are embedded into
+// the Rust binary with include_str!, and this agent runs the same scripts.
+const COLLECTOR_DIR = '../src-tauri/collectors/';
+const GPU_COUNTER_SCRIPT = fileURLToPath(new URL(`${COLLECTOR_DIR}gpu-counters.ps1`, import.meta.url));
+const PROCESS_SNAPSHOT_SCRIPT = fileURLToPath(new URL(`${COLLECTOR_DIR}process-snapshot.ps1`, import.meta.url));
+const SENSOR_SCRIPT = fileURLToPath(new URL(`${COLLECTOR_DIR}sensors.ps1`, import.meta.url));
+const MEMORY_SCRIPT = fileURLToPath(new URL(`${COLLECTOR_DIR}memory-snapshot.ps1`, import.meta.url));
 const allowedOrigins = new Set([
   'http://localhost:1420',
   'http://127.0.0.1:1420',

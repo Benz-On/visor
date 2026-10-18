@@ -84,7 +84,7 @@ telemetry with fabricated values.
 Requirements:
 
 - Node.js 20.19 or newer
-- Rust stable
+- Rust 1.90 or newer (the minimum required by the current Tauri release)
 - Platform prerequisites from the [Tauri documentation](https://v2.tauri.app/start/prerequisites/)
 
 ```bash
@@ -92,8 +92,10 @@ npm install
 npm run desktop
 ```
 
-The compiled application embeds the Rust collector. The optional Node agent is
-only a browser-development fallback and currently targets Windows:
+The compiled application embeds the Rust collector together with the Windows
+sensor scripts in `src-tauri/collectors/`, which are baked into the binary at
+compile time. The optional Node agent in `agent/` is only a browser-development
+fallback and currently targets Windows; it runs the same collector scripts:
 
 ```bash
 npm run agent
@@ -136,9 +138,12 @@ cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 cargo test --manifest-path src-tauri/Cargo.toml --locked
 ```
 
-GitHub CI repeats native tests on Windows, macOS, and Linux. Version tags matching
-`v*` trigger six platform builds and publish their assets on one GitHub Release.
-See the [changelog](CHANGELOG.md) and [release documentation](docs/RELEASING.md).
+GitHub CI runs automatically on pushes to `main` and on pull requests: the
+workflow-pin preflight, the web build with lint and agent tests, and native
+formatting, Clippy and tests on Linux. The Windows and macOS native legs run
+only on a manual dispatch, as do release builds — pushing a version tag does
+not start a build. See the [changelog](CHANGELOG.md) and
+[release documentation](docs/RELEASING.md).
 
 ## Local AI evidence
 
@@ -188,11 +193,11 @@ vulnerabilities in public issues.
 Issues and technical contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md)
 and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) first.
 
-## License status
+## License
 
-An open-source license has not yet been selected. Public visibility alone does
-not grant permission to copy, modify, or redistribute the source. A license must
-be chosen before the repository is presented as open source; see the
-[public-release checklist](docs/PUBLIC_RELEASE_CHECKLIST.md).
+VISOR is licensed under the [Apache License 2.0](LICENSE). Copyright 2026
+Benz Engineering. You may copy, modify, and redistribute it, including for
+commercial purposes, subject to the terms of that license; contributions are
+accepted under the same license (see [CONTRIBUTING.md](CONTRIBUTING.md)).
 
 Third-party components retain their own licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
