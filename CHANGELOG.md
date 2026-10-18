@@ -12,12 +12,37 @@ Versioning while the product remains in beta.
   so builds remain reproducible while patch releases can reach us again.
 - The declared Rust floor is now 1.90, matching what the current Tauri
   release requires.
+- Energy confidence now reflects both rails. CPU package power read from the
+  hardware monitor replaces the TDP curve, so the label goes `estimated` to
+  `hybrid` for one measured rail and `measured` when the CPU package and the GPU
+  are both instrumented. The overview stops prefixing a measured CPU figure
+  with `~`.
 - The Windows sensor scripts live in `src-tauri/collectors/`. They are
   embedded into the native binary at compile time, so they are no longer
   stored in the directory the README describes as a development fallback.
 
 ### Fixed
 
+- CPU temperature is read again. The collector only asked the LibreHardwareMonitor
+  WMI namespace, which 0.9.x releases stopped registering, so every host running
+  that version reported no CPU sensor at all. The script now reads the loopback
+  `data.json` of the Remote Web Server first and keeps WMI as the fallback for
+  older builds and OpenHardwareMonitor. Values arrive as culture-formatted text
+  ("55,6 degC"), so they are parsed with the host culture instead of assuming a
+  dot, and the AMD "Core (Tctl/Tdie)" row is selected as the package reading; the
+  previous filter looked for "CPU (Tctl/Tdie)" and could not match it even when
+  its WMI channel was answering.
+- Release checksums verify outside Windows too. `SHA256SUMS.txt` was written with
+  CRLF line endings, so `sha256sum -c` read the carriage return as part of every
+  file name and reported all assets missing, and `release-manifest.json` began
+  with a UTF-8 BOM that `JSON.parse` rejects. Both files are now written without
+  a BOM, with LF separators.
+- Drive, memory and threshold sensors are told apart. A solid-state drive reports
+  its warning and critical setpoints as Temperature sensors and a memory module
+  reports its probe resolution; those were forwarded as readings and could be
+  selected as a drive or CPU temperature. Storage rows now carry the model name of
+  the drive that owns them, and per-core sensor rows are trimmed before any
+  temperature or power row so the table shipped with every snapshot stays bounded.
 - Counter names are matched exactly, so reported throughput is no longer
   inflated by unrelated series. The substring matcher had been written before any
   real metrics endpoint was reachable; against authoritative runtime output it

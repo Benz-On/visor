@@ -26,6 +26,21 @@ test('estimated power remains finite with missing sensors', () => {
   assert.ok(result.watts > 0);
 });
 
+test('a measured package replaces the TDP curve and lifts confidence', () => {
+  const inputs = { cpuLoad: 50, gpuLoad: 60, cpuTdp: 170, cpuSpeedRatio: 1, memoryTotalGb: 32, diskActivity: 10 };
+  const modeled = estimateEnergy(inputs);
+  const measured = estimateEnergy({ ...inputs, measuredCpuPower: 58.2 });
+  const both = estimateEnergy({ ...inputs, measuredCpuPower: 58.2, measuredGpuPower: 142 });
+
+  assert.equal(measured.confidence, 'hybrid');
+  assert.equal(measured.breakdown.cpu, 58.2);
+  assert.ok(measured.breakdown.cpu < modeled.breakdown.cpu, '50% load on a 170 W part');
+  // Both rails instrumented must not claim the same confidence as one.
+  assert.equal(both.confidence, 'measured');
+  assert.ok(both.confidenceScore > measured.confidenceScore);
+  assert.match(both.methodology, /CPU package and GPU measured/);
+});
+
 test('process energy allocation favors the active workload', () => {
   const energy = estimateEnergy({ cpuLoad: 70, gpuLoad: 80, measuredGpuPower: 200 });
   const attributed = attributeProcessEnergy([

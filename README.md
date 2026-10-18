@@ -72,7 +72,7 @@ tokens, provider charges, or datacenter use. See [AI detection coverage](docs/AI
 | Process priority | Yes | Yes, permission-dependent | Yes, permission-dependent |
 | NVIDIA system telemetry | Yes | Not applicable | Yes when `nvidia-smi` is available |
 | Per-process GPU attribution | Windows counters | Limited | Limited |
-| Hardware inventory and CPU / storage sensors | Deep SMBIOS/WMI coverage; optional LibreHardwareMonitor | Limited | Limited |
+| Hardware inventory and CPU / storage sensors | Deep SMBIOS/WMI coverage; optional LibreHardwareMonitor (WMI or loopback web server) | Limited | Limited |
 | Local runtime API probes | Yes | Yes | Yes |
 | Known local model folders | Yes | Yes | Yes |
 
@@ -170,8 +170,19 @@ Embedding models are not misrepresented as text-generation models.
 ## Energy methodology
 
 VISOR does not claim false measurement precision. Compatible vendor telemetry is
-used when available; CPU, memory, storage, platform, conversion loss, and process
+used when available; memory, storage, platform, conversion loss, and process
 shares remain labeled estimates. The interface exposes the method and confidence.
+
+CPU and GPU each have a measured path: NVIDIA board power through `nvidia-smi`,
+and CPU package power through the optional hardware monitor's on-die sensor.
+When neither is available the CPU figure is modeled from TDP, live load and the
+rated clock, and is prefixed with `~` in the interface. Reading both rails
+raises the confidence label from `estimated` to `hybrid` and then to `measured`.
+
+To enable the CPU side on Windows, run LibreHardwareMonitor and turn on
+**Options → Remote Web Server** (loopback port 8085). Builds that still
+register their WMI namespace work without it; 0.9.x releases only expose the
+web server. Set `VISOR_LHM_PORT` when the port has been changed.
 
 Default projections are `0.25 EUR/kWh` and `56 gCO2e/kWh`. The Windows development
 agent accepts `VISOR_TARIFF_EUR_KWH` and `VISOR_CARBON_G_KWH` overrides.
@@ -181,6 +192,9 @@ agent accepts `VISOR_TARIFF_EUR_KWH` and `VISOR_CARBON_G_KWH` overrides.
 - Hardware, process, and model data remains on the device.
 - Native builds use Tauri IPC and do not start a telemetry web server.
 - Runtime API probes are loopback-only and time-bounded.
+- The optional hardware-monitor sensor channel reads `http://127.0.0.1:8085/data.json`
+  and nothing else; it never connects to a remote address, and it is only used
+  when the user has started that application with its web server enabled.
 - Process mutation requires explicit confirmation and blocks critical processes.
 - Command arguments are passed directly to operating-system tools without shell interpolation.
 

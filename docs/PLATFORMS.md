@@ -14,7 +14,9 @@ The collector exposes missing sensors explicitly instead of simulating them.
   physical storage, network adapters, and connected displays
 - Windows memory-manager counters for cache, commit, paging, and kernel pools
 - Optional temperature, fan, voltage, clock, power, and load sensors through
-  LibreHardwareMonitor/OpenHardwareMonitor WMI providers
+  LibreHardwareMonitor/OpenHardwareMonitor, read from their WMI provider or, on
+  builds that do not register one, from their loopback web server on
+  `127.0.0.1:8085`
 - Process tree termination and Windows priority classes
 
 The portable executable requires the system WebView2 runtime. The NSIS installer

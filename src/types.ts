@@ -313,6 +313,8 @@ export interface EnergyEstimate {
   confidence: 'measured' | 'hybrid' | 'estimated';
   confidenceScore: number;
   methodology: string;
+  cpuMeasured?: boolean;
+  gpuMeasured?: boolean;
   sessionWh: number;
   hourlyKwh: number;
   dailyKwh: number;

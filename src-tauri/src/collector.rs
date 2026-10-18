@@ -313,6 +313,14 @@ impl Collector {
         } else {
             1.0
         };
+        // Package power from the hardware monitor is a real on-die reading, so it
+        // supersedes the TDP curve; a host without one keeps the modeled value.
+        let measured_cpu_power = self
+            .sensors
+            .get("cpuPower")
+            .and_then(Value::as_f64)
+            .filter(|value| (0.0..1000.0).contains(value))
+            .unwrap_or_default();
         let energy_estimate = energy::estimate(energy::EnergyInputs {
             cpu_load: cpu,
             gpu_load: self.gpu.utilization,
@@ -320,6 +328,7 @@ impl Collector {
             disk_activity,
             cpu_tdp,
             speed_ratio,
+            measured_cpu_power,
             measured_gpu_power: self.gpu.power,
             gpu_power_limit: if self.gpu.power_limit > 0.0 {
                 self.gpu.power_limit
@@ -381,7 +390,15 @@ impl Collector {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        if self.gpu.temperature > 0.0 {
+        // LibreHardwareMonitor publishes the same GPU core temperature through
+        // NVAPI, so adding the driver reading again would list one adapter twice
+        // in the sensor table. Matching on the name keeps the driver value on
+        // boards where the monitor only reports a hotspot or memory junction.
+        let gpu_core_already_listed = temperature_readings.iter().any(|reading| {
+            reading.get("component").and_then(Value::as_str) == Some("GPU")
+                && reading.get("name").and_then(Value::as_str) == Some("GPU Core")
+        });
+        if self.gpu.temperature > 0.0 && !gpu_core_already_listed {
             temperature_readings.push(json!({
                 "component": "GPU",
                 "name": "GPU Core",
@@ -1335,6 +1352,56 @@ mod tests {
                 "sampledAgoMs.{field} missing"
             );
         }
+    }
+
+    /// Accuracy harness for the hardware-monitor channel. It only passes while
+    /// LibreHardwareMonitor (or OpenHardwareMonitor) is running with a readable
+    /// sensor source, so it stays ignored. Run on that host with
+    /// `cargo test live_snapshot_reads -- --ignored --nocapture`.
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn live_snapshot_reads_the_cpu_package_sensor() {
+        // Sensors refresh on their own cadence, so keep one collector polling
+        // until a reading lands.
+        let mut collector = Collector::new();
+        let mut snapshot = collector.collect();
+        for _ in 0..15 {
+            if snapshot["metrics"]["cpuTemp"].as_f64().is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(900));
+            snapshot = collector.collect();
+        }
+        let cpu_temp = snapshot["metrics"]["cpuTemp"].as_f64().unwrap_or_default();
+        let source = snapshot["metrics"]["sensorSources"]["cpu"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        let cpu_power = snapshot["metrics"]["cpuPower"].as_f64().unwrap_or_default();
+        let confidence = snapshot["energy"]["confidence"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        println!("cpuTemp={cpu_temp} source={source} cpuPower={cpu_power} energy={confidence}");
+        assert!(
+            cpu_temp > 0.0,
+            "no CPU package temperature reached the snapshot"
+        );
+        // A per-core or firmware-zone reading would be a mislabeled package
+        // temperature, which is the defect this channel exists to avoid.
+        assert!(
+            source.contains("Tctl") || source.contains("Package") || source.contains("Die"),
+            "CPU temperature attributed to {source}"
+        );
+        assert!(
+            snapshot["energy"]["cpuMeasured"].as_bool().unwrap_or(false),
+            "package power was read but the energy model still claims a modeled CPU"
+        );
+        assert!(
+            cpu_power > 0.0,
+            "package power missing while a sensor source is live"
+        );
     }
 
     /// Accuracy harness: compares the shipped collector against the vendor tool

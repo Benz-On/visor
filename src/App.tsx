@@ -273,7 +273,7 @@ function Overview({ metrics, energy, hardware, localAI, processes, live, refresh
           stats={[
             ['Clock', metrics.cpuSpeedGhz ? `${metrics.cpuSpeedGhz.toFixed(2)} GHz` : 'Unavailable'],
             ['Temp', sensorValue(metrics.cpuTemp, '°C')],
-            ['Power', `~${Math.round(metrics.cpuPower)} W`],
+            ['Power', `${energy?.cpuMeasured ? '' : '~'}${Math.round(metrics.cpuPower)} W`],
           ]}
         />
         <MetricHero
