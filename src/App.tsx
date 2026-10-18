@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Activity,
   Bell,
@@ -37,8 +37,10 @@ import { Donut, LineChart } from './components/Charts';
 import { niceCeiling } from './chartScale';
 import { ProcessTable } from './components/ProcessTable';
 import { Sidebar, type ViewId } from './components/Sidebar';
+import { applyAutostart, applyPriceFactors, applyShellFlags, isDesktop, subscribeShell } from './desktop';
 import { useVisorData } from './hooks/useVisorData';
 import { analyzeLocalModel } from './modelAdvisor';
+import { defaultSettings, loadSettings, saveSettings, type VisorSettings } from './settings';
 import type { AgentInfo, AlertsSnapshot, EnergyEstimate, HardwareInfo, LocalAiSnapshot, LocalModelInfo, MetricKey, MetricTone, ProcessInfo, TemperatureReading, ThemeId, ThroughputSampleInfo } from './types';
 
 const themeOrder: ThemeId[] = ['studio', 'porcelain', 'cyber', 'retro'];
@@ -48,6 +50,19 @@ const themeNames: Record<ThemeId, string> = {
   cyber: 'Cyberdeck',
   retro: 'Retro terminal',
 };
+
+/// A metric the user asked to look at closely, carried whole so the overlay can
+/// repeat every figure the card already showed.
+interface FocusMetric {
+  label: string;
+  detail: string;
+  value: number;
+  tone: MetricTone;
+  history: number[];
+  stats: [string, string][];
+}
+
+type Attention = 'none' | 'alerts' | 'health';
 
 const viewTitles: Record<ViewId, { eyebrow: string; title: string; description: string }> = {
   overview: {
@@ -101,31 +116,110 @@ function App() {
   const [activeView, setActiveView] = useState<ViewId>('overview');
   const [collapsed, setCollapsed] = useState(false);
   const [paused, setPaused] = useState(false);
-  const [theme, setTheme] = useState<ThemeId>(() => {
-    const saved = window.localStorage.getItem('visor-theme');
-    return themeOrder.includes(saved as ThemeId) ? saved as ThemeId : 'studio';
-  });
+  const [settings, setSettings] = useState<VisorSettings>(defaultSettings);
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
+  const [focusMetric, setFocusMetric] = useState<FocusMetric | null>(null);
+  const [attention, setAttention] = useState<Attention>('none');
   const visor = useVisorData(paused);
   const metrics = visor.metrics;
 
   useEffect(() => {
+    let cancelled = false;
+    void loadSettings().then((loaded) => {
+      if (cancelled) return;
+      setSettings(loaded);
+      setSettingsLoaded(true);
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (!settingsLoaded) return;
+    void applyShellFlags({
+      paused,
+      notifications: settings.notifications,
+      closeToTray: settings.closeToTray,
+    });
+  }, [paused, settings.closeToTray, settings.notifications, settingsLoaded]);
+
+  useEffect(() => {
+    if (!settingsLoaded || !isDesktop()) return;
+    void applyPriceFactors(settings.tariffPerKwh, settings.carbonGramsPerKwh);
+  }, [settings.carbonGramsPerKwh, settings.tariffPerKwh, settingsLoaded]);
+
+  const updateSettings = useCallback((patch: Partial<VisorSettings>) => {
+    setSettings((current) => {
+      const next = { ...current, ...patch };
+      void saveSettings(next);
+      if (patch.autostart !== undefined) void applyAutostart(patch.autostart);
+      return next;
+    });
+  }, []);
+
+  const togglePause = useCallback(() => setPaused((value) => !value), []);
+
+  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+      // In the desktop shell the native menu owns Ctrl+K and delivers it as a
+      // shell event; handling the key here as well would toggle the palette open
+      // and immediately shut it again.
+      if (!isDesktop() && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault();
         setCommandOpen((open) => !open);
       }
-      if (event.key === 'Escape') setCommandOpen(false);
+      if (event.key === 'Escape') {
+        setCommandOpen(false);
+        setAttention('none');
+        setFocusMetric(null);
+      }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
+  // The subscription is installed once and reads the current handlers through a
+  // ref, because the refresh callback changes identity with every snapshot and
+  // would otherwise re-listen roughly once per second.
+  const shellActions = useRef({
+    navigate: (view: string) => setActiveView(view as ViewId),
+    search: () => setCommandOpen(true),
+    refresh: () => void visor.refresh(),
+    togglePause,
+  });
+
   useEffect(() => {
-    window.localStorage.setItem('visor-theme', theme);
-  }, [theme]);
+    shellActions.current = {
+      navigate: (view: string) => setActiveView(view as ViewId),
+      search: () => setCommandOpen(true),
+      refresh: () => void visor.refresh(),
+      togglePause,
+    };
+  });
+
+  useEffect(() => {
+    let disposed = false;
+    let stop: (() => void) | undefined;
+    void subscribeShell((action) => {
+      if (disposed) return;
+      if (action.action === 'navigate') shellActions.current.navigate(action.view);
+      else if (action.action === 'search') shellActions.current.search();
+      else if (action.action === 'refresh') shellActions.current.refresh();
+      else if (action.action === 'toggle-pause') shellActions.current.togglePause();
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else stop = unlisten;
+    });
+    return () => {
+      disposed = true;
+      stop?.();
+    };
+  }, []);
 
   const title = viewTitles[activeView];
+  // Derived from the interval the collector actually achieved, so the overlays
+  // label their buffer with the real spacing between points rather than 1.1 s.
+  const sampleSeconds = visor.snapshot?.pollMs && visor.snapshot.pollMs > 0 ? visor.snapshot.pollMs / 1000 : 1.1;
   const thermalAlert = (metrics.cpuTemp ?? 0) >= 90 || metrics.gpuTemp >= 86;
   const activeAlertCount = visor.snapshot?.alerts?.active.length || 0;
   const healthLabel = visor.connection === 'demo'
@@ -137,10 +231,12 @@ function App() {
         : activeAlertCount > 0 || thermalAlert
           ? 'Attention'
           : 'Telemetry active';
-  const cycleTheme = () => setTheme((current) => themeOrder[(themeOrder.indexOf(current) + 1) % themeOrder.length]);
+  const cycleTheme = () => updateSettings({
+    theme: themeOrder[(themeOrder.indexOf(settings.theme) + 1) % themeOrder.length],
+  });
 
   return (
-    <div className="app-shell" data-theme={theme}>
+    <div className="app-shell" data-theme={settings.theme}>
       <Sidebar
         active={activeView}
         collapsed={collapsed}
@@ -170,14 +266,19 @@ function App() {
             <button className="icon-button" onClick={() => setPaused((value) => !value)} aria-label={paused ? 'Resume monitoring' : 'Pause monitoring'}>
               {paused ? <Play size={17} /> : <Pause size={17} />}
             </button>
-            <button className="icon-button theme-cycle" onClick={cycleTheme} aria-label={`Change theme. Current: ${themeNames[theme]}`} title={`Theme: ${themeNames[theme]}`}>
+            <button className="icon-button theme-cycle" onClick={cycleTheme} aria-label={`Change theme. Current: ${themeNames[settings.theme]}`} title={`Theme: ${themeNames[settings.theme]}`}>
               <Palette size={17} />
             </button>
-            <button className="icon-button notification-button" aria-label="Notifications">
+            <button
+              className={`icon-button notification-button ${attention === 'alerts' ? 'button-active' : ''}`}
+              aria-label={`Attention items: ${activeAlertCount}`}
+              aria-expanded={attention === 'alerts'}
+              title="Active alerts and recent resolutions"
+              onClick={() => setAttention((current) => (current === 'alerts' ? 'none' : 'alerts'))}
+            >
               <Bell size={17} />
-              <span />
+              {activeAlertCount > 0 && <span title={`${activeAlertCount} sustained conditions`} />}
             </button>
-            <div className="avatar">AB</div>
           </div>
         </header>
 
@@ -199,28 +300,48 @@ function App() {
               <p className="page-description">{title.description}</p>
             </div>
             {activeView !== 'settings' && (
-              <div className="system-health">
+              <button
+                className={`system-health ${attention === 'health' ? 'button-active' : ''}`}
+                aria-expanded={attention === 'health'}
+                aria-label={`System health: ${healthLabel}. Show details`}
+                onClick={() => setAttention((current) => (current === 'health' ? 'none' : 'health'))}
+              >
                 <div className="health-icon"><ShieldCheck size={20} /></div>
                 <div>
                   <span>System health</span>
                   <strong>{healthLabel}</strong>
                 </div>
                 <ChevronDown size={16} />
-              </div>
+              </button>
             )}
           </section>
 
-          {activeView === 'overview' && <Overview metrics={metrics} energy={visor.snapshot?.energy} hardware={visor.snapshot?.hardware} localAI={visor.snapshot?.localAI} processes={visor.processes} live={visor.connection === 'live'} refreshing={visor.refreshing} onRefresh={visor.refresh} onViewProcesses={() => setActiveView('processes')} onKill={visor.killProcess} onPriority={visor.setProcessPriority} />}
+          {activeView === 'overview' && <Overview metrics={metrics} energy={visor.snapshot?.energy} hardware={visor.snapshot?.hardware} localAI={visor.snapshot?.localAI} processes={visor.processes} live={visor.connection === 'live'} refreshing={visor.refreshing} onRefresh={visor.refresh} onViewProcesses={() => setActiveView('processes')} onKill={visor.killProcess} onPriority={visor.setProcessPriority} onExpand={setFocusMetric} />}
           {activeView === 'hardware' && <HardwareView metrics={metrics} hardware={visor.snapshot?.hardware} refreshing={visor.refreshing} onRefresh={visor.refresh} />}
           {activeView === 'processes' && <ProcessExplorer metrics={metrics} processes={visor.processes} counts={visor.snapshot?.processCounts} live={visor.connection === 'live'} refreshing={visor.refreshing} onRefresh={visor.refresh} onKill={visor.killProcess} onPriority={visor.setProcessPriority} />}
-          {activeView === 'performance' && <Performance metrics={metrics} hardware={visor.snapshot?.hardware} refreshing={visor.refreshing} onRefresh={visor.refresh} />}
+          {activeView === 'performance' && <Performance metrics={metrics} hardware={visor.snapshot?.hardware} refreshing={visor.refreshing} onRefresh={visor.refresh} onExpand={setFocusMetric} />}
           {activeView === 'ai' && <AIWorkloads metrics={metrics} localAI={visor.snapshot?.localAI} hardware={visor.snapshot?.hardware} throughputHistory={visor.throughputHistory} refreshing={visor.refreshing} onRefresh={visor.refresh} />}
           {activeView === 'energy' && <EnergyView energy={visor.snapshot?.energy} processes={visor.processes} agent={visor.snapshot?.agent} />}
           {activeView === 'history' && <HistoryView metrics={metrics} energy={visor.snapshot?.energy} agent={visor.snapshot?.agent} pollMs={visor.snapshot?.pollMs} />}
           {activeView === 'alerts' && <AlertsView alerts={visor.snapshot?.alerts} live={visor.connection === 'live'} onToggle={visor.setAlertRule} />}
-          {activeView === 'settings' && <SettingsView theme={theme} setTheme={setTheme} metrics={metrics} hardware={visor.snapshot?.hardware} agent={visor.snapshot?.agent} source={visor.snapshot?.source} />}
+          {activeView === 'settings' && <SettingsView settings={settings} onUpdate={updateSettings} metrics={metrics} energy={visor.snapshot?.energy} hardware={visor.snapshot?.hardware} agent={visor.snapshot?.agent} source={visor.snapshot?.source} alerts={visor.snapshot?.alerts} />}
         </div>
+
+        {attention !== 'none' && (
+          <AttentionPanel
+            kind={attention}
+            metrics={metrics}
+            energy={visor.snapshot?.energy}
+            alerts={visor.snapshot?.alerts}
+            healthLabel={healthLabel}
+            sampleSeconds={sampleSeconds}
+            onClose={() => setAttention('none')}
+            onNavigate={(view) => { setActiveView(view); setAttention('none'); }}
+          />
+        )}
       </main>
+
+      {focusMetric && <MetricOverlay metric={focusMetric} sampleSeconds={sampleSeconds} onClose={() => setFocusMetric(null)} />}
 
       {commandOpen && <CommandPalette onClose={() => setCommandOpen(false)} onNavigate={(view) => { setActiveView(view); setCommandOpen(false); }} />}
     </div>
@@ -248,6 +369,7 @@ interface OverviewProps extends MetricsProps, ProcessActions {
   hardware?: HardwareInfo;
   localAI?: LocalAiSnapshot;
   onViewProcesses: () => void;
+  onExpand: (metric: FocusMetric) => void;
 }
 
 const bytesToGb = (bytes = 0) => bytes / 1024 ** 3;
@@ -256,7 +378,7 @@ const formatBytes = (bytes = 0) => bytes >= 1024 ** 3
   : `${(bytes / 1024 ** 2).toFixed(bytes >= 100 * 1024 ** 2 ? 0 : 1)} MB`;
 const sensorValue = (value: number | null | undefined, suffix: string) => typeof value === 'number' && value > 0 ? `${value.toFixed(1)}${suffix}` : 'Unavailable';
 
-function Overview({ metrics, energy, hardware, localAI, processes, live, refreshing, onRefresh, onViewProcesses, onKill, onPriority }: OverviewProps) {
+function Overview({ metrics, energy, hardware, localAI, processes, live, refreshing, onRefresh, onViewProcesses, onKill, onPriority, onExpand }: OverviewProps) {
   const memoryUsed = bytesToGb(metrics.memory?.usedBytes);
   const memoryTotal = bytesToGb(metrics.memory?.totalBytes || hardware?.memory.totalBytes);
   const vramUsed = bytesToGb(metrics.gpuMemory?.usedBytes);
@@ -270,6 +392,7 @@ function Overview({ metrics, energy, hardware, localAI, processes, live, refresh
           value={metrics.cpu}
           tone="cyan"
           history={metrics.history.cpu}
+          onExpand={onExpand}
           stats={[
             ['Clock', metrics.cpuSpeedGhz ? `${metrics.cpuSpeedGhz.toFixed(2)} GHz` : 'Unavailable'],
             ['Temp', sensorValue(metrics.cpuTemp, '°C')],
@@ -282,6 +405,7 @@ function Overview({ metrics, energy, hardware, localAI, processes, live, refresh
           value={metrics.gpu}
           tone="violet"
           history={metrics.history.gpu}
+          onExpand={onExpand}
           stats={[
             ['VRAM', vramTotal ? `${vramTotal.toFixed(1)} GB` : 'Unavailable'],
             ['Temp', sensorValue(metrics.gpuTemp, '°C')],
@@ -343,9 +467,10 @@ interface MetricHeroProps {
   tone: MetricTone;
   history: number[];
   stats: [string, string][];
+  onExpand: (metric: FocusMetric) => void;
 }
 
-function MetricHero({ label, detail, value, tone, history, stats }: MetricHeroProps) {
+function MetricHero({ label, detail, value, tone, history, stats, onExpand }: MetricHeroProps) {
   const loadState = value >= 90 ? 'metric-critical' : value >= 75 ? 'metric-elevated' : '';
   return (
     <article className={`panel metric-hero tone-${tone} ${loadState}`}>
@@ -354,7 +479,7 @@ function MetricHero({ label, detail, value, tone, history, stats }: MetricHeroPr
           <div className="metric-label-line"><span className="metric-dot" />{label}{loadState && <em>{value >= 90 ? 'CRITICAL LOAD' : 'HIGH LOAD'}</em>}</div>
           <p>{detail}</p>
         </div>
-        <button className="expand-button" aria-label={`Expand ${label}`}><Maximize2 size={15} /></button>
+        <button className="expand-button" aria-label={`Expand ${label}`} title={`Expand ${label}`} onClick={() => onExpand({ label, detail, value, tone, history, stats })}><Maximize2 size={15} /></button>
       </div>
       <div className="metric-hero-body">
         <Donut value={value} tone={tone} label={label} size="large" />
@@ -627,25 +752,36 @@ function ThermalMatrix({ metrics, refreshing, onRefresh }: MetricsProps & Refres
   );
 }
 
-function Performance({ metrics, hardware, refreshing, onRefresh }: MetricsProps & { hardware?: HardwareInfo } & RefreshControls) {
+function Performance({ metrics, hardware, refreshing, onRefresh, onExpand }: MetricsProps & { hardware?: HardwareInfo; onExpand: (metric: FocusMetric) => void } & RefreshControls) {
   const memoryUsed = bytesToGb(metrics.memory?.usedBytes);
   const memoryTotal = bytesToGb(metrics.memory?.totalBytes || hardware?.memory.totalBytes);
   const vramUsed = bytesToGb(metrics.gpuMemory?.usedBytes);
   const vramTotal = bytesToGb(metrics.gpuMemory?.totalBytes || hardware?.gpu?.vramBytes);
   const coreCount = hardware?.cpu.physicalCores || hardware?.cpu.cores;
-  const cards: Array<{ key: MetricKey | 'network' | 'disk'; label: string; value: string; detail: string; tone: MetricTone; icon: React.ReactNode }> = [
-    { key: 'cpu', label: hardware?.cpu.brand.trim() || 'Processor', value: `${metrics.cpu.toFixed(1)}%`, detail: `${sensorValue(metrics.cpuTemp, '°C')} · ${metrics.cpuSpeedGhz ? `${metrics.cpuSpeedGhz.toFixed(2)} GHz` : 'Clock unavailable'} · ${coreCount ? `${coreCount} cores` : 'Core count unavailable'}`, tone: 'cyan', icon: <Cpu /> },
-    { key: 'gpu', label: hardware?.gpu?.model || 'Graphics', value: `${Math.round(metrics.gpu)}%`, detail: `${sensorValue(metrics.gpuTemp, '°C')} · ${Math.round(metrics.gpuPower)} W`, tone: 'violet', icon: <Gauge /> },
-    { key: 'ram', label: 'Memory', value: `${Math.round(metrics.ram)}%`, detail: memoryTotal ? `${memoryUsed.toFixed(1)} / ${memoryTotal.toFixed(1)} GB` : 'Capacity unavailable', tone: 'mint', icon: <MemoryStick /> },
-    { key: 'vram', label: 'Video memory', value: `${Math.round(metrics.vram)}%`, detail: vramTotal ? `${vramUsed.toFixed(1)} / ${vramTotal.toFixed(1)} GB` : 'Capacity unavailable', tone: 'amber', icon: <CircleGauge /> },
-    { key: 'disk', label: hardware?.storage[0]?.name || 'Storage', value: `${metrics.diskRead.toFixed(1)} MB/s`, detail: `${sensorValue(metrics.ssdTemp || 0, '°C')} · ${metrics.diskWrite.toFixed(1)} MB/s write`, tone: 'rose', icon: <HardDrive /> },
-    { key: 'network', label: 'Network', value: `${metrics.download.toFixed(1)} Mbps`, detail: `${metrics.upload.toFixed(1)} Mbps upload`, tone: 'cyan', icon: <Network /> },
+  const cards: Array<{
+    key: MetricKey | 'network' | 'disk';
+    label: string;
+    value: string;
+    detail: string;
+    tone: MetricTone;
+    icon: React.ReactNode;
+    /// The figure the chart is drawn against, so the overlay's dial and the card
+    /// cannot disagree about the same instant.
+    numeric: number;
+    stats: [string, string][];
+  }> = [
+    { key: 'cpu', label: hardware?.cpu.brand.trim() || 'Processor', value: `${metrics.cpu.toFixed(1)}%`, detail: `${sensorValue(metrics.cpuTemp, '°C')} · ${metrics.cpuSpeedGhz ? `${metrics.cpuSpeedGhz.toFixed(2)} GHz` : 'Clock unavailable'} · ${coreCount ? `${coreCount} cores` : 'Core count unavailable'}`, tone: 'cyan', icon: <Cpu />, numeric: metrics.cpu, stats: [['Load', `${metrics.cpu.toFixed(1)}%`], ['Clock', metrics.cpuSpeedGhz ? `${metrics.cpuSpeedGhz.toFixed(2)} GHz` : 'Unavailable'], ['Temp', sensorValue(metrics.cpuTemp, '°C')], ['Power', `${Math.round(metrics.cpuPower)} W`]] },
+    { key: 'gpu', label: hardware?.gpu?.model || 'Graphics', value: `${Math.round(metrics.gpu)}%`, detail: `${sensorValue(metrics.gpuTemp, '°C')} · ${Math.round(metrics.gpuPower)} W`, tone: 'violet', icon: <Gauge />, numeric: metrics.gpu, stats: [['Load', `${metrics.gpu.toFixed(1)}%`], ['VRAM', vramTotal ? `${vramUsed.toFixed(1)} / ${vramTotal.toFixed(1)} GB` : 'Unavailable'], ['Temp', sensorValue(metrics.gpuTemp, '°C')], ['Power', `${Math.round(metrics.gpuPower)} W`]] },
+    { key: 'ram', label: 'Memory', value: `${Math.round(metrics.ram)}%`, detail: memoryTotal ? `${memoryUsed.toFixed(1)} / ${memoryTotal.toFixed(1)} GB` : 'Capacity unavailable', tone: 'mint', icon: <MemoryStick />, numeric: metrics.ram, stats: [['In use', memoryTotal ? `${memoryUsed.toFixed(1)} GB` : 'Unavailable'], ['Available', memoryTotal ? `${(memoryTotal - memoryUsed).toFixed(1)} GB` : 'Unavailable'], ['Committed', metrics.memory ? formatBytes(metrics.memory.committedBytes) : 'Unavailable']] },
+    { key: 'vram', label: 'Video memory', value: `${Math.round(metrics.vram)}%`, detail: vramTotal ? `${vramUsed.toFixed(1)} / ${vramTotal.toFixed(1)} GB` : 'Capacity unavailable', tone: 'amber', icon: <CircleGauge />, numeric: metrics.vram, stats: [['Used', vramTotal ? `${vramUsed.toFixed(2)} GB` : 'Unavailable'], ['Total', vramTotal ? `${vramTotal.toFixed(1)} GB` : 'Unavailable']] },
+    { key: 'disk', label: hardware?.storage[0]?.name || 'Storage', value: `${metrics.diskRead.toFixed(1)} MB/s`, detail: `${sensorValue(metrics.ssdTemp || 0, '°C')} · ${metrics.diskWrite.toFixed(1)} MB/s write`, tone: 'rose', icon: <HardDrive />, numeric: metrics.diskActivity || (metrics.diskRead + metrics.diskWrite) / 4, stats: [['Read', `${metrics.diskRead.toFixed(1)} MB/s`], ['Write', `${metrics.diskWrite.toFixed(1)} MB/s`], ['Drive temp', sensorValue(metrics.ssdTemp || 0, '°C')]] },
+    { key: 'network', label: 'Network', value: `${metrics.download.toFixed(1)} Mbps`, detail: `${metrics.upload.toFixed(1)} Mbps upload`, tone: 'cyan', icon: <Network />, numeric: Math.min(100, metrics.download * 1.5), stats: [['Download', `${metrics.download.toFixed(1)} Mbps`], ['Upload', `${metrics.upload.toFixed(1)} Mbps`]] },
   ];
   return (
     <div className="performance-grid">
       {cards.map((card) => (
         <article key={card.label} className={`panel performance-card tone-${card.tone}`}>
-          <div className="performance-card-head"><span>{card.icon}</span><div><p>{card.label}</p><strong>{card.value}</strong><small>{card.detail}</small></div><button className="expand-button"><Maximize2 size={15} /></button></div>
+          <div className="performance-card-head"><span>{card.icon}</span><div><p>{card.label}</p><strong>{card.value}</strong><small>{card.detail}</small></div><button className="expand-button" aria-label={`Expand ${card.label}`} title={`Expand ${card.label}`} onClick={() => onExpand({ label: card.label, detail: card.detail, value: card.numeric, tone: card.tone, history: metrics.history[card.key], stats: card.stats })}><Maximize2 size={15} /></button></div>
           <div className="performance-chart"><LineChart values={metrics.history[card.key]} tone={card.tone} height={156} /></div>
           <div className="chart-axis"><span>60 seconds ago</span><span>Now</span></div>
         </article>
@@ -906,8 +1042,8 @@ function EnergyView({ energy, processes, agent }: { energy?: EnergyEstimate; pro
 
 function HistoryView({ metrics, energy, agent, pollMs }: MetricsProps & { energy?: EnergyEstimate; agent?: AgentInfo; pollMs?: number }) {
   // The collector keeps one rolling buffer; labeling it as anything longer
-  // would fabricate retention we do not have.
-  const [range, setRange] = useState('Live buffer');
+  // would fabricate retention we do not have. There is no range picker because
+  // there is nothing older to show.
   const history = metrics.history.cpu;
   const average = (values: number[]) => values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
   const peak = (values: number[]) => values.length ? Math.max(...values) : 0;
@@ -920,7 +1056,7 @@ function HistoryView({ metrics, energy, agent, pollMs }: MetricsProps & { energy
   return (
     <div className="history-grid">
       <section className="panel history-chart-card">
-        <div className="panel-header"><div><p className="eyebrow">SYSTEM LOAD</p><h2>Performance timeline</h2></div><div className="segmented-control">{['Live buffer'].map((item) => <button key={item} className={range === item ? 'active' : ''} onClick={() => setRange(item)}>{item}</button>)}</div></div>
+        <div className="panel-header"><div><p className="eyebrow">SYSTEM LOAD</p><h2>Performance timeline</h2></div><span className="history-buffer-chip">Live buffer only</span></div>
         <div className="history-legend"><span><i className="cyan-legend" />CPU average {average(metrics.history.cpu).toFixed(1)}%</span><span><i className="violet-legend" />GPU average {average(metrics.history.gpu).toFixed(1)}%</span></div>
         <div className="history-main-chart"><LineChart values={history} tone="cyan" height={250} /></div>
         <div className="history-axis"><span>{bufferSeconds} seconds ago</span><span>Last {bufferSeconds} s · {sampleSeconds.toFixed(1)} s samples</span><span>Now</span></div>
@@ -977,7 +1113,17 @@ function AlertsView({ alerts, live, onToggle }: { alerts?: AlertsSnapshot; live:
   );
 }
 
-function SettingsView({ theme, setTheme, metrics, hardware, agent, source }: { theme: ThemeId; setTheme: (theme: ThemeId) => void; metrics: MetricsProps['metrics']; hardware?: HardwareInfo; agent?: AgentInfo; source?: 'windows-agent' | 'tauri-native' }) {
+function SettingsView({ settings, onUpdate, metrics, energy, hardware, agent, source, alerts }: {
+  settings: VisorSettings;
+  onUpdate: (patch: Partial<VisorSettings>) => void;
+  metrics: MetricsProps['metrics'];
+  energy?: EnergyEstimate;
+  hardware?: HardwareInfo;
+  agent?: AgentInfo;
+  source?: 'windows-agent' | 'tauri-native';
+  alerts?: AlertsSnapshot;
+}) {
+  const desktop = isDesktop();
   const platform = hardware?.os.platform || 'operating system';
   const themes: Array<{ id: ThemeId; name: string; description: string; icon: React.ReactNode }> = [
     { id: 'studio', name: 'Studio', description: 'Graphite glass, restrained color', icon: <Sparkles size={15} /> },
@@ -987,13 +1133,54 @@ function SettingsView({ theme, setTheme, metrics, hardware, agent, source }: { t
   ];
   return (
     <div className="settings-grid">
-      <section className="panel settings-card appearance-card"><div className="settings-heading"><span><Palette /></span><div><h2>Appearance</h2><p>Four distinct art directions. The information hierarchy and contrast stay consistent.</p></div></div><div className="theme-choices">{themes.map((item) => <button key={item.id} aria-pressed={theme === item.id} className={theme === item.id ? 'active' : ''} onClick={() => setTheme(item.id)}><span className={`theme-preview theme-${item.id}`}><i /><b /><em /></span><strong>{item.icon}{item.name}</strong><small>{item.description}</small></button>)}</div></section>
-      <section className="panel settings-card"><div className="settings-heading"><span><Activity /></span><div><h2>Live data sources</h2><p>VISOR exposes coverage honestly. Missing hardware sensors are never replaced with invented values.</p></div></div><SettingStatus label="Collector runtime" detail={`One batched ${platform} snapshot every second`} value={agent ? (source === 'tauri-native' ? 'NATIVE' : 'LOOPBACK') : 'OFFLINE'} tone={agent ? 'live' : 'off'} /><SettingStatus label="Collector overhead" detail={agent ? `${agent.sampleDurationMs} ms last sample · PID ${agent.pid}` : 'Waiting for collector diagnostics'} value={agent ? `${agent.cpuPercent.toFixed(1)}% · ${agent.memoryMb.toFixed(0)} MB` : 'UNAVAILABLE'} tone={agent ? 'live' : 'off'} /><SettingStatus label="Per-process GPU attribution" detail={`Vendor and ${platform} GPU counters when available`} value={agent?.gpuAttributionAvailable ? 'AVAILABLE' : 'UNAVAILABLE'} tone={agent?.gpuAttributionAvailable ? 'live' : 'off'} /><SettingStatus label="CPU temperature" detail={metrics.sensorSources?.cpu || 'No compatible native hardware sensor is exposed on this system'} value={(metrics.cpuTemp ?? 0) > 0 ? `${Math.round(metrics.cpuTemp ?? 0)}°C` : 'UNAVAILABLE'} tone={(metrics.cpuTemp ?? 0) > 0 ? 'live' : 'off'} /><SettingStatus label="SSD temperature" detail={metrics.storageTemperatures?.[0]?.source || 'No compatible storage temperature sensor is exposed on this system'} value={(metrics.ssdTemp || 0) > 0 ? `${Math.round(metrics.ssdTemp || 0)}°C` : 'UNAVAILABLE'} tone={(metrics.ssdTemp || 0) > 0 ? 'live' : 'off'} /></section>
-      <section className="panel settings-card"><div className="settings-heading"><span><ShieldCheck /></span><div><h2>Privacy and trust</h2><p>Telemetry and runtime probes stay on this device.</p></div></div><SettingStatus label="Network boundary" detail={source === 'tauri-native' ? 'Native IPC; no telemetry HTTP server is started' : 'Browser agent bound to IPv4 loopback only'} value={source === 'tauri-native' ? 'IPC ONLY' : '127.0.0.1'} tone="live" /><SettingStatus label="External telemetry" detail="VISOR sends no hardware or model data to a remote service" value="OFF" tone="live" /></section>
+      <section className="panel settings-card appearance-card"><div className="settings-heading"><span><Palette /></span><div><h2>Appearance</h2><p>Four distinct art directions. The information hierarchy and contrast stay consistent.</p></div></div><div className="theme-choices">{themes.map((item) => <button key={item.id} aria-pressed={settings.theme === item.id} className={settings.theme === item.id ? 'active' : ''} onClick={() => onUpdate({ theme: item.id })}><span className={`theme-preview theme-${item.id}`}><i /><b /><em /></span><strong>{item.icon}{item.name}</strong><small>{item.description}</small></button>)}</div></section>
+
+      <section className="panel settings-card">
+        <div className="settings-heading"><span><Bell /></span><div><h2>Desktop behaviour</h2><p>How VISOR works when the window is not in front.</p></div></div>
+        <SettingSwitch label="System notifications" detail="Fires once per sustained alert, when the condition first trips." checked={settings.notifications} disabled={!desktop} onChange={(value) => onUpdate({ notifications: value })} />
+        <SettingSwitch label="Keep monitoring when the window closes" detail="The close button hides VISOR to the tray instead of quitting. Quit from the tray menu or File ‣ Quit." checked={settings.closeToTray} disabled={!desktop} onChange={(value) => onUpdate({ closeToTray: value })} />
+        <SettingSwitch label="Start with the system" detail="Launches VISOR minimized when you sign in. Off unless you turn it on." checked={settings.autostart} disabled={!desktop} onChange={(value) => onUpdate({ autostart: value })} />
+        {!desktop && <p className="setting-note">These three need the desktop shell. In the browser preview against the development agent there is no tray, menu or system notification to configure.</p>}
+        {desktop && <p className="setting-note">{activeAlertHint(alerts)}</p>}
+      </section>
+
+      <section className="panel settings-card">
+        <div className="settings-heading"><span><Leaf /></span><div><h2>Energy assumptions</h2><p>The projection multiplies live watts by these figures. They are assumptions, not measurements of your meter.</p></div></div>
+        <div className="setting-fields">
+          <label className="setting-field"><span>Electricity price</span><input type="number" min={0} max={5} step={0.01} inputMode="decimal" value={settings.tariffPerKwh} disabled={!desktop} onChange={(event) => onUpdate({ tariffPerKwh: Number(event.target.value) })} /><small>EUR per kWh</small></label>
+          <label className="setting-field"><span>Grid carbon intensity</span><input type="number" min={0} max={5000} step={1} inputMode="numeric" value={settings.carbonGramsPerKwh} disabled={!desktop} onChange={(event) => onUpdate({ carbonGramsPerKwh: Number(event.target.value) })} /><small>gCO₂e per kWh</small></label>
+        </div>
+        <p className="setting-note">{desktop ? 'Saved to the application data directory and applied on the next sample.' : 'The development agent reads VISOR_TARIFF_EUR_KWH and VISOR_CARBON_G_KWH from its environment instead.'}</p>
+      </section>
+
+      <section className="panel settings-card"><div className="settings-heading"><span><Activity /></span><div><h2>Live data sources</h2><p>VISOR exposes coverage honestly. Missing hardware sensors are never replaced with invented values.</p></div></div><SettingStatus label="Collector runtime" detail={`One batched ${platform} snapshot every second`} value={agent ? (source === 'tauri-native' ? 'NATIVE' : 'LOOPBACK') : 'OFFLINE'} tone={agent ? 'live' : 'off'} /><SettingStatus label="Collector overhead" detail={agent ? `${agent.sampleDurationMs} ms last sample · PID ${agent.pid}` : 'Waiting for collector diagnostics'} value={agent ? `${agent.cpuPercent.toFixed(1)}% · ${agent.memoryMb.toFixed(0)} MB` : 'UNAVAILABLE'} tone={agent ? 'live' : 'off'} /><SettingStatus label="Per-process GPU attribution" detail={`Vendor and ${platform} GPU counters when available`} value={agent?.gpuAttributionAvailable ? 'AVAILABLE' : 'UNAVAILABLE'} tone={agent?.gpuAttributionAvailable ? 'live' : 'off'} /><SettingStatus label="CPU temperature" detail={metrics.sensorSources?.cpu || 'No compatible native hardware sensor is exposed on this system'} value={(metrics.cpuTemp ?? 0) > 0 ? `${Math.round(metrics.cpuTemp ?? 0)}°C` : 'UNAVAILABLE'} tone={(metrics.cpuTemp ?? 0) > 0 ? 'live' : 'off'} /><SettingStatus label="CPU package power" detail={energy?.cpuMeasured ? 'Measured on-die, replacing the TDP model' : 'Modeled from live load and rated clock'} value={`${Math.round(metrics.cpuPower)} W`} tone={energy?.cpuMeasured ? 'live' : 'off'} /><SettingStatus label="SSD temperature" detail={metrics.storageTemperatures?.[0]?.source || 'No compatible storage temperature sensor is exposed on this system'} value={(metrics.ssdTemp || 0) > 0 ? `${Math.round(metrics.ssdTemp || 0)}°C` : 'UNAVAILABLE'} tone={(metrics.ssdTemp || 0) > 0 ? 'live' : 'off'} /></section>
+      <section className="panel settings-card"><div className="settings-heading"><span><ShieldCheck /></span><div><h2>Privacy and trust</h2><p>Telemetry and runtime probes stay on this device.</p></div></div><SettingStatus label="Network boundary" detail={source === 'tauri-native' ? 'Native IPC; no telemetry HTTP server is started' : 'Browser agent bound to IPv4 loopback only'} value={source === 'tauri-native' ? 'IPC ONLY' : '127.0.0.1'} tone="live" /><SettingStatus label="External telemetry" detail="VISOR sends no hardware or model data to a remote service" value="OFF" tone="live" /><SettingStatus label="Settings storage" detail={desktop ? 'settings.json inside the application data directory' : 'Browser localStorage for this preview'} value={desktop ? 'LOCAL FILE' : 'LOCAL STORAGE'} tone="live" /></section>
     </div>
   );
 }
 
+function activeAlertHint(alerts?: AlertsSnapshot) {
+  const active = alerts?.active.length || 0;
+  if (!active) return 'No condition is tripped right now, so nothing would arrive in the next minute.';
+  return `${active} sustained condition${active === 1 ? ' is' : 's are'} tripped now; a further trip would notify only after it clears and returns.`;
+}
+
+function SettingSwitch({ label, detail, checked, disabled, onChange }: { label: string; detail: string; checked: boolean; disabled: boolean; onChange: (value: boolean) => void }) {
+  return (
+    <div className={`setting-row setting-row-switch ${disabled ? 'setting-disabled' : ''}`}>
+      <div><strong>{label}</strong><span>{detail}</span></div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        aria-label={label}
+        disabled={disabled}
+        className={`switch ${checked ? 'switch-on' : ''}`}
+        onClick={() => onChange(!checked)}
+      ><span /></button>
+    </div>
+  );
+}
 function SettingStatus({ label, detail, value, tone }: { label: string; detail: string; value: string; tone: 'live' | 'off' }) {
   return <div className="setting-row"><div><strong>{label}</strong><span>{detail}</span></div><em className={`setting-status setting-status-${tone}`}>{value}</em></div>;
 }
@@ -1063,6 +1250,91 @@ function CommandPalette({ onClose, onNavigate }: { onClose: () => void; onNaviga
         {matches.length === 0 && <p className="planner-warning">No command matches “{query}”.</p>}
         <div className="command-footer"><span><kbd>↑↓</kbd> Navigate</span><span><kbd>Enter</kbd> Select</span><span><kbd>Esc</kbd> Close</span></div>
       </div>
+    </div>
+  );
+}
+
+/// The detail view behind a metric's expand control. It repeats the card's own
+/// figures and adds what only a wider plot can show.
+function MetricOverlay({ metric, sampleSeconds, onClose }: { metric: FocusMetric; sampleSeconds: number; onClose: () => void }) {
+  const peak = metric.history.length ? Math.max(...metric.history) : 0;
+  const mean = metric.history.length ? metric.history.reduce((sum, value) => sum + value, 0) / metric.history.length : 0;
+  return (
+    <div className="overlay-backdrop" onMouseDown={onClose} role="presentation">
+      <section className="panel metric-overlay" role="dialog" aria-modal="true" aria-label={`${metric.label} detail`} onMouseDown={(event) => event.stopPropagation()}>
+        <div className="overlay-head">
+          <div><p className="eyebrow">METRIC DETAIL</p><h2>{metric.label}</h2><span>{metric.detail}</span></div>
+          <button className="icon-button" onClick={onClose} aria-label={`Close ${metric.label} detail`}><X size={17} /></button>
+        </div>
+        <div className="overlay-body">
+          <Donut value={metric.value} tone={metric.tone} label={metric.label} size="large" />
+          <div className="overlay-chart">
+            <LineChart values={metric.history} tone={metric.tone} height={220} ariaLabel={`${metric.label} history`} />
+            <div className="chart-axis"><span>{Math.round(metric.history.length * sampleSeconds)} seconds ago</span><span>Now</span></div>
+          </div>
+        </div>
+        <div className="overlay-stats">
+          {metric.stats.map(([name, value]) => <div key={name}><span>{name}</span><strong>{value}</strong></div>)}
+          <div><span>Buffer peak</span><strong>{peak.toFixed(1)}%</strong></div>
+          <div><span>Buffer average</span><strong>{mean.toFixed(1)}%</strong></div>
+          <div><span>Samples held</span><strong>{metric.history.length}</strong></div>
+        </div>
+        <p className="overlay-note">The buffer holds the most recent {metric.history.length} samples of this collector session. Nothing here is interpolated.</p>
+      </section>
+    </div>
+  );
+}
+
+function AttentionPanel({ kind, metrics, energy, alerts, healthLabel, sampleSeconds, onClose, onNavigate }: {
+  kind: Exclude<Attention, 'none'>;
+  metrics: MetricsProps['metrics'];
+  energy?: EnergyEstimate;
+  alerts?: AlertsSnapshot;
+  healthLabel: string;
+  sampleSeconds: number;
+  onClose: () => void;
+  onNavigate: (view: ViewId) => void;
+}) {
+  const active = alerts?.active || [];
+  const watch = alerts?.watch || [];
+  const recent = alerts?.recent || [];
+  const hottest = (metrics.temperatureReadings || []).reduce((top, reading) => Math.max(top, reading.value), 0);
+  const hottestReading = (metrics.temperatureReadings || []).find((reading) => reading.value === hottest);
+  const commit = metrics.memory?.commitLimitBytes
+    ? ((metrics.memory.committedBytes || 0) / metrics.memory.commitLimitBytes * 100)
+    : null;
+  return (
+    <div className="overlay-backdrop backdrop-plain" onMouseDown={onClose} role="presentation">
+      <section className="panel attention-panel" role="dialog" aria-modal="true" aria-label={kind === 'alerts' ? 'Attention items' : 'System health detail'} onMouseDown={(event) => event.stopPropagation()}>
+        <div className="overlay-head">
+          <div>
+            <p className="eyebrow">{kind === 'alerts' ? 'ATTENTION' : 'HEALTH'}</p>
+            <h2>{kind === 'alerts' ? (active.length ? `${active.length} sustained condition${active.length === 1 ? '' : 's'}` : 'No sustained conditions') : healthLabel}</h2>
+            <span>{kind === 'alerts' ? 'Only conditions that held past their duration appear here.' : `Live figures from the last ${Math.round(metrics.history.cpu.length * sampleSeconds)} seconds.`}</span>
+          </div>
+          <button className="icon-button" onClick={onClose} aria-label="Close panel"><X size={17} /></button>
+        </div>
+
+        {kind === 'alerts' ? (
+          <div className="attention-list">
+            {active.map((item) => <div className="attention-row attention-active" key={item.id}><span>{item.title}</span><strong>{item.value}{item.unit}</strong></div>)}
+            {watch.map((item) => <div className="attention-row attention-watch" key={item.id}><span>{item.title}</span><strong>{item.progress}% of its sustained window</strong></div>)}
+            {recent.map((item) => <div className="attention-row attention-recent" key={`${item.id}-${item.resolvedAt}`}><span>{item.title} · resolved</span><strong>peak {item.peak}{item.unit}</strong></div>)}
+            {!active.length && !watch.length && !recent.length && <p className="attention-empty">Nothing has crossed a threshold in this session. Short spikes are ignored on purpose, so the alert history stays meaningful.</p>}
+            <button className="ghost-button" onClick={() => onNavigate('alerts')}><Bell size={15} /> Alert policies</button>
+          </div>
+        ) : (
+          <div className="attention-grid">
+            <div><span>CPU</span><strong>{metrics.cpu.toFixed(1)}%</strong><small>{sensorValue(metrics.cpuTemp, '°C')} · {Math.round(metrics.cpuPower)} W</small></div>
+            <div><span>GPU</span><strong>{metrics.gpu.toFixed(1)}%</strong><small>{sensorValue(metrics.gpuTemp, '°C')} · {Math.round(metrics.gpuPower)} W</small></div>
+            <div><span>Memory</span><strong>{metrics.ram.toFixed(1)}%</strong><small>{commit === null ? 'Commit unavailable' : `${commit.toFixed(1)}% committed`}</small></div>
+            <div><span>Video memory</span><strong>{metrics.vram.toFixed(1)}%</strong><small>{metrics.gpuMemory ? `${formatBytes(metrics.gpuMemory.usedBytes)} resident` : 'Unavailable'}</small></div>
+            <div><span>Hottest sensor</span><strong>{hottest > 0 ? `${hottest.toFixed(1)}°C` : 'Unavailable'}</strong><small>{hottestReading ? `${hottestReading.component} ${hottestReading.name}` : 'No temperature sensor reported'}</small></div>
+            <div><span>Power at the wall</span><strong>{energy ? `${energy.watts.toFixed(0)} W` : 'Unavailable'}</strong><small>{energy ? `${energy.confidenceScore}% confidence` : 'Collector offline'}</small></div>
+            <button className="ghost-button" onClick={() => onNavigate('performance')}><Activity size={15} /> Full performance view</button>
+          </div>
+        )}
+      </section>
     </div>
   );
 }

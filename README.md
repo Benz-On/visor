@@ -56,6 +56,9 @@ See [platform support](docs/PLATFORMS.md) for detailed coverage and limitations.
   llama.cpp, and related runtimes
 - Safe credential-presence inventory for 23 major cloud AI providers; secret
   values are never read and billing remains explicitly unavailable
+- Native desktop shell: menu bar with view accelerators, tray icon with a live
+  tooltip, restored window size and position, single-instance launch, and
+  opt-in system notifications for sustained alerts
 - Self-hosted Geist and Geist Mono typography with four persistent themes
 - Local native Tauri IPC; no external telemetry or analytics
 

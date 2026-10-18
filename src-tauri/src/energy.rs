@@ -124,9 +124,12 @@ pub fn estimate(inputs: EnergyInputs) -> EnergyEstimate {
     }
 }
 
-pub fn as_json(energy: &EnergyEstimate, session_wh: f64) -> Value {
-    let tariff = 0.25;
-    let carbon = 56.0;
+/// Assumed grid carbon intensity in gCO₂e/kWh and electricity price in €/kWh.
+/// Settings can override both; these are what a fresh session projects with.
+pub const DEFAULT_TARIFF: f64 = 0.25;
+pub const DEFAULT_CARBON: f64 = 56.0;
+
+pub fn as_json(energy: &EnergyEstimate, session_wh: f64, tariff: f64, carbon: f64) -> Value {
     let daily_kwh = energy.watts * 24.0 / 1000.0;
     // Confidence follows what is actually instrumented: a modeled CPU with a
     // measured GPU is a different claim from both rails measured on-die.
@@ -258,7 +261,10 @@ mod tests {
         });
         assert_eq!(measured.cpu, 58.2);
         assert!(measured.measured_cpu);
-        assert_eq!(as_json(&measured, 0.0)["confidence"], json!("hybrid"));
+        assert_eq!(
+            as_json(&measured, 0.0, DEFAULT_TARIFF, DEFAULT_CARBON)["confidence"],
+            json!("hybrid")
+        );
         // A package sensor and a package power limit are different instruments, so
         // the combined case must claim more than either alone.
         let both = estimate(EnergyInputs {
@@ -266,11 +272,50 @@ mod tests {
             measured_gpu_power: 142.0,
             ..base()
         });
-        assert_eq!(as_json(&both, 0.0)["confidence"], json!("measured"));
+        assert_eq!(
+            as_json(&both, 0.0, DEFAULT_TARIFF, DEFAULT_CARBON)["confidence"],
+            json!("measured")
+        );
         assert!(
-            as_json(&both, 0.0)["confidenceScore"].as_i64().unwrap()
-                > as_json(&measured, 0.0)["confidenceScore"].as_i64().unwrap()
+            as_json(&both, 0.0, DEFAULT_TARIFF, DEFAULT_CARBON)["confidenceScore"]
+                .as_i64()
+                .unwrap()
+                > as_json(&measured, 0.0, DEFAULT_TARIFF, DEFAULT_CARBON)["confidenceScore"]
+                    .as_i64()
+                    .unwrap()
         );
         assert!(measured.cpu < modeled.cpu, "50% load on a 170 W part");
+    }
+
+    #[test]
+    fn price_and_carbon_settings_move_the_projection() {
+        let estimate = estimate(EnergyInputs {
+            cpu_load: 50.0,
+            gpu_load: 60.0,
+            memory_total_gb: 32.0,
+            disk_activity: 10.0,
+            cpu_tdp: 170.0,
+            speed_ratio: 1.0,
+            measured_cpu_power: 200.0,
+            measured_gpu_power: 142.0,
+            gpu_power_limit: 220.0,
+        });
+        let cheap = as_json(&estimate, 0.0, 0.10, 100.0);
+        let dear = as_json(&estimate, 0.0, 0.40, 800.0);
+        assert_eq!(cheap["tariffPerKwh"], json!(0.1));
+        assert!(
+            dear["dailyCost"].as_f64().unwrap() > cheap["dailyCost"].as_f64().unwrap() * 3.9,
+            "0.40 vs 0.10 EUR/kWh"
+        );
+        assert!(
+            dear["dailyCarbonGrams"].as_f64().unwrap()
+                > cheap["dailyCarbonGrams"].as_f64().unwrap()
+        );
+        // The values echoed back must be the ones actually used, or the Settings
+        // field would be decoration.
+        assert_ne!(
+            cheap["dailyCarbonGrams"],
+            as_json(&estimate, 0.0, 0.10, DEFAULT_CARBON)["dailyCarbonGrams"]
+        );
     }
 }

@@ -1,12 +1,14 @@
 import { useId } from 'react';
 import type { MetricTone } from '../types';
 
+// Charts take the same tokens the themes redefine, so Cyberdeck and Retro
+// actually recolor the plots instead of leaving hardcoded hex on screen.
 const toneColors: Record<MetricTone, string> = {
-  cyan: '#58d9ff',
-  violet: '#9c8cff',
-  mint: '#63e6be',
-  amber: '#ffbd5b',
-  rose: '#ff7190',
+  cyan: 'var(--cyan)',
+  violet: 'var(--violet)',
+  mint: 'var(--mint)',
+  amber: 'var(--amber)',
+  rose: 'var(--rose)',
 };
 
 interface LineChartProps {

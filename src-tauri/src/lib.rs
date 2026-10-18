@@ -3,25 +3,48 @@ mod collector;
 mod energy;
 mod gguf;
 mod local_ai;
+mod shell;
 mod throughput;
 mod timed_command;
 
 use collector::Collector;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-#[cfg(unix)]
 use std::collections::HashSet;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
+use tauri_plugin_autostart::MacosLauncher;
+use tauri_plugin_window_state::StateFlags;
 
 #[derive(Clone)]
 struct RuntimeState {
     latest: Arc<RwLock<Option<Value>>>,
     alert_settings: Arc<Mutex<HashMap<String, bool>>>,
     collector: Arc<Mutex<Collector>>,
+    /// Shell switches the window cannot own, because the tray and the menu have
+    /// to read them while the webview is hidden.
+    shell: Arc<ShellFlags>,
+}
+
+#[derive(Debug, Default)]
+struct ShellFlags {
+    paused: AtomicBool,
+    notifications: AtomicBool,
+    close_to_tray: AtomicBool,
+}
+
+impl ShellFlags {
+    fn snapshot(&self) -> Value {
+        json!({
+            "paused": self.paused.load(Ordering::Relaxed),
+            "notifications": self.notifications.load(Ordering::Relaxed),
+            "closeToTray": self.close_to_tray.load(Ordering::Relaxed),
+        })
+    }
 }
 
 /// Fresh look-up of a process at action time, independent of the (possibly
@@ -330,16 +353,32 @@ fn find_descendants(state: &RuntimeState, root_pid: u32) -> Result<Vec<u32>, Str
     Ok(descendants)
 }
 
-fn start_collector(state: RuntimeState) {
+fn start_collector(state: RuntimeState, app: AppHandle) {
     thread::Builder::new()
         .name("visor-collector".to_string())
-        .spawn(move || loop {
-            if let Ok(snapshot) = collect_snapshot(&state, false) {
-                if let Ok(mut latest) = state.latest.write() {
-                    *latest = Some(snapshot);
+        .spawn(move || {
+            let mut notified: HashSet<String> = HashSet::new();
+            loop {
+                if let Ok(snapshot) = collect_snapshot(&state, false) {
+                    // The tray and the notification path read the snapshot before it
+                    // is published, so they stay correct while the window is hidden
+                    // and nobody is polling.
+                    let tooltip =
+                        shell::tooltip(&snapshot, state.shell.paused.load(Ordering::Relaxed));
+                    shell::update_tray(&app, &tooltip);
+                    if state.shell.notifications.load(Ordering::Relaxed) {
+                        for (title, body) in shell::fresh_alerts(&snapshot, &mut notified) {
+                            shell::notify(&app, &title, &body);
+                        }
+                    } else {
+                        notified.clear();
+                    }
+                    if let Ok(mut latest) = state.latest.write() {
+                        *latest = Some(snapshot);
+                    }
                 }
+                thread::sleep(Duration::from_millis(1100));
             }
-            thread::sleep(Duration::from_millis(1100));
         })
         .expect("failed to start VISOR collector");
 }
@@ -382,24 +421,131 @@ fn get_throughput_history() -> Result<Value, String> {
     Ok(throughput::history_json())
 }
 
+#[tauri::command]
+fn get_shell_state(state: State<'_, RuntimeState>) -> Value {
+    state.shell.snapshot()
+}
+
+#[tauri::command]
+fn set_shell_flags(
+    app: AppHandle,
+    state: State<'_, RuntimeState>,
+    paused: Option<bool>,
+    notifications: Option<bool>,
+    close_to_tray: Option<bool>,
+) -> Value {
+    if let Some(value) = paused {
+        state.shell.paused.store(value, Ordering::Relaxed);
+    }
+    if let Some(value) = notifications {
+        state.shell.notifications.store(value, Ordering::Relaxed);
+    }
+    if let Some(value) = close_to_tray {
+        state.shell.close_to_tray.store(value, Ordering::Relaxed);
+    }
+    // The tray repeats the paused state, so refresh it now rather than letting the
+    // next sample contradict the switch the user just moved.
+    let latest = state.latest.read().ok().and_then(|guard| guard.clone());
+    let tooltip = shell::tooltip(
+        latest.as_ref().unwrap_or(&Value::Null),
+        state.shell.paused.load(Ordering::Relaxed),
+    );
+    shell::update_tray(&app, &tooltip);
+    state.shell.snapshot()
+}
+
+#[tauri::command]
+fn set_price_factors(
+    state: State<'_, RuntimeState>,
+    tariff: f64,
+    carbon: f64,
+) -> Result<Value, String> {
+    // Clamped, because a negative tariff would make the projection pay the user
+    // and a zero carbon factor would claim the machine emits nothing.
+    if !tariff.is_finite() || !carbon.is_finite() {
+        return Err("Price and carbon factors must be finite numbers.".to_string());
+    }
+    let tariff = tariff.clamp(0.0, 5.0);
+    let carbon = carbon.clamp(0.0, 5_000.0);
+    let mut collector = state
+        .collector
+        .lock()
+        .map_err(|_| "VISOR native collector is unavailable.".to_string())?;
+    collector.set_price_factors(tariff, carbon);
+    Ok(json!({ "tariffPerKwh": tariff, "carbonGramsPerKwh": carbon }))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let state = RuntimeState {
         latest: Arc::new(RwLock::new(None)),
         alert_settings: Arc::new(Mutex::new(HashMap::new())),
         collector: Arc::new(Mutex::new(Collector::new())),
+        shell: Arc::new(ShellFlags {
+            // Restarts must not silently begin sending system notifications.
+            notifications: AtomicBool::new(false),
+            ..ShellFlags::default()
+        }),
     };
-    start_collector(state.clone());
     tauri::Builder::default()
-        .manage(state)
+        // Registered first so a second launch focuses the running window instead of
+        // starting a second collector.
+        .plugin(tauri_plugin_single_instance::init(
+            |app, _arguments, _directory| {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.unminimize();
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            },
+        ))
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                // Size, place and zoom only. Restoring visibility or a fullscreen
+                // state would fight the tray and the collector's own startup order.
+                .with_state_flags(StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED)
+                .build(),
+        )
+        // No launch arguments: nothing in the app parses a `--minimized` flag,
+        // so passing one here would be a label with no behaviour behind it.
+        .plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            None,
+        ))
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_store::Builder::default().build())
+        .manage(state.clone())
         .invoke_handler(tauri::generate_handler![
             get_system_snapshot,
             refresh_system_snapshot,
             get_throughput_history,
             kill_process,
             set_process_priority,
-            set_alert_rule
+            set_alert_rule,
+            get_shell_state,
+            set_shell_flags,
+            set_price_factors
         ])
+        .setup(move |app| {
+            let handle = app.handle().clone();
+            let menu = shell::build_menu(&handle)?;
+            app.set_menu(menu)?;
+            shell::build_tray(app)?;
+            start_collector(state.clone(), handle);
+            Ok(())
+        })
+        .on_menu_event(shell::handle_menu_event)
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let state = window.state::<RuntimeState>();
+                // Opt-in only: closing the window quits unless the user chose to keep
+                // monitoring from the tray.
+                if state.shell.close_to_tray.load(Ordering::Relaxed) {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running VISOR");
 }
