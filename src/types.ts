@@ -8,8 +8,12 @@ export interface InferenceThroughputInfo {
   decodeTokensPerSecond: number | null;
   prefillTokensPerSecond: number | null;
   lastTokens: number | null;
-  evidence: 'metrics-endpoint' | 'runtime-log' | 'unavailable' | string;
+  evidence: 'metrics-endpoint' | 'runtime-log' | 'last-runtime-log' | 'unavailable' | string;
   observedAt: string | null;
+  /** Age of the logged completion in seconds; set on the log path. */
+  ageSeconds?: number | null;
+  /** Runtime that served the counters, when the metrics path supplied them. */
+  source?: string | null;
 }
 
 /** One measured completion sample from the collector's session history. */
@@ -26,14 +30,14 @@ export interface LiveMetrics {
   gpu: number;
   ram: number;
   vram: number;
-  cpuTemp: number;
+  cpuTemp: number | null;
   gpuTemp: number;
   ssdTemp?: number;
   storageTemperatures?: StorageTemperature[];
   temperatureReadings?: TemperatureReading[];
   hardwareSensors?: HardwareSensorReading[];
   sensorGuidance?: string | null;
-  sensorSources?: { cpu: string | null; gpu: string | null; storage: string[] };
+  sensorSources?: { cpu: string | null; gpu: string | null; storage: string[]; hardwareMonitorAvailable?: boolean };
   cpuPower: number;
   gpuPower: number;
   download: number;
@@ -168,12 +172,17 @@ export interface LocalModelInfo {
   location?: string;
   process: LocalAiProcess | null;
   applicationEnergyWatts: number | null;
-  applicationCpu: number;
-  applicationGpu: number;
+  /** Null when the runtime holds several models: one aggregate cannot be split. */
+  applicationCpu: number | null;
+  applicationGpu: number | null;
   /** Exact GGUF header metadata — present only when the blob was readable. */
   parameterCountExact?: number;
   weightBytesExact?: number;
   kvHeads?: number | null;
+  /** Exact K head dimension from the GGUF header, when the blob was read. */
+  kvKeyLength?: number | null;
+  /** Exact V head dimension from the GGUF header, when the blob was read. */
+  kvValueLength?: number | null;
   kvHeadCountExact?: boolean;
   layers?: number | null;
   experts?: number | null;
@@ -304,6 +313,8 @@ export interface EnergyEstimate {
   confidence: 'measured' | 'hybrid' | 'estimated';
   confidenceScore: number;
   methodology: string;
+  cpuMeasured?: boolean;
+  gpuMeasured?: boolean;
   sessionWh: number;
   hourlyKwh: number;
   dailyKwh: number;
@@ -375,6 +386,10 @@ export interface SystemSnapshot {
   timestamp: string;
   source: 'windows-agent' | 'tauri-native';
   pollMs: number;
+  /** Cadence the collector aims for. pollMs is the interval it actually got. */
+  targetPollMs?: number;
+  /** Milliseconds since each background collector last began a run. */
+  sampledAgoMs?: Record<string, number | null>;
   hardware: HardwareInfo;
   metrics: Omit<LiveMetrics, 'history'>;
   energy: EnergyEstimate;

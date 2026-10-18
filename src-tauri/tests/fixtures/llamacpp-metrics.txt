@@ -1,0 +1,61 @@
+# Fixture: llama.cpp /metrics text exposition.
+#
+# PROVENANCE: the metric NAMES below are the authoritative set asserted by
+# upstream llama.cpp in tools/server/tests/unit/test_metrics.py
+# (expected_counters + expected_gauges), fetched 2026-10-18. The VALUES are
+# synthetic - no llama.cpp server with --metrics was reachable on this machine
+# when this fixture was written - so tests built on it assert name handling and
+# arithmetic, never numeric realism.
+#
+# Why every entry is present: this is the shape that broke substring matching.
+# `prompt_tokens_cached_total` is a SUBSET of prompt_tokens_total, the
+# `*_seconds` gauges are averages rather than cumulative seconds, and
+# `n_tokens_max` / `spec_decode_*` are unrelated counters. Summing any of them
+# into a throughput total inflates it silently.
+# HELP llamacpp:prompt_tokens_total Number of prompt tokens processed.
+# TYPE llamacpp:prompt_tokens_total counter
+llamacpp:prompt_tokens_total{model="qwen3.5:9b"} 1.43887e+06
+# HELP llamacpp:prompt_tokens_cached_total Number of cached prompt tokens.
+# TYPE llamacpp:prompt_tokens_cached_total counter
+llamacpp:prompt_tokens_cached_total{model="qwen3.5:9b"} 950000
+# HELP llamacpp:prompt_seconds_total Time spent processing prompt tokens.
+# TYPE llamacpp:prompt_seconds_total counter
+llamacpp:prompt_seconds_total 207.21
+# HELP llamacpp:tokens_predicted_total Number of generated tokens.
+# TYPE llamacpp:tokens_predicted_total counter
+llamacpp:tokens_predicted_total{model="qwen3.5:9b"} 94208
+# HELP llamacpp:tokens_predicted_seconds_total Time spent generating tokens.
+# TYPE llamacpp:tokens_predicted_seconds_total counter
+llamacpp:tokens_predicted_seconds_total 1540.5
+# HELP llamacpp:n_decode_total Total number of decode passes.
+# TYPE llamacpp:n_decode_total counter
+llamacpp:n_decode_total 94208
+# HELP llamacpp:n_tokens_max Max number of tokens in the context.
+# TYPE llamacpp:n_tokens_max gauge
+llamacpp:n_tokens_max 4096
+# HELP llamacpp:spec_decode_num_draft_tokens_total Speculative draft tokens.
+# TYPE llamacpp:spec_decode_num_draft_tokens_total counter
+llamacpp:spec_decode_num_draft_tokens_total 51000
+# HELP llamacpp:spec_decode_num_accepted_tokens_total Accepted draft tokens.
+# TYPE llamacpp:spec_decode_num_accepted_tokens_total counter
+llamacpp:spec_decode_num_accepted_tokens_total 33000
+# HELP llamacpp:spec_decode_num_drafts_total Number of speculative drafts.
+# TYPE llamacpp:spec_decode_num_drafts_total counter
+llamacpp:spec_decode_num_drafts_total 12000
+# HELP llamacpp:prompt_tokens_seconds Time to process a prompt token.
+# TYPE llamacpp:prompt_tokens_seconds gauge
+llamacpp:prompt_tokens_seconds 0.000144
+# HELP llamacpp:predicted_tokens_seconds Time to predict a token.
+# TYPE llamacpp:predicted_tokens_seconds gauge
+llamacpp:predicted_tokens_seconds 0.01635
+# HELP llamacpp:requests_processing Number of requests processing.
+# TYPE llamacpp:requests_processing gauge
+llamacpp:requests_processing 0
+# HELP llamacpp:requests_deferred Number of requests deferred.
+# TYPE llamacpp:requests_deferred gauge
+llamacpp:requests_deferred 0
+# HELP llamacpp:n_busy_slots_per_decode Average number of busy slots per decode.
+# TYPE llamacpp:n_busy_slots_per_decode gauge
+llamacpp:n_busy_slots_per_decode 1
+# Prometheus text exposition also carries these runtime lines.
+llamacpp:prompt_tokens_total{model="other:1b"} 1000

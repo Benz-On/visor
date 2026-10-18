@@ -11,7 +11,7 @@ Thank you for helping improve VISOR.
 
 ## Development
 
-Install Node.js 20.19+, Rust stable, and the current platform prerequisites for Tauri.
+Install Node.js 20.19+, Rust 1.90+, and the current platform prerequisites for Tauri.
 
 ```bash
 npm install
@@ -38,6 +38,6 @@ cargo test --manifest-path src-tauri/Cargo.toml --locked
 - Document platform-specific behavior in `docs/PLATFORMS.md`.
 - Include screenshots for material interface changes.
 
-Contributors must have the right to submit their work. The project source license
-is still awaiting an owner decision; pull-request licensing terms will be finalized
-before the repository is presented as open source.
+VISOR is licensed under the Apache License 2.0. By opening a pull request you
+confirm that your contribution may be distributed under that license, and that
+you have the right to submit the work you contribute.

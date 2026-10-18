@@ -53,7 +53,7 @@ export function useTelemetry(paused: boolean) {
         return {
           ...previous,
           ...nextValues,
-          cpuTemp: jitter(previous.cpuTemp, 2.4, 47, 84),
+          cpuTemp: jitter(previous.cpuTemp ?? 60, 2.4, 47, 84),
           gpuTemp: jitter(previous.gpuTemp, 1.8, 54, 83),
           cpuPower: jitter(previous.cpuPower, 12, 34, 138),
           gpuPower: jitter(previous.gpuPower, 18, 78, 315),
