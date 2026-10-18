@@ -36,6 +36,20 @@ Versioning while the product remains in beta.
 
 ### Fixed
 
+- Three Windows collectors silently returned nothing, so the sensor console,
+  memory detail, and Hardware tab kept their zero-valued defaults forever.
+  `powershell.exe -Command -` buffers the final pipeline until it sees an empty
+  line, and the embedded scripts end in `} | ConvertTo-Json`, so their payloads
+  produced zero bytes. The payload is now terminated properly, and empty or
+  unreadable output is reported through `agent.lastError` instead of being
+  discarded. Failed reads also keep the last good GPU and sensor data rather
+  than dropping every process's GPU and VRAM share to zero, and the counter
+  collector gets a budget that matches its measured six-second runtime.
+- A missing CPU temperature is reported as absent instead of as `0`, so it can
+  no longer be mistaken for a real reading, and the interface no longer labels
+  an unavailable sensor as coming from a hardware monitor. The
+  `hardwareMonitorAvailable` signal from the sensor script is now passed
+  through to the interface.
 - Model weight sizes are no longer overestimated. The GGML type table was
   mapped onto the wrong quantization ids and assumed roughly one byte per
   weight for most formats, so Q4_K and Q4_0 read about 1.8x too large and

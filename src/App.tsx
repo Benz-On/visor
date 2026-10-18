@@ -125,7 +125,7 @@ function App() {
   }, [theme]);
 
   const title = viewTitles[activeView];
-  const thermalAlert = metrics.cpuTemp >= 90 || metrics.gpuTemp >= 86;
+  const thermalAlert = (metrics.cpuTemp ?? 0) >= 90 || metrics.gpuTemp >= 86;
   const activeAlertCount = visor.snapshot?.alerts?.active.length || 0;
   const healthLabel = visor.connection === 'demo'
     ? 'Demo mode'
@@ -253,7 +253,7 @@ const bytesToGb = (bytes = 0) => bytes / 1024 ** 3;
 const formatBytes = (bytes = 0) => bytes >= 1024 ** 3
   ? `${bytesToGb(bytes).toFixed(2)} GB`
   : `${(bytes / 1024 ** 2).toFixed(bytes >= 100 * 1024 ** 2 ? 0 : 1)} MB`;
-const sensorValue = (value: number, suffix: string) => value > 0 ? `${value.toFixed(1)}${suffix}` : 'Unavailable';
+const sensorValue = (value: number | null | undefined, suffix: string) => typeof value === 'number' && value > 0 ? `${value.toFixed(1)}${suffix}` : 'Unavailable';
 
 function Overview({ metrics, energy, hardware, localAI, processes, live, refreshing, onRefresh, onViewProcesses, onKill, onPriority }: OverviewProps) {
   const memoryUsed = bytesToGb(metrics.memory?.usedBytes);
@@ -429,7 +429,7 @@ function EfficiencyCard({ metrics, energy }: MetricsProps & { energy?: EnergyEst
 
 function ThermalCard({ metrics }: MetricsProps) {
   const sensedTemperatures = (metrics.temperatureReadings || []).map((reading) => reading.value).filter((value) => value > 0);
-  if (!sensedTemperatures.length) sensedTemperatures.push(...[metrics.cpuTemp, metrics.gpuTemp, metrics.ssdTemp || 0].filter((value) => value > 0));
+  if (!sensedTemperatures.length) sensedTemperatures.push(...[metrics.cpuTemp ?? 0, metrics.gpuTemp, metrics.ssdTemp || 0].filter((value) => value > 0));
   const hottestTemperature = sensedTemperatures.length ? Math.max(...sensedTemperatures) : 0;
   const thermalStatus = !hottestTemperature
     ? 'Sensors unavailable'
@@ -440,7 +440,7 @@ function ThermalCard({ metrics }: MetricsProps) {
         : 'Within range';
   const preferredReading = (component: 'CPU' | 'GPU' | 'Storage') => metrics.temperatureReadings?.find((reading) => reading.component === component);
   const thermalReadings = [
-    { label: 'CPU', value: preferredReading('CPU')?.value || metrics.cpuTemp, source: preferredReading('CPU')?.source || metrics.sensorSources?.cpu },
+    { label: 'CPU', value: preferredReading('CPU')?.value || (metrics.cpuTemp ?? 0), source: preferredReading('CPU')?.source || metrics.sensorSources?.cpu },
     { label: 'GPU', value: preferredReading('GPU')?.value || metrics.gpuTemp, source: preferredReading('GPU')?.source || metrics.sensorSources?.gpu },
     { label: 'SSD', value: preferredReading('Storage')?.value || metrics.ssdTemp || 0, source: preferredReading('Storage')?.source || metrics.storageTemperatures?.[0]?.name },
   ];
@@ -598,7 +598,7 @@ function HardwareView({ metrics, hardware, refreshing, onRefresh }: MetricsProps
 function ThermalMatrix({ metrics, refreshing, onRefresh }: MetricsProps & RefreshControls) {
   const readings = metrics.temperatureReadings?.filter((reading) => reading.value > 0) || [];
   const fallbackReadings: TemperatureReading[] = [
-    { component: 'CPU' as const, name: 'CPU package', value: metrics.cpuTemp, min: null, max: null, source: metrics.sensorSources?.cpu || 'Hardware monitor', accuracy: 'hardware-monitor' },
+    { component: 'CPU' as const, name: 'CPU package', value: metrics.cpuTemp ?? 0, min: null, max: null, source: metrics.sensorSources?.cpu || 'Sensor unavailable', accuracy: metrics.sensorSources?.cpu ? 'hardware-monitor' : 'unavailable' },
     { component: 'GPU' as const, name: 'GPU core', value: metrics.gpuTemp, min: null, max: null, source: metrics.sensorSources?.gpu || 'Graphics driver', accuracy: 'graphics-driver' },
     { component: 'Storage' as const, name: metrics.storageTemperatures?.[0]?.name || 'Primary storage', value: metrics.ssdTemp || 0, min: null, max: null, source: metrics.storageTemperatures?.[0]?.source || 'Storage health', accuracy: 'storage-health' },
   ].filter((reading) => reading.value > 0);
@@ -967,7 +967,7 @@ function SettingsView({ theme, setTheme, metrics, hardware, agent, source }: { t
   return (
     <div className="settings-grid">
       <section className="panel settings-card appearance-card"><div className="settings-heading"><span><Palette /></span><div><h2>Appearance</h2><p>Four distinct art directions. The information hierarchy and contrast stay consistent.</p></div></div><div className="theme-choices">{themes.map((item) => <button key={item.id} aria-pressed={theme === item.id} className={theme === item.id ? 'active' : ''} onClick={() => setTheme(item.id)}><span className={`theme-preview theme-${item.id}`}><i /><b /><em /></span><strong>{item.icon}{item.name}</strong><small>{item.description}</small></button>)}</div></section>
-      <section className="panel settings-card"><div className="settings-heading"><span><Activity /></span><div><h2>Live data sources</h2><p>VISOR exposes coverage honestly. Missing hardware sensors are never replaced with invented values.</p></div></div><SettingStatus label="Collector runtime" detail={`One batched ${platform} snapshot every second`} value={agent ? (source === 'tauri-native' ? 'NATIVE' : 'LOOPBACK') : 'OFFLINE'} tone={agent ? 'live' : 'off'} /><SettingStatus label="Collector overhead" detail={agent ? `${agent.sampleDurationMs} ms last sample · PID ${agent.pid}` : 'Waiting for collector diagnostics'} value={agent ? `${agent.cpuPercent.toFixed(1)}% · ${agent.memoryMb.toFixed(0)} MB` : 'UNAVAILABLE'} tone={agent ? 'live' : 'off'} /><SettingStatus label="Per-process GPU attribution" detail={`Vendor and ${platform} GPU counters when available`} value={agent?.gpuAttributionAvailable ? 'AVAILABLE' : 'UNAVAILABLE'} tone={agent?.gpuAttributionAvailable ? 'live' : 'off'} /><SettingStatus label="CPU temperature" detail={metrics.sensorSources?.cpu || 'No compatible native hardware sensor is exposed on this system'} value={metrics.cpuTemp > 0 ? `${Math.round(metrics.cpuTemp)}°C` : 'UNAVAILABLE'} tone={metrics.cpuTemp > 0 ? 'live' : 'off'} /><SettingStatus label="SSD temperature" detail={metrics.storageTemperatures?.[0]?.source || 'No compatible storage temperature sensor is exposed on this system'} value={(metrics.ssdTemp || 0) > 0 ? `${Math.round(metrics.ssdTemp || 0)}°C` : 'UNAVAILABLE'} tone={(metrics.ssdTemp || 0) > 0 ? 'live' : 'off'} /></section>
+      <section className="panel settings-card"><div className="settings-heading"><span><Activity /></span><div><h2>Live data sources</h2><p>VISOR exposes coverage honestly. Missing hardware sensors are never replaced with invented values.</p></div></div><SettingStatus label="Collector runtime" detail={`One batched ${platform} snapshot every second`} value={agent ? (source === 'tauri-native' ? 'NATIVE' : 'LOOPBACK') : 'OFFLINE'} tone={agent ? 'live' : 'off'} /><SettingStatus label="Collector overhead" detail={agent ? `${agent.sampleDurationMs} ms last sample · PID ${agent.pid}` : 'Waiting for collector diagnostics'} value={agent ? `${agent.cpuPercent.toFixed(1)}% · ${agent.memoryMb.toFixed(0)} MB` : 'UNAVAILABLE'} tone={agent ? 'live' : 'off'} /><SettingStatus label="Per-process GPU attribution" detail={`Vendor and ${platform} GPU counters when available`} value={agent?.gpuAttributionAvailable ? 'AVAILABLE' : 'UNAVAILABLE'} tone={agent?.gpuAttributionAvailable ? 'live' : 'off'} /><SettingStatus label="CPU temperature" detail={metrics.sensorSources?.cpu || 'No compatible native hardware sensor is exposed on this system'} value={(metrics.cpuTemp ?? 0) > 0 ? `${Math.round(metrics.cpuTemp ?? 0)}°C` : 'UNAVAILABLE'} tone={(metrics.cpuTemp ?? 0) > 0 ? 'live' : 'off'} /><SettingStatus label="SSD temperature" detail={metrics.storageTemperatures?.[0]?.source || 'No compatible storage temperature sensor is exposed on this system'} value={(metrics.ssdTemp || 0) > 0 ? `${Math.round(metrics.ssdTemp || 0)}°C` : 'UNAVAILABLE'} tone={(metrics.ssdTemp || 0) > 0 ? 'live' : 'off'} /></section>
       <section className="panel settings-card"><div className="settings-heading"><span><ShieldCheck /></span><div><h2>Privacy and trust</h2><p>Telemetry and runtime probes stay on this device.</p></div></div><SettingStatus label="Network boundary" detail={source === 'tauri-native' ? 'Native IPC; no telemetry HTTP server is started' : 'Browser agent bound to IPv4 loopback only'} value={source === 'tauri-native' ? 'IPC ONLY' : '127.0.0.1'} tone="live" /><SettingStatus label="External telemetry" detail="VISOR sends no hardware or model data to a remote service" value="OFF" tone="live" /></section>
     </div>
   );
