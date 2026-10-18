@@ -131,8 +131,21 @@ $releaseManifest = [ordered]@{
     generatedAt = [DateTime]::UtcNow.ToString('o')
     files = $files
 }
-$releaseManifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $artifactRoot 'release-manifest.json') -Encoding UTF8
-$files | ForEach-Object { "{0}  {1}" -f $_.sha256, $_.name } | Set-Content -LiteralPath (Join-Path $artifactRoot 'SHA256SUMS.txt') -Encoding ASCII
+# Release metadata is read by CI and by coreutils on Linux, where a UTF-8 BOM
+# breaks JSON parsers and `sha256sum -c` reads the trailing carriage return as
+# part of the file name. Both files are written as UTF-8 without a BOM and with
+# LF separators instead of the Windows PowerShell defaults.
+$utf8NoBom = New-Object System.Text.UTF8Encoding $false
+$lf = [string][char]10
+# ConvertTo-Json emits carriage returns between its own lines on Windows
+# PowerShell, so the manifest is normalized to LF like the checksum file.
+$manifestJson = ($releaseManifest | ConvertTo-Json -Depth 5) -replace "`r`n", "`n"
+$manifestJson = $manifestJson + $lf
+[System.IO.File]::WriteAllText(
+    (Join-Path $artifactRoot 'release-manifest.json'), $manifestJson, $utf8NoBom)
+$checksums = (($files | ForEach-Object { '{0}  {1}' -f $_.sha256, $_.name }) -join $lf) + $lf
+[System.IO.File]::WriteAllText(
+    (Join-Path $artifactRoot 'SHA256SUMS.txt'), $checksums, $utf8NoBom)
 
 Write-Host "VISOR $version Windows artifacts are ready in $artifactRoot"
 $files | Format-Table name, bytes, sha256 -AutoSize

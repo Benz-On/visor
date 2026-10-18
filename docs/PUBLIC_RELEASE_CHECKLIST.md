@@ -5,11 +5,12 @@ repository-owner decisions before changing visibility.
 
 ## Blocking decision
 
-- [ ] Select and add a source license. Apache-2.0 is the recommended permissive
-      option for a systems project because it includes an explicit patent grant;
-      MIT is shorter; a proprietary/source-available license is also possible.
+- [x] Select and add a source license. Apache-2.0 was chosen for its explicit
+      patent grant and its match with Tauri's own dual licensing. The license
+      text is in `LICENSE`; README, CONTRIBUTING, and the inbound=outbound
+      contributor grant are aligned with it.
 
-Do not describe VISOR as open source until this decision is complete.
+VISOR may now be described as open source under Apache-2.0.
 
 ## GitHub repository settings
 
@@ -29,7 +30,11 @@ Suggested topics: `system-monitor`, `tauri`, `rust`, `react`, `windows`, `macos`
 
 ## Release readiness
 
-- [ ] Restore hosted-runner CI when GitHub Actions quota becomes available.
+- [x] Restore an automatic CI gate on a quota-cheap runner: pushes to `main` and
+      pull requests run the preflight, web build, agent tests, and native
+      formatting/Clippy/tests on Linux only.
+- [ ] Restore the automatic Windows and macOS native legs when Actions quota
+      allows; they currently run only on manual dispatch.
 - [ ] Build each published target manually on its native host and verify every
       platform file plus checksums and manifest.
 - [ ] Smoke-test one package per operating system and architecture family.

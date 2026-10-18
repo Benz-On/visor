@@ -26,6 +26,21 @@ test('estimated power remains finite with missing sensors', () => {
   assert.ok(result.watts > 0);
 });
 
+test('a measured package replaces the TDP curve and lifts confidence', () => {
+  const inputs = { cpuLoad: 50, gpuLoad: 60, cpuTdp: 170, cpuSpeedRatio: 1, memoryTotalGb: 32, diskActivity: 10 };
+  const modeled = estimateEnergy(inputs);
+  const measured = estimateEnergy({ ...inputs, measuredCpuPower: 58.2 });
+  const both = estimateEnergy({ ...inputs, measuredCpuPower: 58.2, measuredGpuPower: 142 });
+
+  assert.equal(measured.confidence, 'hybrid');
+  assert.equal(measured.breakdown.cpu, 58.2);
+  assert.ok(measured.breakdown.cpu < modeled.breakdown.cpu, '50% load on a 170 W part');
+  // Both rails instrumented must not claim the same confidence as one.
+  assert.equal(both.confidence, 'measured');
+  assert.ok(both.confidenceScore > measured.confidenceScore);
+  assert.match(both.methodology, /CPU package and GPU measured/);
+});
+
 test('process energy allocation favors the active workload', () => {
   const energy = estimateEnergy({ cpuLoad: 70, gpuLoad: 80, measuredGpuPower: 200 });
   const attributed = attributeProcessEnergy([
@@ -47,4 +62,14 @@ test('CPU TDP heuristic scales with core count', () => {
   assert.equal(inferCpuTdp({ physicalCores: 4 }), 65);
   assert.equal(inferCpuTdp({ physicalCores: 16 }), 170);
   assert.equal(inferCpuTdp({ physicalCores: 24 }), 230);
+});
+
+test('mobile model suffix sets the power class for Intel and AMD', () => {
+  assert.equal(inferCpuTdp({ physicalCores: 8, brand: 'Intel(R) Core(TM) Ultra 7 155U' }), 28);
+  assert.equal(inferCpuTdp({ physicalCores: 8, brand: '13th Gen Intel(R) Core(TM) i7-1355U' }), 28);
+  assert.equal(inferCpuTdp({ physicalCores: 8, brand: 'AMD Ryzen 7 6800U' }), 28);
+  assert.equal(inferCpuTdp({ physicalCores: 8, brand: 'AMD Ryzen 9 7945HS' }), 55);
+  assert.equal(inferCpuTdp({ physicalCores: 10, brand: 'Intel(R) Core(TM) i9-14900HX' }), 55);
+  assert.equal(inferCpuTdp({ physicalCores: 6, brand: 'Intel(R) Core(TM) i5-8400' }), 105);
+  assert.equal(inferCpuTdp({ physicalCores: 16, brand: 'Intel(R) Core(TM) 13th Gen Ultra 9' }), 170);
 });

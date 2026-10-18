@@ -1,3 +1,4 @@
+use crate::local_ai;
 use serde_json::{json, Value};
 use std::collections::VecDeque;
 use std::fs::File;
@@ -19,6 +20,11 @@ pub struct InferenceThroughput {
     pub last_tokens: Option<u64>,
     pub evidence: &'static str,
     pub observed_at: Option<String>,
+    /// Seconds elapsed between `observed_at` and now. Non-zero only for the
+    /// log path, where a finished request stays visible after it ends.
+    pub age_seconds: Option<f64>,
+    /// Which runtime supplied the counters, when known.
+    pub source: Option<&'static str>,
 }
 
 const LOG_TAIL_BYTES: u64 = 256 * 1024;
@@ -87,13 +93,18 @@ pub fn history_json() -> Value {
 struct ThroughputCache {
     metrics: Option<MetricsSnapshot>,
     log: Option<LogThroughput>,
+    /// Signature of the completion already written to session history, so one
+    /// finished request is recorded once instead of on every cache refill.
+    recorded_log: Option<u64>,
 }
 
+/// Cumulative token and busy-time counters read from one runtime poll. Counters
+/// are summed across label series (model, slot) because the interesting number
+/// is aggregate throughput for the machine.
 #[derive(Clone, Default)]
-#[allow(dead_code)]
-pub struct MetricsSnapshot {
-    prompt_tokens: u64,
-    predicted_tokens: u64,
+pub(crate) struct MetricsSnapshot {
+    prompt_tokens: f64,
+    predicted_tokens: f64,
     prompt_seconds: f64,
     predicted_seconds: f64,
     captured_at: Option<Instant>,
@@ -101,60 +112,148 @@ pub struct MetricsSnapshot {
 }
 
 #[derive(Clone, Default)]
-#[allow(dead_code)]
 struct LogThroughput {
     decode_tps: f64,
     prefill_tps: f64,
     decode_tokens: u64,
-    captured_at: Option<Instant>,
-    file_epoch: Option<(u64, u64)>,
+    /// Wall clock of the first poll that saw *this* completion. Re-reading the
+    /// same line must not refresh it, or an idle machine would keep reporting the
+    /// last finished request as if it had just happened.
+    observed_at: Option<String>,
+    first_seen: Option<Instant>,
+    /// When the file was last read, independent of how old the completion is.
+    scanned_at: Option<Instant>,
+    signature: Option<u64>,
 }
 
 static CACHE: Mutex<Option<ThroughputCache>> = Mutex::new(None);
+
+/// Shortest window trusted for a counter delta. Below this, one token of
+/// counter granularity dominates and the rate becomes meaningless.
+const MIN_WINDOW: f64 = 0.5;
+
+/// How long a logged completion is presented as live throughput. Past this it
+/// is still shown, but as the last measured request with its real age.
+const LIVE_WINDOW: f64 = 15.0;
 
 fn utc_now() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
-fn parse_counter(value: &Value, name: &str) -> Option<u64> {
-    value
-        .get(name)
-        .and_then(Value::as_array)
-        .and_then(|samples| samples.first())
-        .and_then(|sample| sample.get("value"))
-        .and_then(Value::as_f64)
-        .map(|value| value.max(0.0) as u64)
+/// Parses Prometheus text exposition (`name{labels} value [timestamp]`).
+///
+/// This used to be decoded as JSON, which silently produced nothing for every
+/// runtime because `/metrics` is never JSON. Comment and blank lines are
+/// skipped and non-finite values (NaN/+Inf) are dropped.
+fn parse_prometheus(text: &str) -> Vec<(String, f64)> {
+    let mut samples = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut fields = line.split_whitespace();
+        let (Some(raw_name), Some(raw_value)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        let Ok(value) = raw_value.parse::<f64>() else {
+            continue;
+        };
+        if !value.is_finite() {
+            continue;
+        }
+        let name = match raw_name.find('{') {
+            Some(cut) => &raw_name[..cut],
+            None => raw_name,
+        };
+        samples.push((name.to_string(), value));
+    }
+    samples
 }
 
-/// llama.cpp server exposes prometheus counters with `--metrics`; vLLM always
-/// exposes them on `/metrics`. Deltas between polls give exact tok/s.
+/// Sums a counter by exact name, tolerating only a runtime namespace prefix.
+///
+/// Substring matching looked tolerant right up until it was checked against real
+/// runtime output. llama.cpp additionally publishes `prompt_tokens_cached_total`
+/// (a subset of prompt tokens), average-duration gauges named
+/// `prompt_tokens_seconds` / `predicted_tokens_seconds`, and
+/// `spec_decode_*_tokens_total`; vLLM publishes both `prompt_tokens` and
+/// `prompt_tokens_total` for the same quantity, plus per-request histograms.
+/// Matching on fragments quietly summed several of those into one total and
+/// inflated every rate, with nothing reported as failed.
+fn counter_total(samples: &[(String, f64)], accepted: &[&str]) -> Option<f64> {
+    let mut matched = false;
+    let mut total = 0.0_f64;
+    for (name, value) in samples {
+        if accepted
+            .iter()
+            .any(|suffix| name == *suffix || name.ends_with(&format!(":{suffix}")))
+        {
+            matched = true;
+            total += value.max(0.0);
+        }
+    }
+    matched.then_some(total)
+}
+
+/// Accepted counter names per quantity, each without its runtime namespace.
+/// Covers current llama.cpp (`tokens_predicted_*`), older llama.cpp
+/// (`predicted_*`), and vLLM (`generation_tokens_total`, histogram `_sum`).
+/// The `<counter>_created` unix-timestamp gauge Prometheus emits beside most
+/// counters is excluded by construction, since it matches no name here.
+const PROMPT_TOKENS: &[&str] = &["prompt_tokens_total"];
+const DECODE_TOKENS: &[&str] = &[
+    "tokens_predicted_total",
+    "predicted_tokens_total",
+    "generation_tokens_total",
+];
+const PROMPT_SECONDS: &[&str] = &[
+    "prompt_seconds_total",
+    "prompt_eval_seconds_total",
+    "request_prefill_time_seconds_sum",
+];
+const DECODE_SECONDS: &[&str] = &[
+    "tokens_predicted_seconds_total",
+    "predicted_seconds_total",
+    "request_decode_time_seconds_sum",
+    "decode_seconds_total",
+];
+
+/// Fetches one runtime's `/metrics` and sums the counters this module needs.
 fn read_metrics_endpoint(url: &str, source: &'static str) -> Option<MetricsSnapshot> {
-    let payload: Value = ureq::get(url)
-        .timeout(Duration::from_millis(600))
+    let mut text = String::new();
+    ureq::get(url)
+        .timeout(Duration::from_millis(800))
         .call()
         .ok()?
-        .into_json()
+        .into_reader()
+        .read_to_string(&mut text)
         .ok()?;
+    let samples = parse_prometheus(&text);
+    let prompt_tokens = counter_total(&samples, PROMPT_TOKENS)?;
+    let predicted_tokens = counter_total(&samples, DECODE_TOKENS)?;
     Some(MetricsSnapshot {
-        prompt_tokens: parse_counter(&payload, "prompt_tokens_total")?,
-        predicted_tokens: parse_counter(&payload, "predicted_tokens_total")
-            .or_else(|| parse_counter(&payload, "vllm:generation_tokens_total"))?,
-        prompt_seconds: value_of_gauge(&payload, "prompt_seconds_total").unwrap_or_default(),
-        predicted_seconds: value_of_gauge(&payload, "predicted_seconds_total")
-            .or_else(|| value_of_gauge(&payload, "vllm:e2e_request_latency_seconds_sum"))
-            .unwrap_or_default(),
+        prompt_tokens,
+        predicted_tokens,
+        prompt_seconds: counter_total(&samples, PROMPT_SECONDS).unwrap_or_default(),
+        predicted_seconds: counter_total(&samples, DECODE_SECONDS).unwrap_or_default(),
         captured_at: Some(Instant::now()),
         source,
     })
 }
 
-fn value_of_gauge(payload: &Value, name: &str) -> Option<f64> {
-    payload
-        .get(name)
-        .and_then(Value::as_array)
-        .and_then(|samples| samples.first())
-        .and_then(|sample| sample.get("value"))
-        .and_then(Value::as_f64)
+fn rate(tokens: f64, busy_seconds: f64, window: f64) -> Option<f64> {
+    if tokens <= 0.0 {
+        return None;
+    }
+    // Prefer the runtime's own busy time. Dividing by the wall-clock window
+    // dilutes bursts: a 0.6 s prefill sampled inside a 3 s poll reads ~5x slow.
+    let span = if busy_seconds > 0.0 {
+        busy_seconds
+    } else {
+        window
+    };
+    Some(tokens / span.max(0.01))
 }
 
 fn metrics_delta(
@@ -162,42 +261,80 @@ fn metrics_delta(
     current: &MetricsSnapshot,
 ) -> Option<InferenceThroughput> {
     let previous = previous?;
-    let previous_captured = previous.captured_at?;
-    let current_captured = current.captured_at?;
-    let elapsed = current_captured
-        .duration_since(previous_captured)
-        .as_secs_f64();
-    if elapsed < 0.2 {
+    // A different endpoint means a different runtime: re-baseline instead of
+    // subtracting one server's counters from another's.
+    if previous.source != current.source {
         return None;
     }
-    let decode_tokens = current
-        .predicted_tokens
-        .saturating_sub(previous.predicted_tokens);
-    let prefill_tokens = current.prompt_tokens.saturating_sub(previous.prompt_tokens);
-    if decode_tokens == 0 && prefill_tokens == 0 {
+    let (previous_captured, current_captured) = (previous.captured_at?, current.captured_at?);
+    let window = current_captured
+        .duration_since(previous_captured)
+        .as_secs_f64();
+    if window < MIN_WINDOW {
+        return None;
+    }
+    let decode_tokens = current.predicted_tokens - previous.predicted_tokens;
+    let prefill_tokens = current.prompt_tokens - previous.prompt_tokens;
+    // Counters only rise. A decrease means the runtime restarted, so this
+    // window carries no trustworthy measurement.
+    if decode_tokens < 0.0 || prefill_tokens < 0.0 {
+        return None;
+    }
+    let decode_tokens_per_second = rate(
+        decode_tokens,
+        current.predicted_seconds - previous.predicted_seconds,
+        window,
+    );
+    let prefill_tokens_per_second = rate(
+        prefill_tokens,
+        current.prompt_seconds - previous.prompt_seconds,
+        window,
+    );
+    if decode_tokens_per_second.is_none() && prefill_tokens_per_second.is_none() {
         return None;
     }
     Some(InferenceThroughput {
-        decode_tokens_per_second: Some(decode_tokens as f64 / elapsed),
-        prefill_tokens_per_second: Some(prefill_tokens as f64 / elapsed),
-        last_tokens: Some(decode_tokens),
+        decode_tokens_per_second,
+        prefill_tokens_per_second,
+        last_tokens: if decode_tokens > 0.0 {
+            Some(decode_tokens as u64)
+        } else {
+            None
+        },
         evidence: "metrics-endpoint",
         observed_at: Some(utc_now()),
-    })
-    .filter(|delta| {
-        delta.decode_tokens_per_second.unwrap_or(0.0) > 0.0
-            || delta.prefill_tokens_per_second.unwrap_or(0.0) > 0.0
-    })
-    .map(|mut delta| {
-        delta.evidence = "metrics-endpoint";
-        delta
+        age_seconds: None,
+        source: Some(current.source),
     })
 }
 
 /// Ollama (llama.cpp backend) prints per-request timing after every
 /// generation. Example line:
 /// `slot print_timing: id 0 | task 398 | eval time = 471271.62 ms / 687 tokens (686.98 ms per token, 1.46 tokens per second)`
-fn parse_timing_line(line: &str) -> Option<(bool, f64, u64)> {
+/// One completed-phase timing line from a runtime log.
+#[derive(Clone, Copy, Debug)]
+struct TimingLine {
+    prompt: bool,
+    tokens_per_second: f64,
+    tokens: u64,
+    /// Ollama labels each request `task <n>`. Without it a prefill from an
+    /// earlier request could be published beside a newer decode, so the two
+    /// numbers on screen would describe different runs.
+    task: Option<u64>,
+}
+
+/// `slot print_timing: id 0 | task 398 | ...`
+fn task_id(line: &str) -> Option<u64> {
+    let digits: String = line
+        .split_once("task ")?
+        .1
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().ok()
+}
+
+fn parse_timing_line(line: &str) -> Option<TimingLine> {
     let prompt = line.contains("prompt eval time");
     let eval = line.contains("eval time") && !prompt;
     if !eval && !prompt {
@@ -208,7 +345,12 @@ fn parse_timing_line(line: &str) -> Option<(bool, f64, u64)> {
     if tokens_per_second <= 0.0 || tokens < 1.0 {
         return None;
     }
-    Some((prompt, tokens_per_second, tokens as u64))
+    Some(TimingLine {
+        prompt,
+        tokens_per_second,
+        tokens: tokens as u64,
+        task: task_id(line),
+    })
 }
 
 /// Reads a number that directly precedes a label ("1.46 tokens per second)").
@@ -273,46 +415,100 @@ fn read_log_tail(path: &std::path::Path) -> Option<String> {
     let size = file.metadata().ok()?.len();
     let start = size.saturating_sub(LOG_TAIL_BYTES);
     file.seek(SeekFrom::Start(start)).ok()?;
-    let mut buffer = String::new();
-    file.read_to_string(&mut buffer).ok()?;
-    Some(buffer)
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    // A tail that opens mid-line turns `( 45.20 tokens per second)` into a
+    // parseable `5.20 tokens per second)`, so the partial head line and any
+    // still-unfinished trailing line are dropped before parsing.
+    if start > 0 {
+        let Some(cut) = bytes.iter().position(|byte| *byte == b'\n') else {
+            return Some(String::new());
+        };
+        bytes = bytes.split_off(cut + 1);
+    }
+    if !bytes.ends_with(b"\n") {
+        match bytes.iter().rposition(|byte| *byte == b'\n') {
+            Some(cut) => bytes.truncate(cut + 1),
+            None => bytes.clear(),
+        }
+    }
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-fn scan_log(buffer: &str) -> Option<(f64, f64, u64)> {
-    let mut lines: VecDeque<&str> = buffer.lines().collect();
+/// Stable hash identifying the exact request a reading came from, so the same
+/// finished request is recognised across polls even while unrelated log lines
+/// (HTTP access records) keep growing the file.
+fn line_signature(identity: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in identity.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x1000_0000_01b3);
+    }
+    hash
+}
+
+fn scan_log(buffer: &str) -> Option<(f64, f64, u64, u64)> {
+    let mut lines: Vec<&str> = buffer.lines().collect();
     if lines.len() > MAX_LINES_SCANNED {
         lines.drain(..lines.len() - MAX_LINES_SCANNED);
     }
-    // Walk newest-last; keep the most recent complete request timings.
-    let mut decode = None;
-    let mut prefill = None;
-    let mut decode_tokens = 0_u64;
+    // Walk newest-first; keep the most recent complete request timings.
+    let mut decode: Option<TimingLine> = None;
+    let mut prefill: Option<TimingLine> = None;
     for line in lines.into_iter().rev() {
         if decode.is_some() && prefill.is_some() {
             break;
         }
-        if let Some((prompt, tps, tokens)) = parse_timing_line(line) {
-            if prompt && prefill.is_none() {
-                prefill = Some(tps);
-            } else if !prompt && decode.is_none() {
-                decode = Some(tps);
-                decode_tokens = tokens;
-            }
+        let Some(timing) = parse_timing_line(line) else {
+            continue;
+        };
+        if timing.prompt && prefill.is_none() {
+            prefill = Some(timing);
+        } else if !timing.prompt && decode.is_none() {
+            decode = Some(timing);
         }
     }
-    if decode.is_none() && prefill.is_none() {
+    // A newer request that is still generating has published its prefill but
+    // not its decode. Reporting that prefill beside the previous request's
+    // decode would show two numbers from different runs as one result, so the
+    // pair is only kept when the runtime's own task id says they belong
+    // together; a decode-less prefill on its own stays reportable.
+    let paired_prefill = match (&decode, &prefill) {
+        (Some(current), Some(candidate)) if candidate.task == current.task => prefill,
+        (Some(_), Some(_)) | (Some(_), None) => None,
+        (None, _) => prefill,
+    };
+    let decode_tps = decode
+        .map(|line| line.tokens_per_second)
+        .unwrap_or_default();
+    let decode_tokens = decode.map(|line| line.tokens).unwrap_or_default();
+    let prefill_tps = paired_prefill
+        .map(|line| line.tokens_per_second)
+        .unwrap_or_default();
+    if decode_tps <= 0.0 && prefill_tps <= 0.0 {
         return None;
     }
-    // Stale completions must not present as live throughput: require a line
-    // younger than five minutes via the file's mtime check by the caller.
-    Some((
-        decode.unwrap_or_default(),
-        prefill.unwrap_or_default(),
+    let identity = format!(
+        "d{:?}:{}:{}|p{:?}:{}",
+        decode.map(|line| line.task),
         decode_tokens,
+        decode_tps,
+        paired_prefill.map(|line| line.task),
+        prefill_tps
+    );
+    Some((
+        decode_tps,
+        prefill_tps,
+        decode_tokens,
+        line_signature(&identity),
     ))
 }
 
-fn log_throughput() -> Option<LogThroughput> {
+/// Finds the newest completed generation in a runtime log. `previous` supplies
+/// the original observation time when the same completion is read again, so an
+/// idle machine ages honestly instead of looking continuously fresh — the file
+/// mtime cannot do this because unrelated log lines keep advancing it.
+fn log_throughput(previous: Option<&LogThroughput>) -> Option<LogThroughput> {
     for path in candidate_log_paths() {
         let identity = file_identity(&path);
         if let Some((_, modified_epoch)) = identity {
@@ -325,27 +521,56 @@ fn log_throughput() -> Option<LogThroughput> {
                 continue;
             }
         }
-        if let Some(buffer) = read_log_tail(&path) {
-            if let Some((decode, prefill, tokens)) = scan_log(&buffer) {
-                if decode > 0.0 || prefill > 0.0 {
-                    return Some(LogThroughput {
-                        decode_tps: decode,
-                        prefill_tps: prefill,
-                        decode_tokens: tokens,
-                        captured_at: Some(Instant::now()),
-                        file_epoch: identity,
-                    });
-                }
-            }
-        }
+        let Some(buffer) = read_log_tail(&path) else {
+            continue;
+        };
+        let Some((decode, prefill, tokens, signature)) = scan_log(&buffer) else {
+            continue;
+        };
+        let unchanged = previous.and_then(|entry| entry.signature) == Some(signature);
+        let carried = previous.filter(|_| unchanged);
+        return Some(LogThroughput {
+            decode_tps: decode,
+            prefill_tps: prefill,
+            decode_tokens: tokens,
+            observed_at: Some(
+                carried
+                    .and_then(|entry| entry.observed_at.clone())
+                    .unwrap_or_else(utc_now),
+            ),
+            first_seen: Some(
+                carried
+                    .and_then(|entry| entry.first_seen)
+                    .unwrap_or_else(Instant::now),
+            ),
+            scanned_at: Some(Instant::now()),
+            signature: Some(signature),
+        });
     }
     None
 }
 
 /// Public entry point used by the collector. Result is cached briefly so the
-/// 1.1 s collector loop does not hammer the log or the metrics endpoint.
+/// 1.1 s collector loop does not hammer the log or the metrics endpoints.
 pub fn measure() -> InferenceThroughput {
-    measure_with(|| read_metrics_endpoint("http://127.0.0.1:8080/metrics", "llama.cpp /metrics"))
+    measure_with(read_any_metrics_endpoint)
+}
+
+/// Polls every candidate runtime metrics endpoint at once and keeps the first
+/// that exposes usable counters. Doing this sequentially would add several
+/// hundred milliseconds of dead latency per collect on a machine running only
+/// Ollama, which exposes no metrics endpoint at all.
+fn read_any_metrics_endpoint() -> Option<MetricsSnapshot> {
+    let targets = local_ai::metrics_targets();
+    std::thread::scope(|scope| {
+        let readers: Vec<_> = targets
+            .iter()
+            .map(|(source, url)| scope.spawn(move || read_metrics_endpoint(url, source)))
+            .collect();
+        readers
+            .into_iter()
+            .find_map(|reader| reader.join().ok().flatten())
+    })
 }
 
 pub fn measure_with<F>(mut metrics_reader: F) -> InferenceThroughput
@@ -399,22 +624,32 @@ where
     if !cache
         .log
         .as_ref()
-        .is_some_and(|entry| fresh(&entry.captured_at))
+        .is_some_and(|entry| fresh(&entry.scanned_at))
     {
-        cache.log = log_throughput();
+        let previous = cache.log.clone();
+        cache.log = log_throughput(previous.as_ref());
     }
 
-    if cache
-        .log
-        .as_ref()
-        .is_some_and(|entry| fresh(&entry.captured_at))
-    {
-        let entry = cache.log.as_ref().expect("checked above");
+    let logged = cache.log.clone();
+    if let Some(entry) = logged.as_ref() {
+        let age = entry
+            .first_seen
+            .map(|instant| instant.elapsed().as_secs_f64())
+            .unwrap_or_default();
+        let live = age <= LIVE_WINDOW;
         let decode = (entry.decode_tps > 0.0).then_some(entry.decode_tps);
         let prefill = (entry.prefill_tps > 0.0).then_some(entry.prefill_tps);
         let tokens = (entry.decode_tokens > 0).then_some(entry.decode_tokens);
-        if let (Some(decode_tps), Some(token_count)) = (decode, tokens) {
-            if dedupe_recent(decode_tps, token_count) {
+        // A completion is recorded once. Re-reading the same finished request
+        // every few seconds must not inflate the session token total.
+        if let (Some(decode_tps), Some(token_count), Some(signature)) =
+            (decode, tokens, entry.signature)
+        {
+            if live
+                && cache.recorded_log != Some(signature)
+                && dedupe_recent(decode_tps, token_count)
+            {
+                cache.recorded_log = Some(signature);
                 record_sample(ThroughputSample {
                     decode_tps,
                     prefill_tps: prefill.unwrap_or_default(),
@@ -431,8 +666,16 @@ where
             decode_tokens_per_second: decode,
             prefill_tokens_per_second: prefill,
             last_tokens: tokens,
-            evidence: "runtime-log",
-            observed_at: Some(utc_now()),
+            // An idle machine used to present its last completion as current
+            // throughput. Past the live window it is labelled for what it is.
+            evidence: if live {
+                "runtime-log"
+            } else {
+                "last-runtime-log"
+            },
+            observed_at: entry.observed_at.clone(),
+            age_seconds: Some((age * 10.0).round() / 10.0),
+            source: None,
         };
     }
     if cache
@@ -460,7 +703,9 @@ pub fn as_json(throughput: &InferenceThroughput) -> Value {
         "prefillTokensPerSecond": throughput.prefill_tokens_per_second.map(|value| (value * 100.0).round() / 100.0),
         "lastTokens": throughput.last_tokens,
         "evidence": throughput.evidence,
-        "observedAt": throughput.observed_at
+        "observedAt": throughput.observed_at,
+        "ageSeconds": throughput.age_seconds,
+        "source": throughput.source
     })
 }
 
@@ -468,33 +713,115 @@ pub fn as_json(throughput: &InferenceThroughput) -> Value {
 mod tests {
     use super::*;
 
+    // Provenance for each file is recorded in its header. In short: the Ollama
+    // log was captured live and cross-checked against that runtime's own API for
+    // the same request; the two metrics fixtures carry authoritative names and
+    // synthetic values, so they assert name handling and arithmetic, not realism.
+    const OLLAMA_FIXTURE: &str = include_str!("../tests/fixtures/ollama-0.40.6-server.log");
+    const LLAMACPP_FIXTURE: &str = include_str!("../tests/fixtures/llamacpp-metrics.txt");
+    const VLLM_FIXTURE: &str = include_str!("../tests/fixtures/vllm-metrics.txt");
+
+    /// The measurement cache and session history are process-wide so the
+    /// collector can share them; tests must not inherit each other's state.
+    fn reset_measurement_state() {
+        if let Ok(mut guard) = CACHE.lock() {
+            *guard = None;
+        }
+        if let Ok(mut history) = history_store().lock() {
+            history.clear();
+        }
+    }
+
     #[test]
     fn parses_ollama_timing_lines() {
         let decode = parse_timing_line(
             "slot print_timing: id  0 | task 398 |        eval time =  471271.62 ms /   687 tokens (  686.98 ms per token,     1.46 tokens per second)",
         )
         .expect("decode line");
-        assert!(!decode.0);
-        assert!((decode.1 - 1.46).abs() < 0.001);
-        assert_eq!(decode.2, 687);
+        assert!(!decode.prompt);
+        assert!((decode.tokens_per_second - 1.46).abs() < 0.001);
+        assert_eq!(decode.tokens, 687);
+        assert_eq!(decode.task, Some(398));
 
         let prefill = parse_timing_line(
             "slot print_timing: id  0 | task 5528 | prompt eval time =    1725.09 ms /   119 tokens (   14.50 ms per token,    68.98 tokens per second)",
         )
         .expect("prefill line");
-        assert!(prefill.0);
-        assert!((prefill.1 - 68.98).abs() < 0.001);
-        assert_eq!(prefill.2, 119);
+        assert!(prefill.prompt);
+        assert!((prefill.tokens_per_second - 68.98).abs() < 0.001);
+        assert_eq!(prefill.task, Some(5528));
 
         assert!(parse_timing_line("[GIN] 2026/09/02 - 14:26:47 | 200 | GET").is_none());
+    }
+
+    #[test]
+    fn fixture_log_reports_the_cross_checked_request() {
+        let (decode, prefill, tokens, _) = scan_log(OLLAMA_FIXTURE).expect("fixture timings");
+        // Newest complete request in the fixture: task 1.
+        assert!((decode - 3.57).abs() < 0.001);
+        assert!((prefill - 5.97).abs() < 0.001);
+        assert_eq!(tokens, 100);
+    }
+
+    #[test]
+    fn prefill_from_a_newer_request_is_not_paired_with_an_older_decode() {
+        // Task 1 is still generating: it has published its prefill but not its
+        // eval line. Pairing it with task 0's decode would show two numbers from
+        // different runs as one result, so only the decode is reported.
+        let log = "\
+slot print_timing: id  0 | task 0 | prompt eval time =  1000.00 ms /   100 tokens ( 10.00 ms per token,   100.00 tokens per second)
+slot print_timing: id  0 | task 0 |        eval time = 20000.00 ms /   200 tokens (100.00 ms per token,    10.00 tokens per second)
+slot print_timing: id  0 | task 1 | prompt eval time =   500.00 ms /   500 tokens (  1.00 ms per token,  1000.00 tokens per second)
+";
+        let (decode, prefill, tokens, _) = scan_log(log).expect("decode survives");
+        assert!((decode - 10.0).abs() < 0.001);
+        assert_eq!(prefill, 0.0);
+        assert_eq!(tokens, 200);
+    }
+
+    #[test]
+    fn llamacpp_counters_exclude_subset_and_average_series() {
+        let samples = parse_prometheus(LLAMACPP_FIXTURE);
+        // Both label series of prompt_tokens_total count (1438870 + 1000); the
+        // 950000 cached subset and the 0.000144 average-duration gauge must not.
+        assert_eq!(counter_total(&samples, PROMPT_TOKENS), Some(1_439_870.0));
+        assert_eq!(counter_total(&samples, DECODE_TOKENS), Some(94_208.0));
+        assert_eq!(counter_total(&samples, PROMPT_SECONDS), Some(207.21));
+        assert_eq!(counter_total(&samples, DECODE_SECONDS), Some(1_540.5));
+    }
+
+    #[test]
+    fn vllm_counters_do_not_sum_histogram_or_short_named_twins() {
+        let samples = parse_prometheus(VLLM_FIXTURE);
+        assert_eq!(counter_total(&samples, PROMPT_TOKENS), Some(250_000.0));
+        assert_eq!(counter_total(&samples, DECODE_TOKENS), Some(180_000.0));
+        assert_eq!(
+            counter_total(&samples, PROMPT_SECONDS),
+            Some(41.25),
+            "only the prefill histogram _sum is a seconds total"
+        );
+        assert_eq!(
+            counter_total(&samples, DECODE_SECONDS),
+            Some(2_250.0),
+            "decode histogram _sum, not _count or _bucket"
+        );
+    }
+
+    #[test]
+    fn prometheus_parser_skips_unusable_exposition() {
+        let samples = parse_prometheus(
+            "# HELP x\n# TYPE x counter\nbroken_line_without_value\nnan_metric{a=\"b\"} NaN\nonly_a_name 42\n",
+        );
+        assert_eq!(samples, vec![("only_a_name".to_string(), 42.0)]);
+        assert!(parse_prometheus("# TYPE only\n\n").is_empty());
     }
 
     #[test]
     fn metrics_delta_requires_time_and_tokens() {
         let now = Instant::now();
         let previous = MetricsSnapshot {
-            prompt_tokens: 1_000,
-            predicted_tokens: 5_000,
+            prompt_tokens: 1_000.0,
+            predicted_tokens: 5_000.0,
             prompt_seconds: 0.0,
             predicted_seconds: 0.0,
             captured_at: Some(now),
@@ -507,7 +834,7 @@ mod tests {
         assert!(metrics_delta(Some(&previous), &quiet).is_none());
 
         let active = MetricsSnapshot {
-            predicted_tokens: 5_137,
+            predicted_tokens: 5_137.0,
             captured_at: Some(now + Duration::from_secs(1)),
             ..previous.clone()
         };
@@ -519,6 +846,73 @@ mod tests {
     }
 
     #[test]
+    fn metrics_delta_rebaselines_on_restart_and_endpoint_change() {
+        let now = Instant::now();
+        let previous = MetricsSnapshot {
+            prompt_tokens: 9_000.0,
+            predicted_tokens: 40_000.0,
+            prompt_seconds: 40.0,
+            predicted_seconds: 600.0,
+            captured_at: Some(now),
+            source: "test",
+        };
+        // Counters only rise; a fall means the runtime restarted, so the window
+        // must yield nothing rather than a saturating guess.
+        let restarted = MetricsSnapshot {
+            prompt_tokens: 10.0,
+            predicted_tokens: 25.0,
+            captured_at: Some(now + Duration::from_secs(2)),
+            ..previous.clone()
+        };
+        assert!(metrics_delta(Some(&previous), &restarted).is_none());
+
+        // A different runtime's counters are not a delta of the first one's.
+        let other_server = MetricsSnapshot {
+            prompt_tokens: 9_500.0,
+            predicted_tokens: 41_000.0,
+            prompt_seconds: 45.0,
+            predicted_seconds: 640.0,
+            captured_at: Some(now + Duration::from_secs(2)),
+            source: "another",
+        };
+        assert!(metrics_delta(Some(&previous), &other_server).is_none());
+
+        // Busy seconds, not the wall-clock window, set the rate: a 0.5 s decode
+        // burst sampled inside a 4 s poll is 400 tok/s, not 50.
+        let bursty = MetricsSnapshot {
+            prompt_tokens: 9_000.0,
+            predicted_tokens: 40_200.0,
+            predicted_seconds: 600.5,
+            captured_at: Some(now + Duration::from_secs(4)),
+            ..previous.clone()
+        };
+        let delta = metrics_delta(Some(&previous), &bursty).expect("burst delta");
+        assert!((delta.decode_tokens_per_second.unwrap() - 400.0).abs() < 0.01);
+        assert!(delta.prefill_tokens_per_second.is_none());
+    }
+
+    #[test]
+    fn created_and_short_named_twins_never_reach_a_total() {
+        let samples = parse_prometheus(
+            "vllm:prompt_tokens_total 100\nvllm:prompt_tokens 100\nvllm:generation_tokens_total 40\nvllm:generation_tokens 40\nvllm:prompt_tokens_created 5\n",
+        );
+        assert_eq!(counter_total(&samples, PROMPT_TOKENS), Some(100.0));
+        assert_eq!(counter_total(&samples, DECODE_TOKENS), Some(40.0));
+    }
+
+    #[test]
+    fn same_completion_keeps_its_signature() {
+        let log = "\
+slot print_timing: id 0 | task 1 |        eval time = 20000.00 ms /  200 tokens (100.00 ms per token,   10.00 tokens per second)
+";
+        let first = scan_log(log).expect("timings");
+        let second = scan_log(log).expect("timings");
+        assert_eq!(first.3, second.3);
+        let other = scan_log(&log.replace("10.00 tokens", "11.00 tokens")).expect("other");
+        assert_ne!(first.3, other.3);
+    }
+
+    #[test]
     fn scan_log_prefers_newest_complete_request() {
         let log = "\
 slot print_timing: id 0 | task 1 | prompt eval time =  1000.00 ms /  100 tokens ( 10.00 ms per token,  100.00 tokens per second)
@@ -526,29 +920,36 @@ slot print_timing: id 0 | task 1 |        eval time = 20000.00 ms /  200 tokens 
 slot print_timing: id 0 | task 2 | prompt eval time =   500.00 ms /   50 tokens ( 10.00 ms per token,  100.00 tokens per second)
 slot print_timing: id 0 | task 2 |        eval time = 10000.00 ms /  500 tokens ( 20.00 ms per token,   50.00 tokens per second)
 ";
-        let (decode, prefill, tokens) = scan_log(log).expect("timings");
+        let (decode, prefill, tokens, _) = scan_log(log).expect("timings");
         assert!((decode - 50.0).abs() < 0.001);
         assert!((prefill - 100.0).abs() < 0.001);
         assert_eq!(tokens, 500);
     }
 
-    // NOTE: the shared static cache makes this assertion order-dependent when a
-    // real Ollama log exists on the machine, so the evidence check below accepts
-    // any valid provenance and only asserts that no rate is ever invented.
+    // The log path can only be pointed at a real machine's Ollama log, so this
+    // asserts the invariant that holds either way rather than a specific
+    // provenance: an absent reading never carries an invented rate.
     #[test]
-    fn unavailable_when_no_evidence() {
+    fn unavailable_never_invents_a_rate() {
+        reset_measurement_state();
         let throughput = measure_with(|| None);
         assert!(matches!(
             throughput.evidence,
-            "unavailable" | "runtime-log" | "metrics-endpoint"
+            "unavailable" | "runtime-log" | "last-runtime-log" | "metrics-endpoint"
         ));
-        assert!(
-            throughput.decode_tokens_per_second.is_none() || throughput.evidence == "runtime-log"
-        );
+        if throughput.evidence == "unavailable" {
+            assert!(throughput.decode_tokens_per_second.is_none());
+            assert!(throughput.prefill_tokens_per_second.is_none());
+        }
+        // Whatever is reported, it must state when it was observed.
+        if throughput.decode_tokens_per_second.is_some() {
+            assert!(throughput.observed_at.is_some());
+        }
     }
 
     #[test]
-    fn history_records_measured_samples_with_dedupe() {
+    fn history_rejects_a_repeated_completion_and_keeps_distinct_ones() {
+        reset_measurement_state();
         let sample = ThroughputSample {
             decode_tps: 42.5,
             prefill_tps: 130.0,
@@ -557,12 +958,24 @@ slot print_timing: id 0 | task 2 |        eval time = 10000.00 ms /  500 tokens 
             evidence: "runtime-log",
         };
         record_sample(sample.clone());
-        record_sample(sample.clone());
-        // Identical consecutive completions must not double-count.
-        assert!(history_json()["samples"].as_array().unwrap().len() >= 1);
+        // Re-reading the same finished request on a later poll must not add a
+        // second point, or the session totals count one run several times.
+        assert!(
+            !dedupe_recent(sample.decode_tps, sample.tokens),
+            "identical consecutive completion must be rejected"
+        );
+        let faster = ThroughputSample {
+            decode_tps: 44.0,
+            ..sample.clone()
+        };
+        assert!(dedupe_recent(faster.decode_tps, faster.tokens));
+        record_sample(faster);
         let rendered = history_json();
-        assert_eq!(rendered["samples"][0]["decodeTps"], 42.5);
-        assert_eq!(rendered["samples"][0]["evidence"], "runtime-log");
+        let samples = rendered["samples"].as_array().expect("samples array");
+        assert_eq!(samples.len(), 2, "expected exactly the two distinct runs");
+        assert_eq!(samples[0]["decodeTps"], 42.5);
+        assert_eq!(samples[1]["decodeTps"], 44.0);
+        assert_eq!(samples[0]["evidence"], "runtime-log");
     }
 
     /// Live check against the real machine's Ollama log. Ignored by default:
@@ -574,7 +987,7 @@ slot print_timing: id 0 | task 2 |        eval time = 10000.00 ms /  500 tokens 
         println!("live throughput: {throughput:?}");
         assert!(matches!(
             throughput.evidence,
-            "runtime-log" | "metrics-endpoint" | "unavailable"
+            "runtime-log" | "last-runtime-log" | "metrics-endpoint" | "unavailable"
         ));
     }
 }
