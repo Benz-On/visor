@@ -42,11 +42,17 @@ export function useVisorData(paused: boolean) {
   const fetchSnapshot = useCallback(async (signal?: AbortSignal, force = false) => {
     try {
       const next = nativeRuntime
-        ? await invoke<SystemSnapshot>(force ? 'refresh_system_snapshot' : 'get_system_snapshot')
+        ? await invoke<SystemSnapshot | null>(force ? 'refresh_system_snapshot' : 'get_system_snapshot')
         : await fetch(`${AGENT_URL}/api/snapshot`, { cache: 'no-store', signal }).then(async (response) => {
           if (!response.ok) throw new Error(`Agent returned ${response.status}`);
           return response.json() as Promise<SystemSnapshot>;
         });
+      if (next === null) {
+        // The collector has not finished its first pass. That is a warm-up, not a
+        // lost connection, so the connecting state stands and nothing is recorded
+        // as an error.
+        return null;
+      }
       setSnapshot(next);
       setConnection('live');
       setConnectionError(null);

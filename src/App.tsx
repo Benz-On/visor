@@ -217,6 +217,9 @@ function App() {
   }, []);
 
   const title = viewTitles[activeView];
+  // Demo mode is the browser preview, where no snapshot ever arrives by design;
+  // everywhere else a missing snapshot means the first sample is still coming.
+  const starting = !visor.snapshot && visor.connection !== 'demo';
   // Derived from the interval the collector actually achieved, so the overlays
   // label their buffer with the real spacing between points rather than 1.1 s.
   const sampleSeconds = visor.snapshot?.pollMs && visor.snapshot.pollMs > 0 ? visor.snapshot.pollMs / 1000 : 1.1;
@@ -257,8 +260,8 @@ function App() {
           </button>
           <div className="topbar-actions">
             <div className="live-pill">
-              <span className={paused ? 'paused-dot' : 'live-dot'} />
-              {paused ? 'Paused' : 'Live'}
+              <span className={paused ? 'paused-dot' : starting ? 'pending-dot' : 'live-dot'} />
+              {paused ? 'Paused' : starting ? 'Connecting' : 'Live'}
             </div>
             <button className="icon-button" disabled={visor.refreshing} onClick={() => void visor.refresh()} aria-label="Refresh all system telemetry" title="Refresh processes, RAM, temperatures and AI services now">
               <RefreshCw className={visor.refreshing ? 'spin' : ''} size={17} />
@@ -283,12 +286,12 @@ function App() {
         </header>
 
         <div className="content-wrap">
-          {(visor.connection === 'error' || visor.connection === 'connecting') && (
-            <section className={`telemetry-banner telemetry-${visor.connection}`} role="status">
+          {visor.connection === 'error' && !starting && (
+            <section className="telemetry-banner telemetry-error" role="alert">
               <ShieldAlert size={19} />
               <div>
-                <strong>{visor.connection === 'error' ? 'Native telemetry is temporarily unavailable' : 'Connecting to the native collector'}</strong>
-                <span>{visor.connectionError || 'VISOR is waiting for the first verified system snapshot. No simulated values are shown.'}</span>
+                <strong>Native telemetry is temporarily unavailable</strong>
+                <span>{visor.connectionError || 'VISOR stopped receiving verified snapshots. The values below are the last good sample.'}</span>
               </div>
               <button className="ghost-button" disabled={visor.refreshing} onClick={() => void visor.refresh()}><RefreshCw className={visor.refreshing ? 'spin' : ''} size={15} /> Retry</button>
             </section>
@@ -316,6 +319,9 @@ function App() {
             )}
           </section>
 
+          {starting ? (
+            <StartupState desktop={isDesktop()} error={visor.connectionError} refreshing={visor.refreshing} onRetry={() => void visor.refresh()} />
+          ) : (<>
           {activeView === 'overview' && <Overview metrics={metrics} energy={visor.snapshot?.energy} hardware={visor.snapshot?.hardware} localAI={visor.snapshot?.localAI} processes={visor.processes} live={visor.connection === 'live'} refreshing={visor.refreshing} onRefresh={visor.refresh} onViewProcesses={() => setActiveView('processes')} onKill={visor.killProcess} onPriority={visor.setProcessPriority} onExpand={setFocusMetric} />}
           {activeView === 'hardware' && <HardwareView metrics={metrics} hardware={visor.snapshot?.hardware} refreshing={visor.refreshing} onRefresh={visor.refresh} />}
           {activeView === 'processes' && <ProcessExplorer metrics={metrics} processes={visor.processes} counts={visor.snapshot?.processCounts} live={visor.connection === 'live'} refreshing={visor.refreshing} onRefresh={visor.refresh} onKill={visor.killProcess} onPriority={visor.setProcessPriority} />}
@@ -325,6 +331,7 @@ function App() {
           {activeView === 'history' && <HistoryView metrics={metrics} energy={visor.snapshot?.energy} agent={visor.snapshot?.agent} pollMs={visor.snapshot?.pollMs} />}
           {activeView === 'alerts' && <AlertsView alerts={visor.snapshot?.alerts} live={visor.connection === 'live'} onToggle={visor.setAlertRule} />}
           {activeView === 'settings' && <SettingsView settings={settings} onUpdate={updateSettings} metrics={metrics} energy={visor.snapshot?.energy} hardware={visor.snapshot?.hardware} agent={visor.snapshot?.agent} source={visor.snapshot?.source} alerts={visor.snapshot?.alerts} />}
+          </>)}
         </div>
 
         {attention !== 'none' && (
@@ -1336,6 +1343,52 @@ function AttentionPanel({ kind, metrics, energy, alerts, healthLabel, sampleSeco
         )}
       </section>
     </div>
+  );
+}
+
+/// Shown instead of the dashboard until the collector has produced a sample.
+/// The alternative was a screen of zeros under "temporarily unavailable", which
+/// read as a broken app while it was only still working.
+function StartupState({ desktop, error, refreshing, onRetry }: {
+  desktop: boolean;
+  error: string | null;
+  refreshing: boolean;
+  onRetry: () => void;
+}) {
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    const started = Date.now();
+    const timer = window.setInterval(() => setElapsed(Math.round((Date.now() - started) / 1000)), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const sources = [
+    { label: 'Processor, memory, processes, network', detail: desktop ? 'Operating-system counters, read first' : 'Development agent counters' },
+    { label: 'Graphics adapter', detail: 'Driver telemetry for utilisation, temperature and power' },
+    { label: 'Temperatures, fans, package power', detail: desktop ? 'LibreHardwareMonitor over loopback, when it is running' : 'Not reachable from the browser preview' },
+    { label: 'Local AI runtimes and models', detail: 'Loopback API probes plus installed weight folders' },
+  ];
+  return (
+    <section className="panel startup-state" role="status" aria-live="polite">
+      <div className="startup-head">
+        <div className="startup-mark"><Activity size={22} /></div>
+        <div>
+          <p className="eyebrow">STARTING</p>
+          <h2>Collecting the first sample</h2>
+          <span>VISOR takes the operating-system counters first and then queries the slower hardware sources once each. Panels stay empty until a real sample arrives, because a placeholder number is worse than no number.</span>
+        </div>
+        <strong className="startup-elapsed">{elapsed}<small>s</small></strong>
+      </div>
+      <ul className="startup-sources">
+        {sources.map((source) => <li key={source.label}><span>{source.label}</span><small>{source.detail}</small></li>)}
+      </ul>
+      {error && <p className="startup-error">{error}</p>}
+      <div className="startup-actions">
+        <button className="ghost-button" disabled={refreshing} onClick={onRetry}>
+          <RefreshCw className={refreshing ? 'spin' : ''} size={15} /> Force a sample now
+        </button>
+        <small>The slower sources report in one at a time, so panels fill in as each one answers.</small>
+      </div>
+    </section>
   );
 }
 

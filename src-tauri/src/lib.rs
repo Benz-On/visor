@@ -80,12 +80,16 @@ fn live_target(collector: &Mutex<Collector>, pid: u32) -> Result<Value, String> 
 
 #[tauri::command]
 fn get_system_snapshot(state: State<'_, RuntimeState>) -> Result<Value, String> {
-    state
+    // Having no sample yet is a warm-up state, not a failure. Returning an error
+    // here made the interface report the collector as unavailable during the
+    // several seconds its first pass legitimately takes, so a missing snapshot
+    // comes back as null and the caller decides what that looks like.
+    Ok(state
         .latest
         .read()
         .map_err(|_| "VISOR telemetry state is unavailable.".to_string())?
         .clone()
-        .ok_or_else(|| "VISOR native telemetry is starting.".to_string())
+        .unwrap_or(Value::Null))
 }
 
 #[tauri::command]

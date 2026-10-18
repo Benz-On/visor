@@ -29,6 +29,13 @@ Versioning while the product remains in beta.
 
 ### Changed
 
+- The opening sample no longer waits for every collector. Timed inside the release
+  build, the first pass cost ten seconds, seven of them in a single process
+  snapshot, and the slower hardware sources stacked another ten on top of that.
+  Each of them is now admitted one per pass, so the dashboard appears a few seconds
+  after launch and the temperature, per-process GPU, local-AI and inventory panels
+  fill in behind it. The Rust suite finishes in five seconds instead of twenty-five
+  as a side effect, because building one snapshot no longer runs every collector.
 - `F5` and `Ctrl+P` are deliberately unbound: the webview reloads and prints on
   those keys itself, so a menu item claiming otherwise would quietly do something
   different from its label. The items remain clickable.
@@ -38,6 +45,13 @@ Versioning while the product remains in beta.
 
 ### Fixed
 
+- Launching VISOR showed an all-zero dashboard under **Native telemetry is
+  temporarily unavailable** for as long as the collector legitimately needed to
+  finish its first pass. An empty snapshot was being reported as a failure, so a
+  warm-up now has its own state: a panel naming the sources being read, how long
+  it has been running, and a button to force a sample. The top-bar pill said
+  `Live` during the same window; it reads `Connecting` until the first snapshot
+  arrives.
 - Both search fields set `outline: 0` after the global focus rule at equal
   specificity, so keyboard users had no visible caret in the sensor search, the
   process search or the command palette.
