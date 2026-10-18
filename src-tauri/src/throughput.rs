@@ -171,48 +171,52 @@ fn parse_prometheus(text: &str) -> Vec<(String, f64)> {
     samples
 }
 
-/// Matches a counter tolerantly: runtimes namespace metrics (`llamacpp:`,
-/// `vllm:`) and have renamed them between releases, so each candidate is a set
-/// of required substrings plus exclusions. Candidates are tried in order and the
-/// first that matches wins, so synonyms never add up together.
-fn counter_total(samples: &[(String, f64)], candidates: &[(&[&str], &[&str])]) -> Option<f64> {
-    candidates.iter().find_map(|(requires, forbids)| {
-        let mut matched = false;
-        let total: f64 = samples
+/// Sums a counter by exact name, tolerating only a runtime namespace prefix.
+///
+/// Substring matching looked tolerant right up until it was checked against real
+/// runtime output. llama.cpp additionally publishes `prompt_tokens_cached_total`
+/// (a subset of prompt tokens), average-duration gauges named
+/// `prompt_tokens_seconds` / `predicted_tokens_seconds`, and
+/// `spec_decode_*_tokens_total`; vLLM publishes both `prompt_tokens` and
+/// `prompt_tokens_total` for the same quantity, plus per-request histograms.
+/// Matching on fragments quietly summed several of those into one total and
+/// inflated every rate, with nothing reported as failed.
+fn counter_total(samples: &[(String, f64)], accepted: &[&str]) -> Option<f64> {
+    let mut matched = false;
+    let mut total = 0.0_f64;
+    for (name, value) in samples {
+        if accepted
             .iter()
-            .filter(|(name, _)| {
-                let lower = name.to_ascii_lowercase();
-                if requires.iter().any(|part| !lower.contains(*part)) {
-                    return false;
-                }
-                !forbids.iter().any(|part| lower.contains(*part))
-            })
-            .map(|(_, value)| {
-                matched = true;
-                value.max(0.0)
-            })
-            .sum();
-        matched.then_some(total)
-    })
+            .any(|suffix| name == *suffix || name.ends_with(&format!(":{suffix}")))
+        {
+            matched = true;
+            total += value.max(0.0);
+        }
+    }
+    matched.then_some(total)
 }
 
-/// Prometheus publishes a `<counter>_created` unix-timestamp gauge beside most
-/// counters; it must never be summed into a token total, so `created` is
-/// excluded everywhere below.
-const PROMPT_TOKENS: &[(&[&str], &[&str])] = &[(&["prompt", "token"], &["seconds", "created"])];
-const DECODE_TOKENS: &[(&[&str], &[&str])] = &[
-    (&["predicted", "token"], &["seconds", "created"]),
-    (&["generation", "token"], &["seconds", "created"]),
-    (&["decode", "token"], &["seconds", "created"]),
+/// Accepted counter names per quantity, each without its runtime namespace.
+/// Covers current llama.cpp (`tokens_predicted_*`), older llama.cpp
+/// (`predicted_*`), and vLLM (`generation_tokens_total`, histogram `_sum`).
+/// The `<counter>_created` unix-timestamp gauge Prometheus emits beside most
+/// counters is excluded by construction, since it matches no name here.
+const PROMPT_TOKENS: &[&str] = &["prompt_tokens_total"];
+const DECODE_TOKENS: &[&str] = &[
+    "tokens_predicted_total",
+    "predicted_tokens_total",
+    "generation_tokens_total",
 ];
-const PROMPT_SECONDS: &[(&[&str], &[&str])] = &[
-    (&["prompt", "second"], &["created"]),
-    (&["prefill", "second"], &["latency", "created"]),
+const PROMPT_SECONDS: &[&str] = &[
+    "prompt_seconds_total",
+    "prompt_eval_seconds_total",
+    "request_prefill_time_seconds_sum",
 ];
-const DECODE_SECONDS: &[(&[&str], &[&str])] = &[
-    (&["predicted", "second"], &["created"]),
-    (&["generation", "second"], &["latency", "created"]),
-    (&["decode", "second"], &["created"]),
+const DECODE_SECONDS: &[&str] = &[
+    "tokens_predicted_seconds_total",
+    "predicted_seconds_total",
+    "request_decode_time_seconds_sum",
+    "decode_seconds_total",
 ];
 
 /// Fetches one runtime's `/metrics` and sums the counters this module needs.
@@ -307,7 +311,30 @@ fn metrics_delta(
 /// Ollama (llama.cpp backend) prints per-request timing after every
 /// generation. Example line:
 /// `slot print_timing: id 0 | task 398 | eval time = 471271.62 ms / 687 tokens (686.98 ms per token, 1.46 tokens per second)`
-fn parse_timing_line(line: &str) -> Option<(bool, f64, u64)> {
+/// One completed-phase timing line from a runtime log.
+#[derive(Clone, Copy, Debug)]
+struct TimingLine {
+    prompt: bool,
+    tokens_per_second: f64,
+    tokens: u64,
+    /// Ollama labels each request `task <n>`. Without it a prefill from an
+    /// earlier request could be published beside a newer decode, so the two
+    /// numbers on screen would describe different runs.
+    task: Option<u64>,
+}
+
+/// `slot print_timing: id 0 | task 398 | ...`
+fn task_id(line: &str) -> Option<u64> {
+    let digits: String = line
+        .split_once("task ")?
+        .1
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().ok()
+}
+
+fn parse_timing_line(line: &str) -> Option<TimingLine> {
     let prompt = line.contains("prompt eval time");
     let eval = line.contains("eval time") && !prompt;
     if !eval && !prompt {
@@ -318,7 +345,12 @@ fn parse_timing_line(line: &str) -> Option<(bool, f64, u64)> {
     if tokens_per_second <= 0.0 || tokens < 1.0 {
         return None;
     }
-    Some((prompt, tokens_per_second, tokens as u64))
+    Some(TimingLine {
+        prompt,
+        tokens_per_second,
+        tokens: tokens as u64,
+        task: task_id(line),
+    })
 }
 
 /// Reads a number that directly precedes a label ("1.46 tokens per second)").
@@ -403,12 +435,12 @@ fn read_log_tail(path: &std::path::Path) -> Option<String> {
     Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-/// Stable hash of the timing lines behind a reading, so the same finished
-/// request is recognised across polls even while unrelated log lines (HTTP
-/// access records) keep growing the file.
-fn line_signature(decode_line: &str, prefill_line: &str) -> u64 {
+/// Stable hash identifying the exact request a reading came from, so the same
+/// finished request is recognised across polls even while unrelated log lines
+/// (HTTP access records) keep growing the file.
+fn line_signature(identity: &str) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in decode_line.as_bytes().iter().chain(prefill_line.as_bytes()) {
+    for byte in identity.as_bytes() {
         hash ^= *byte as u64;
         hash = hash.wrapping_mul(0x1000_0000_01b3);
     }
@@ -421,35 +453,54 @@ fn scan_log(buffer: &str) -> Option<(f64, f64, u64, u64)> {
         lines.drain(..lines.len() - MAX_LINES_SCANNED);
     }
     // Walk newest-first; keep the most recent complete request timings.
-    let mut decode: Option<(f64, u64)> = None;
-    let mut prefill: Option<f64> = None;
-    let mut decode_line: &str = "";
-    let mut prefill_line: &str = "";
+    let mut decode: Option<TimingLine> = None;
+    let mut prefill: Option<TimingLine> = None;
     for line in lines.into_iter().rev() {
         if decode.is_some() && prefill.is_some() {
             break;
         }
-        let Some((prompt, tps, tokens)) = parse_timing_line(line) else {
+        let Some(timing) = parse_timing_line(line) else {
             continue;
         };
-        if prompt && prefill.is_none() {
-            prefill = Some(tps);
-            prefill_line = line;
-        } else if !prompt && decode.is_none() {
-            decode = Some((tps, tokens));
-            decode_line = line;
+        if timing.prompt && prefill.is_none() {
+            prefill = Some(timing);
+        } else if !timing.prompt && decode.is_none() {
+            decode = Some(timing);
         }
     }
-    let (decode_tps, decode_tokens) = decode.unwrap_or((0.0, 0));
-    let prefill_tps = prefill.unwrap_or_default();
+    // A newer request that is still generating has published its prefill but
+    // not its decode. Reporting that prefill beside the previous request's
+    // decode would show two numbers from different runs as one result, so the
+    // pair is only kept when the runtime's own task id says they belong
+    // together; a decode-less prefill on its own stays reportable.
+    let paired_prefill = match (&decode, &prefill) {
+        (Some(current), Some(candidate)) if candidate.task == current.task => prefill,
+        (Some(_), Some(_)) | (Some(_), None) => None,
+        (None, _) => prefill,
+    };
+    let decode_tps = decode
+        .map(|line| line.tokens_per_second)
+        .unwrap_or_default();
+    let decode_tokens = decode.map(|line| line.tokens).unwrap_or_default();
+    let prefill_tps = paired_prefill
+        .map(|line| line.tokens_per_second)
+        .unwrap_or_default();
     if decode_tps <= 0.0 && prefill_tps <= 0.0 {
         return None;
     }
+    let identity = format!(
+        "d{:?}:{}:{}|p{:?}:{}",
+        decode.map(|line| line.task),
+        decode_tokens,
+        decode_tps,
+        paired_prefill.map(|line| line.task),
+        prefill_tps
+    );
     Some((
         decode_tps,
         prefill_tps,
         decode_tokens,
-        line_signature(decode_line, prefill_line),
+        line_signature(&identity),
     ))
 }
 
@@ -662,25 +713,107 @@ pub fn as_json(throughput: &InferenceThroughput) -> Value {
 mod tests {
     use super::*;
 
+    // Provenance for each file is recorded in its header. In short: the Ollama
+    // log was captured live and cross-checked against that runtime's own API for
+    // the same request; the two metrics fixtures carry authoritative names and
+    // synthetic values, so they assert name handling and arithmetic, not realism.
+    const OLLAMA_FIXTURE: &str = include_str!("../tests/fixtures/ollama-0.40.6-server.log");
+    const LLAMACPP_FIXTURE: &str = include_str!("../tests/fixtures/llamacpp-metrics.txt");
+    const VLLM_FIXTURE: &str = include_str!("../tests/fixtures/vllm-metrics.txt");
+
+    /// The measurement cache and session history are process-wide so the
+    /// collector can share them; tests must not inherit each other's state.
+    fn reset_measurement_state() {
+        if let Ok(mut guard) = CACHE.lock() {
+            *guard = None;
+        }
+        if let Ok(mut history) = history_store().lock() {
+            history.clear();
+        }
+    }
+
     #[test]
     fn parses_ollama_timing_lines() {
         let decode = parse_timing_line(
             "slot print_timing: id  0 | task 398 |        eval time =  471271.62 ms /   687 tokens (  686.98 ms per token,     1.46 tokens per second)",
         )
         .expect("decode line");
-        assert!(!decode.0);
-        assert!((decode.1 - 1.46).abs() < 0.001);
-        assert_eq!(decode.2, 687);
+        assert!(!decode.prompt);
+        assert!((decode.tokens_per_second - 1.46).abs() < 0.001);
+        assert_eq!(decode.tokens, 687);
+        assert_eq!(decode.task, Some(398));
 
         let prefill = parse_timing_line(
             "slot print_timing: id  0 | task 5528 | prompt eval time =    1725.09 ms /   119 tokens (   14.50 ms per token,    68.98 tokens per second)",
         )
         .expect("prefill line");
-        assert!(prefill.0);
-        assert!((prefill.1 - 68.98).abs() < 0.001);
-        assert_eq!(prefill.2, 119);
+        assert!(prefill.prompt);
+        assert!((prefill.tokens_per_second - 68.98).abs() < 0.001);
+        assert_eq!(prefill.task, Some(5528));
 
         assert!(parse_timing_line("[GIN] 2026/09/02 - 14:26:47 | 200 | GET").is_none());
+    }
+
+    #[test]
+    fn fixture_log_reports_the_cross_checked_request() {
+        let (decode, prefill, tokens, _) = scan_log(OLLAMA_FIXTURE).expect("fixture timings");
+        // Newest complete request in the fixture: task 1.
+        assert!((decode - 3.57).abs() < 0.001);
+        assert!((prefill - 5.97).abs() < 0.001);
+        assert_eq!(tokens, 100);
+    }
+
+    #[test]
+    fn prefill_from_a_newer_request_is_not_paired_with_an_older_decode() {
+        // Task 1 is still generating: it has published its prefill but not its
+        // eval line. Pairing it with task 0's decode would show two numbers from
+        // different runs as one result, so only the decode is reported.
+        let log = "\
+slot print_timing: id  0 | task 0 | prompt eval time =  1000.00 ms /   100 tokens ( 10.00 ms per token,   100.00 tokens per second)
+slot print_timing: id  0 | task 0 |        eval time = 20000.00 ms /   200 tokens (100.00 ms per token,    10.00 tokens per second)
+slot print_timing: id  0 | task 1 | prompt eval time =   500.00 ms /   500 tokens (  1.00 ms per token,  1000.00 tokens per second)
+";
+        let (decode, prefill, tokens, _) = scan_log(log).expect("decode survives");
+        assert!((decode - 10.0).abs() < 0.001);
+        assert_eq!(prefill, 0.0);
+        assert_eq!(tokens, 200);
+    }
+
+    #[test]
+    fn llamacpp_counters_exclude_subset_and_average_series() {
+        let samples = parse_prometheus(LLAMACPP_FIXTURE);
+        // Both label series of prompt_tokens_total count (1438870 + 1000); the
+        // 950000 cached subset and the 0.000144 average-duration gauge must not.
+        assert_eq!(counter_total(&samples, PROMPT_TOKENS), Some(1_439_870.0));
+        assert_eq!(counter_total(&samples, DECODE_TOKENS), Some(94_208.0));
+        assert_eq!(counter_total(&samples, PROMPT_SECONDS), Some(207.21));
+        assert_eq!(counter_total(&samples, DECODE_SECONDS), Some(1_540.5));
+    }
+
+    #[test]
+    fn vllm_counters_do_not_sum_histogram_or_short_named_twins() {
+        let samples = parse_prometheus(VLLM_FIXTURE);
+        assert_eq!(counter_total(&samples, PROMPT_TOKENS), Some(250_000.0));
+        assert_eq!(counter_total(&samples, DECODE_TOKENS), Some(180_000.0));
+        assert_eq!(
+            counter_total(&samples, PROMPT_SECONDS),
+            Some(41.25),
+            "only the prefill histogram _sum is a seconds total"
+        );
+        assert_eq!(
+            counter_total(&samples, DECODE_SECONDS),
+            Some(2_250.0),
+            "decode histogram _sum, not _count or _bucket"
+        );
+    }
+
+    #[test]
+    fn prometheus_parser_skips_unusable_exposition() {
+        let samples = parse_prometheus(
+            "# HELP x\n# TYPE x counter\nbroken_line_without_value\nnan_metric{a=\"b\"} NaN\nonly_a_name 42\n",
+        );
+        assert_eq!(samples, vec![("only_a_name".to_string(), 42.0)]);
+        assert!(parse_prometheus("# TYPE only\n\n").is_empty());
     }
 
     #[test]
@@ -759,44 +892,12 @@ mod tests {
     }
 
     #[test]
-    fn parses_prometheus_text_exposition() {
-        // `/metrics` is never JSON; these are the shapes llama.cpp and vLLM emit.
-        let text = "\
-# HELP llamacpp:prompt_tokens_total Number of prompt tokens processed.
-# TYPE llamacpp:prompt_tokens_total counter
-llamacpp:prompt_tokens_total{model=\"qwen3.5:9b\"} 1.43887e+06
-llamacpp:predicted_tokens_total{model=\"qwen3.5:9b\"} 94208
-llamacpp:prompt_seconds_total 207.21
-llamacpp:predicted_seconds_total 1540.5
-vllm:generation_tokens_total{model_name=\"x\"} 12
-vllm:e2e_request_latency_seconds_sum 99
-broken_line_without_value
-nan_metric{a=\"b\"} NaN
-";
-        let samples = parse_prometheus(text);
-        assert!(samples
-            .iter()
-            .any(|(name, _)| name == "llamacpp:prompt_tokens_total"));
-        assert_eq!(counter_total(&samples, PROMPT_TOKENS), Some(1_438_870.0));
-        // Candidate sets are tried in order and the first match wins, so a
-        // llama.cpp server's `predicted_*` series is never added to a vLLM
-        // `generation_*` series that also happens to be exposed.
-        assert_eq!(counter_total(&samples, DECODE_TOKENS), Some(94_208.0));
-        assert_eq!(counter_total(&samples, PROMPT_SECONDS), Some(207.21));
-        assert_eq!(counter_total(&samples, DECODE_SECONDS), Some(1540.5));
-        // NaN and malformed lines must not leak into a total.
-        assert!(counter_total(&samples, &[(&["latency", "second"], &[])],) == Some(99.0));
-        assert_eq!(counter_total(&samples, PROMPT_TOKENS), Some(1_438_870.0));
-        assert!(parse_prometheus("# TYPE only\n\n").is_empty());
-    }
-
-    #[test]
-    fn decode_token_matcher_prefers_predicted_and_skips_prompt_series() {
+    fn created_and_short_named_twins_never_reach_a_total() {
         let samples = parse_prometheus(
-            "vllm:prompt_tokens_total 100\nvllm:generation_tokens_total 40\nvllm:prompt_tokens_created 5\n",
+            "vllm:prompt_tokens_total 100\nvllm:prompt_tokens 100\nvllm:generation_tokens_total 40\nvllm:generation_tokens 40\nvllm:prompt_tokens_created 5\n",
         );
-        assert_eq!(counter_total(&samples, DECODE_TOKENS), Some(40.0));
         assert_eq!(counter_total(&samples, PROMPT_TOKENS), Some(100.0));
+        assert_eq!(counter_total(&samples, DECODE_TOKENS), Some(40.0));
     }
 
     #[test]
@@ -825,25 +926,30 @@ slot print_timing: id 0 | task 2 |        eval time = 10000.00 ms /  500 tokens 
         assert_eq!(tokens, 500);
     }
 
-    // NOTE: the shared static cache makes this assertion order-dependent when a
-    // real Ollama log exists on the machine, so the evidence check below accepts
-    // any valid provenance and only asserts that no rate is ever invented.
+    // The log path can only be pointed at a real machine's Ollama log, so this
+    // asserts the invariant that holds either way rather than a specific
+    // provenance: an absent reading never carries an invented rate.
     #[test]
-    fn unavailable_when_no_evidence() {
+    fn unavailable_never_invents_a_rate() {
+        reset_measurement_state();
         let throughput = measure_with(|| None);
         assert!(matches!(
             throughput.evidence,
             "unavailable" | "runtime-log" | "last-runtime-log" | "metrics-endpoint"
         ));
-        assert!(
-            throughput.decode_tokens_per_second.is_none()
-                || throughput.evidence == "runtime-log"
-                || throughput.evidence == "last-runtime-log"
-        );
+        if throughput.evidence == "unavailable" {
+            assert!(throughput.decode_tokens_per_second.is_none());
+            assert!(throughput.prefill_tokens_per_second.is_none());
+        }
+        // Whatever is reported, it must state when it was observed.
+        if throughput.decode_tokens_per_second.is_some() {
+            assert!(throughput.observed_at.is_some());
+        }
     }
 
     #[test]
-    fn history_records_measured_samples_with_dedupe() {
+    fn history_rejects_a_repeated_completion_and_keeps_distinct_ones() {
+        reset_measurement_state();
         let sample = ThroughputSample {
             decode_tps: 42.5,
             prefill_tps: 130.0,
@@ -852,12 +958,24 @@ slot print_timing: id 0 | task 2 |        eval time = 10000.00 ms /  500 tokens 
             evidence: "runtime-log",
         };
         record_sample(sample.clone());
-        record_sample(sample.clone());
-        // Identical consecutive completions must not double-count.
-        assert!(!history_json()["samples"].as_array().unwrap().is_empty());
+        // Re-reading the same finished request on a later poll must not add a
+        // second point, or the session totals count one run several times.
+        assert!(
+            !dedupe_recent(sample.decode_tps, sample.tokens),
+            "identical consecutive completion must be rejected"
+        );
+        let faster = ThroughputSample {
+            decode_tps: 44.0,
+            ..sample.clone()
+        };
+        assert!(dedupe_recent(faster.decode_tps, faster.tokens));
+        record_sample(faster);
         let rendered = history_json();
-        assert_eq!(rendered["samples"][0]["decodeTps"], 42.5);
-        assert_eq!(rendered["samples"][0]["evidence"], "runtime-log");
+        let samples = rendered["samples"].as_array().expect("samples array");
+        assert_eq!(samples.len(), 2, "expected exactly the two distinct runs");
+        assert_eq!(samples[0]["decodeTps"], 42.5);
+        assert_eq!(samples[1]["decodeTps"], 44.0);
+        assert_eq!(samples[0]["evidence"], "runtime-log");
     }
 
     /// Live check against the real machine's Ollama log. Ignored by default:

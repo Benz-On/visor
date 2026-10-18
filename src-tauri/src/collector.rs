@@ -1337,6 +1337,52 @@ mod tests {
         }
     }
 
+    /// Accuracy harness: compares the shipped collector against the vendor tool
+    /// rather than a fixture. Ignored because it needs real NVIDIA telemetry.
+    /// Run on a Windows host with
+    /// `cargo test live_snapshot_matches -- --ignored --nocapture`.
+    ///
+    /// Utilisation is printed but not asserted: the collector samples on a
+    /// interval while nvidia-smi answers for a fresh one, so any difference is
+    /// legitimate. Resident VRAM changes slowly enough to compare directly, and
+    /// a large gap means the two are not looking at the same adapter.
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn live_snapshot_matches_nvidia_telemetry() {
+        let snapshot = Collector::new().collect();
+        let reported_bytes = snapshot["metrics"]["gpuMemory"]["usedBytes"]
+            .as_f64()
+            .unwrap_or_default();
+        let reported_utilization = snapshot["metrics"]["gpu"].as_f64().unwrap_or_default();
+        let vendor = Command::new("nvidia-smi")
+            .args([
+                "--query-gpu=memory.used,utilization.gpu",
+                "--format=csv,noheader,nounits",
+            ])
+            .output()
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .unwrap_or_default();
+        println!("collector: {reported_bytes} bytes used, {reported_utilization}% busy");
+        println!("nvidia-smi: {vendor}");
+        assert!(!vendor.is_empty(), "nvidia-smi unavailable on this host");
+        let vendor_mib: Vec<f64> = vendor
+            .split(',')
+            .map(|part| part.trim().parse::<f64>().unwrap_or_default())
+            .collect();
+        assert!(
+            vendor_mib.first().is_some_and(|used| *used > 0.0),
+            "vendor reports no resident memory: {vendor}"
+        );
+        let vendor_bytes = vendor_mib[0] * MIB;
+        let drift = (reported_bytes - vendor_bytes).abs() / vendor_bytes;
+        assert!(
+            drift < 0.1,
+            "collector reports {reported_bytes} bytes against vendor {vendor_bytes} ({:.1}% drift)",
+            drift * 100.0
+        );
+    }
+
     #[test]
     fn protects_critical_system_processes() {
         assert!(is_protected(4, "System"));
