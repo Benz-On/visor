@@ -36,6 +36,22 @@ Versioning while the product remains in beta.
 
 ### Fixed
 
+- Sampling cadence is now reported as measured rather than as claimed. The
+  snapshot advertised a fixed 1.1 s interval while the Windows collectors
+  routinely overrun it, so every rate derived from "time since last sample" was
+  presented as fresher than it was. The payload carries the interval actually
+  achieved, the requested target, and the age of each background collector's
+  newest value.
+- Chart history no longer invents points. The interface polled faster than the
+  native collector could produce a new snapshot and appended the unchanged one
+  each time, so a single real sample drew as several flat segments and the time
+  axis was compressed. Only a new snapshot advances the buffer now, and the
+  timeline label is derived from the measured interval instead of a constant.
+- The power model's clock term works. Live frequency was divided by the fastest
+  live core from the same instantaneous reading, so the ratio sat near 1 whatever
+  the load and actually fell when one core boosted, leaving idle CPU draw
+  overestimated. It now compares against the processor's rated base clock and
+  falls back safely when the inventory has none.
 - The layer-offload plan no longer charges KV cache by the wrong divisor. It
   divided the all-layer KV figure by two instead of by the layer count, so a
   36-layer model was asked for roughly 15 GiB where it needs 5.5 GiB: every
