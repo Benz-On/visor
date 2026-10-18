@@ -178,6 +178,10 @@ export interface LocalModelInfo {
   parameterCountExact?: number;
   weightBytesExact?: number;
   kvHeads?: number | null;
+  /** Exact K head dimension from the GGUF header, when the blob was read. */
+  kvKeyLength?: number | null;
+  /** Exact V head dimension from the GGUF header, when the blob was read. */
+  kvValueLength?: number | null;
   kvHeadCountExact?: boolean;
   layers?: number | null;
   experts?: number | null;

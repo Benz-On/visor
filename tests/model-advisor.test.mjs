@@ -122,3 +122,56 @@ test('offload plan is absent without exact layer metadata', () => {
   const heuristic = analyzeLocalModel(model(), hardware());
   assert.equal(heuristic.offloadPlan, undefined);
 });
+
+test('offload plan charges KV cache per layer, not per two layers', () => {
+  // 36 layers x 8 KV heads x (128+128) x 2 bytes = 147456 B/token;
+  // at 4096 context that is exactly 0.5625 GiB for the whole cache.
+  const fits = analyzeLocalModel({
+    ...model({ name: 'qwen3-8B-Q4_K_M.gguf', parameters: '8B', size: 0, context: 4096 }),
+    weightBytesExact: Math.round(4.6 * GIB),
+    layers: 36,
+    kvHeads: 8,
+    kvHeadCountExact: true,
+  }, hardware({ ram: 32, vram: 8 }));
+
+  assert.ok(Math.abs(fits.kvCacheGb - 0.56) < 0.02, `kvCacheGb was ${fits.kvCacheGb}`);
+  const full = fits.offloadPlan[0];
+  assert.equal(full.layersOnGpu, 36);
+  // 4.6 GiB weights + 0.56 GiB KV + half of the runtime overhead, inside 7.25
+  // GiB of usable VRAM. The old per-layer divisor asked for ~15 GiB here and
+  // reported OVER for every single step.
+  assert.ok(Math.abs(full.vramNeededGb - 5.47) < 0.05, `vramNeededGb was ${full.vramNeededGb}`);
+  assert.equal(full.fitsVram, true);
+});
+
+test('exact head dimensions drive the KV equation', () => {
+  const base = {
+    ...model({ name: 'test-model.gguf', parameters: '8B', size: 0, context: 4096 }),
+    weightBytesExact: Math.round(4.6 * GIB),
+    layers: 36,
+    kvHeads: 8,
+    kvHeadCountExact: true,
+  };
+  const assumed = analyzeLocalModel(base, hardware({ ram: 32, vram: 24 }));
+  // Gemma-class heads are 256 wide, doubling KV traffic against the 128 default.
+  const wide = analyzeLocalModel({ ...base, kvKeyLength: 256, kvValueLength: 256 }, hardware({ ram: 32, vram: 24 }));
+  // 0.5625 -> 1.125 GiB exactly, but the reported figures are rounded to 2dp.
+  assert.ok(Math.abs(wide.kvCacheGb / assumed.kvCacheGb - 2) < 0.05, `${assumed.kvCacheGb} -> ${wide.kvCacheGb}`);
+  assert.ok(wide.confidenceScore > assumed.confidenceScore, 'exact head dims should raise confidence');
+});
+
+test('known weight bytes are not penalised twice for their format', () => {
+  const rig = hardware({ ram: 64, vram: 24, gpu: 'NVIDIA GeForce RTX 4090' });
+  const shared = {
+    ...model({ name: 'test-8B-F16.gguf', parameters: '8B', size: 0, quantization: 'F16' }),
+    quantization: 'F16',
+    layers: 32,
+    kvHeads: 8,
+  };
+  const measuredBytes = analyzeLocalModel({ ...shared, weightBytesExact: Math.round(16 * GIB) }, rig);
+  // Without real byte counts the size is inferred from parameters x bits, and
+  // only then may the per-format factor stand in for what is streamed.
+  const inferredBytes = analyzeLocalModel({ ...shared, weightBytesExact: null }, rig);
+  assert.ok(measuredBytes.estimatedTpsCenter > inferredBytes.estimatedTpsCenter * 1.35,
+    `measured ${measuredBytes.estimatedTpsCenter} vs inferred ${inferredBytes.estimatedTpsCenter}`);
+});

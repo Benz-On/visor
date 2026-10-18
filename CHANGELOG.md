@@ -36,6 +36,22 @@ Versioning while the product remains in beta.
 
 ### Fixed
 
+- The layer-offload plan no longer charges KV cache by the wrong divisor. It
+  divided the all-layer KV figure by two instead of by the layer count, so a
+  36-layer model was asked for roughly 15 GiB where it needs 5.5 GiB: every
+  25/50/75/100% step reported OVER, and supplying exact GGUF metadata made the
+  plan worse than the heuristic it replaced. Per-layer KV is now total cache
+  divided by layer count, and the plan fits what actually fits.
+- KV cache uses the model's real head dimensions. The header's `key_length` and
+  `value_length` were parsed but never forwarded to the advisor, which assumed a
+  128-wide head for every model — half the true figure for Gemma (256) and high
+  for Phi (96). The values now reach the payload, the advisor prefers them, and
+  confidence only rises when they are genuinely known.
+- Quantization is no longer counted twice. The per-format efficiency factor was
+  divided into token time even when the model's real byte count was already
+  known, so streaming 16 GiB of F16 was additionally slowed by 1.5x for being
+  F16. The factor now stands in only when weight bytes are inferred from
+  parameter count and bit width.
 - Measured token throughput is now actually measured, and stops pretending. The
   metrics path fetched `/metrics` and decoded it as JSON, which every runtime
   rejects because Prometheus serves text, so that branch silently produced
