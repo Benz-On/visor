@@ -686,6 +686,15 @@ function AIWorkloads({ metrics, localAI, hardware, throughputHistory, refreshing
   const measuredDecode = throughput?.decodeTokensPerSecond ?? null;
   const measuredPrefill = throughput?.prefillTokensPerSecond ?? null;
   const throughputEvidence = throughput?.evidence || 'unavailable';
+  const throughputAgeSeconds = throughput?.ageSeconds ?? null;
+  // A logged completion stays readable after the request ends; that is the last
+  // measured result, not a live rate, and the chip has to say so.
+  const throughputChip = throughputEvidence === 'last-runtime-log'
+    ? `LOG · LAST COMPLETION${throughputAgeSeconds !== null ? ` ${Math.round(throughputAgeSeconds)}s ago` : ''}`
+    : throughputEvidence === 'runtime-log' ? 'LOG MEASURED' : 'METRICS MEASURED';
+  const throughputOrigin = throughputEvidence === 'metrics-endpoint'
+    ? `metrics endpoint${throughput?.source ? ` · ${throughput.source}` : ''}`
+    : 'Ollama server log';
   return (
     <div className="ai-page-grid">
       <section className="panel ai-model-card">
@@ -760,7 +769,7 @@ function AIWorkloads({ metrics, localAI, hardware, throughputHistory, refreshing
           <div><span>Context capacity</span><strong>{model?.contextLength ? `${model.contextLength.toLocaleString()} tokens` : 'Not reported'}</strong></div>
           {model?.moe && <div><span>MoE routing</span><strong>{model.activeExperts} of {model.experts} experts</strong></div>}
         </div>
-        <div className="inference-chart-head"><div><strong>{measuredDecode !== null ? 'Measured generation speed' : 'System GPU activity'}</strong><span>{measuredDecode !== null ? `Exact per-request rates from the runtime (${throughputEvidence === 'runtime-log' ? 'Ollama server log' : 'metrics endpoint'}).` : 'Live context while this runtime is present — not claimed as token throughput.'}</span></div><span className={`source-chip${measuredDecode !== null ? ' source-measured' : ''}`}>{measuredDecode !== null ? `${throughputEvidence === 'runtime-log' ? 'LOG MEASURED' : 'METRICS MEASURED'}` : model?.source || 'Operating system process counters'}</span></div>
+        <div className="inference-chart-head"><div><strong>{measuredDecode !== null ? (throughputEvidence === 'last-runtime-log' ? 'Last measured generation speed' : 'Measured generation speed') : 'System GPU activity'}</strong><span>{measuredDecode !== null ? `Exact per-request rates from the runtime (${throughputOrigin})${throughputEvidence === 'last-runtime-log' ? ' — no generation in progress' : ''}.` : 'Live context while this runtime is present — not claimed as token throughput.'}</span></div><span className={`source-chip${measuredDecode !== null ? ' source-measured' : ''}`}>{measuredDecode !== null ? throughputChip : model?.source || 'Operating system process counters'}</span></div>
         {measuredDecode !== null && (
           <div className="measured-strip">
             <div className="measured-cell tone-mint">

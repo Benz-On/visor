@@ -1520,6 +1520,24 @@ fn cloud_provider_catalog(applications: &[Value]) -> Vec<Value> {
         .collect()
 }
 
+/// Loopback `/metrics` endpoints for runtimes that expose token counters, as
+/// `(display source, url)` pairs. Ollama is deliberately absent: it serves no
+/// metrics endpoint, so its rates come from the server log instead. Probing a
+/// fixed port blindly previously pointed at whatever local service happened to
+/// own it, which measured nothing while still reporting a provenance.
+pub fn metrics_targets() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("llama.cpp /metrics", "http://127.0.0.1:8080/metrics"),
+        ("vLLM /metrics", "http://127.0.0.1:8000/metrics"),
+        (
+            "Text generation web UI /metrics",
+            "http://127.0.0.1:5000/metrics",
+        ),
+        ("Jan /metrics", "http://127.0.0.1:1337/metrics"),
+        ("LocalAI /metrics", "http://127.0.0.1:8081/metrics"),
+    ]
+}
+
 /// Resolve the primary GGUF blob for each installed Ollama model so the
 /// collector can read exact header metadata. Returns `(path, model_name)`
 /// pairs; missing blobs are skipped by the caller.

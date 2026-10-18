@@ -36,6 +36,28 @@ Versioning while the product remains in beta.
 
 ### Fixed
 
+- Measured token throughput is now actually measured, and stops pretending. The
+  metrics path fetched `/metrics` and decoded it as JSON, which every runtime
+  rejects because Prometheus serves text, so that branch silently produced
+  nothing while the interface still read "metrics endpoint". `/metrics` is now
+  parsed as text exposition, counters are summed across label series, and the
+  rate divides by the runtime's own busy seconds rather than the wall-clock poll
+  window: a burst that finished inside a 3 s poll previously read up to six
+  times too slow. Candidate endpoints come from the runtimes the detector already
+  knows instead of one hardcoded port, which on this machine is a search server.
+- Prometheus `*_created` companion series are excluded from token totals; they
+  were being summed into the counters and inflating every rate.
+- An idle machine no longer shows its last completion as live throughput. The
+  log reader keyed freshness on the file's mtime, which unrelated HTTP access
+  lines keep advancing, so a finished request could read "LOG MEASURED" for five
+  minutes with a current timestamp. Readings now carry the real observation time
+  and age, and past the live window the interface labels them as the last
+  measured completion.
+- Counter restarts and endpoint switches re-baseline and report nothing.
+  Decreases were saturating to zero, which silently discarded the window and
+  read as an idle server.
+- Session history records each completion once, so re-reading the same finished
+  request no longer inflates the session token total or the completion count.
 - Three Windows collectors silently returned nothing, so the sensor console,
   memory detail, and Hardware tab kept their zero-valued defaults forever.
   `powershell.exe -Command -` buffers the final pipeline until it sees an empty

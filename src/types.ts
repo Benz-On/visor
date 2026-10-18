@@ -8,8 +8,12 @@ export interface InferenceThroughputInfo {
   decodeTokensPerSecond: number | null;
   prefillTokensPerSecond: number | null;
   lastTokens: number | null;
-  evidence: 'metrics-endpoint' | 'runtime-log' | 'unavailable' | string;
+  evidence: 'metrics-endpoint' | 'runtime-log' | 'last-runtime-log' | 'unavailable' | string;
   observedAt: string | null;
+  /** Age of the logged completion in seconds; set on the log path. */
+  ageSeconds?: number | null;
+  /** Runtime that served the counters, when the metrics path supplied them. */
+  source?: string | null;
 }
 
 /** One measured completion sample from the collector's session history. */
