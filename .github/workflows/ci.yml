@@ -22,6 +22,8 @@ jobs:
     name: Workflow preflight
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    outputs:
+      native-os: ${{ steps.select-os.outputs.list }}
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -30,6 +32,18 @@ jobs:
 
       - name: Verify immutable action references
         run: node scripts/check-workflow-pins.mjs
+
+      - name: Select native runners
+        id: select-os
+        # A job-level `if` has no `matrix` context, so the runner set is decided
+        # here instead: automatic events pay for Linux only, and a manual dispatch
+        # adds the Windows and macOS legs.
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            echo 'list=["ubuntu-24.04","windows-latest","macos-14"]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'list=["ubuntu-24.04"]' >> "$GITHUB_OUTPUT"
+          fi
 
   frontend-and-agent:
     name: Frontend and agent
@@ -64,15 +78,12 @@ jobs:
         run: npm audit --audit-level=high
 
   native:
-    name: Native tests - ${{ matrix.os }}
+    name: Native tests · ${{ matrix.os }}
     needs: preflight
-    # Automatic events pay for one Linux native job only; the Windows and
-    # macOS legs run on manual dispatch.
-    if: github.event_name == 'workflow_dispatch' || matrix.os == 'ubuntu-24.04'
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-14, ubuntu-24.04]
+        os: ${{ fromJSON(needs.preflight.outputs.native-os) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
