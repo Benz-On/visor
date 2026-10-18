@@ -13,6 +13,9 @@ use sysinfo::{Disks, Networks, ProcessesToUpdate, System};
 const GIB: f64 = 1_073_741_824.0;
 const MIB: f64 = 1_048_576.0;
 const SENSOR_SCRIPT: &str = include_str!("../collectors/sensors.ps1");
+// Only the Windows reader consumes this script, so an ungated constant is dead
+// code on the Linux and macOS legs, which build with `-D warnings`.
+#[cfg(windows)]
 const GPU_COUNTER_SCRIPT: &str = include_str!("../collectors/gpu-counters.ps1");
 const PROCESS_SNAPSHOT_SCRIPT: &str = include_str!("../collectors/process-snapshot.ps1");
 const MEMORY_SNAPSHOT_SCRIPT: &str = include_str!("../collectors/memory-snapshot.ps1");
@@ -1263,6 +1266,10 @@ fn run_powershell_json(
 }
 
 fn hidden_command(program: &str) -> Command {
+    // The window-hiding flag exists only on Windows, so the binding needs `mut`
+    // there and nowhere else. The allow keeps every platform building under
+    // `-D warnings` without splitting the function per target.
+    #[allow(unused_mut)]
     let mut command = Command::new(program);
     #[cfg(windows)]
     {
