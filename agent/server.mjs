@@ -1,3 +1,11 @@
+/**
+ * VISOR development agent — FROZEN as a browser-preview stub.
+ *
+ * This server exists only so the interface can run in a plain browser tab
+ * while the Rust collector is developed. It is not a second implementation
+ * of the product: new capabilities land in src-tauri only and are not
+ * back-ported here. See agent/README.md for the maintenance rules.
+ */
 import { createServer } from 'node:http';
 import { execFile } from 'node:child_process';
 import { cpus, hostname, platform, release, totalmem, freemem, setPriority, constants as osConstants } from 'node:os';

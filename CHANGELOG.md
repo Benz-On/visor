@@ -7,6 +7,14 @@ Versioning while the product remains in beta.
 
 ### Changed
 
+- The Node development agent is now formally frozen as a browser-preview
+  stub (`agent/README.md` declares its purpose, gaps and maintenance rules).
+  It exists so the interface can run in a plain browser tab during collector
+  development; new capabilities land in the Rust collector only. Fixes that
+  keep the preview honest remain in scope; feature parity does not.
+
+### Changed
+
 - Dependency majors, applied as one verified pass rather than six blind
   bumps: React and ReactDOM 18 -> 19 (types included), Vite 6 -> 8 with
   @vitejs/plugin-react 4 -> 6 (the plugin requires Vite 8, so the pair moved

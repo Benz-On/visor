@@ -98,7 +98,9 @@ npm run desktop
 The compiled application embeds the Rust collector together with the Windows
 sensor scripts in `src-tauri/collectors/`, which are baked into the binary at
 compile time. The optional Node agent in `agent/` is only a browser-development
-fallback and currently targets Windows; it runs the same collector scripts:
+preview and is feature-frozen (see `agent/README.md`): new capabilities land
+in the Rust collector only, so the preview can show fewer surfaces than the
+packaged app. It currently targets Windows and runs the same collector scripts:
 
 ```bash
 npm run agent
