@@ -13,6 +13,9 @@ pub struct EnergyEstimate {
 }
 
 pub struct EnergyInputs {
+    /// GPU model string; used only to classify the power fallback when vendor
+    /// telemetry is unavailable.
+    pub gpu_model: String,
     pub cpu_load: f64,
     pub gpu_load: f64,
     pub memory_total_gb: f64,
@@ -78,6 +81,32 @@ pub fn infer_cpu_tdp(physical_cores: usize, brand: &str) -> f64 {
     }
 }
 
+/// Power ceiling for integrated graphics in watts. iGPUs share the package's
+/// thermal and power budget with the CPU; 28 W covers the common U-class
+/// parts and stays honest against the 220 W discrete default.
+const INTEGRATED_GPU_LIMIT: f64 = 28.0;
+
+/// Integrated-adapter detection by model name, mirroring the advisor's
+/// shared-memory patterns. An absent model is treated as discrete: an unknown
+/// GPU exaggerating a laptop projection was the actual failure mode, while
+/// desktops without a readable name keep the existing behavior.
+fn is_integrated_gpu(model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    let intel = model.contains("uhd graphics")
+        || model.contains("hd graphics")
+        || model.contains("iris")
+        // Meteor Lake and Arrow Lake brand their iGPU as "Arc Graphics";
+        // discrete Arc cards carry an "Arc A###" name instead.
+        || (model.contains("intel") && model.contains("arc") && !model.contains("arc a"));
+    // WMI strings vary: "Radeon 780M Graphics", "Radeon(TM) Graphics",
+    // "Radeon Vega 8". Every discrete card carries an "RX " prefix.
+    let amd_apu = model.contains("radeon")
+        && !model.contains("rx ")
+        && (model.contains("graphics") || model.contains("vega"));
+    let apple = model.contains("apple m");
+    intel || amd_apu || apple
+}
+
 pub fn estimate(inputs: EnergyInputs) -> EnergyEstimate {
     let cpu_idle = (inputs.cpu_tdp * 0.075).max(5.0);
     let measured_cpu = inputs.measured_cpu_power > 0.0;
@@ -96,8 +125,17 @@ pub fn estimate(inputs: EnergyInputs) -> EnergyEstimate {
     let gpu = if measured_gpu {
         inputs.measured_gpu_power
     } else {
-        inputs.gpu_power_limit.max(30.0)
-            * (0.1 + 0.9 * (clamp(inputs.gpu_load, 0.0, 100.0) / 100.0).powf(0.92))
+        // A desktop card without vendor telemetry is a different machine from a
+        // laptop iGPU: the same 220 W ceiling would inflate an integrated
+        // GPU's share of the projection by an order of magnitude. Integrated
+        // adapters are detected by their model names, matching the advisor's
+        // shared-memory classification.
+        let limit = if is_integrated_gpu(&inputs.gpu_model) {
+            INTEGRATED_GPU_LIMIT
+        } else {
+            inputs.gpu_power_limit.max(30.0)
+        };
+        limit * (0.1 + 0.9 * (clamp(inputs.gpu_load, 0.0, 100.0) / 100.0).powf(0.92))
     };
     let memory = 2.0 + inputs.memory_total_gb.max(1.0) * 0.12;
     let storage = 2.5 + clamp(inputs.disk_activity, 0.0, 100.0) * 0.055;
@@ -227,6 +265,7 @@ mod tests {
     #[test]
     fn measured_gpu_improves_confidence_without_hiding_estimates() {
         let base = || EnergyInputs {
+            gpu_model: "NVIDIA GeForce RTX 4070".to_string(),
             cpu_load: 50.0,
             gpu_load: 60.0,
             memory_total_gb: 32.0,
@@ -249,8 +288,43 @@ mod tests {
     }
 
     #[test]
+    fn integrated_gpus_do_not_get_a_discrete_power_ceiling() {
+        // The collector falls back to a 220 W limit when the driver reports no
+        // ceiling; an iGPU must not inherit it.
+        let base = || EnergyInputs {
+            gpu_model: "NVIDIA GeForce RTX 4070".to_string(),
+            cpu_load: 10.0,
+            gpu_load: 80.0,
+            memory_total_gb: 16.0,
+            disk_activity: 5.0,
+            cpu_tdp: 28.0,
+            speed_ratio: 0.7,
+            measured_cpu_power: 0.0,
+            measured_gpu_power: 0.0,
+            gpu_power_limit: 220.0,
+        };
+        let discrete = estimate(base());
+        let integrated = estimate(EnergyInputs {
+            gpu_model: "Intel(R) Iris(R) Xe Graphics".to_string(),
+            ..base()
+        });
+        // Same load, but the iGPU ceiling is 28 W instead of the 220 W
+        // discrete fallback, so its modeled GPU watts must be far lower.
+        assert!(integrated.gpu < discrete.gpu / 4.0);
+        assert!(is_integrated_gpu("Intel Iris Xe Graphics"));
+        assert!(is_integrated_gpu("AMD Radeon 780M Graphics"));
+        assert!(is_integrated_gpu("AMD Radeon(TM) Graphics"));
+        assert!(is_integrated_gpu("Intel(R) Arc(TM) Graphics"));
+        assert!(is_integrated_gpu("Apple M2"));
+        assert!(!is_integrated_gpu("NVIDIA GeForce RTX 5070 Ti"));
+        assert!(!is_integrated_gpu("AMD Radeon RX 7900 XTX"));
+        assert!(!is_integrated_gpu("Intel Arc A770 Graphics"));
+    }
+
+    #[test]
     fn a_measured_package_replaces_the_tdp_curve_not_blends_with_it() {
         let base = || EnergyInputs {
+            gpu_model: "NVIDIA GeForce RTX 4070".to_string(),
             cpu_load: 50.0,
             gpu_load: 60.0,
             memory_total_gb: 32.0,
@@ -297,6 +371,7 @@ mod tests {
     #[test]
     fn price_and_carbon_settings_move_the_projection() {
         let estimate = estimate(EnergyInputs {
+            gpu_model: "NVIDIA GeForce RTX 4070".to_string(),
             cpu_load: 50.0,
             gpu_load: 60.0,
             memory_total_gb: 32.0,

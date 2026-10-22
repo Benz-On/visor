@@ -405,9 +405,9 @@ interface OverviewProps extends MetricsProps, ProcessActions {
 }
 
 const bytesToGb = (bytes = 0) => bytes / 1024 ** 3;
-const formatBytes = (bytes = 0) => bytes >= 1024 ** 3
-  ? `${bytesToGb(bytes).toFixed(2)} GB`
-  : `${(bytes / 1024 ** 2).toFixed(bytes >= 100 * 1024 ** 2 ? 0 : 1)} MB`;
+const formatBytes = (bytes: number | null | undefined) => (bytes === null || bytes === undefined ? '—' : bytes >= 1024 ** 3
+    ? `${bytesToGb(bytes).toFixed(2)} GB`
+    : `${(bytes / 1024 ** 2).toFixed(bytes >= 100 * 1024 ** 2 ? 0 : 1)} MB`);
 const sensorValue = (value: number | null | undefined, suffix: string) => typeof value === 'number' && value > 0 ? `${value.toFixed(1)}${suffix}` : 'Unavailable';
 
 function Overview({ metrics, energy, hardware, localAI, processes, live, refreshing, onRefresh, onViewProcesses, onKill, onPriority, onExpand }: OverviewProps) {
@@ -640,7 +640,7 @@ function MemoryCommandCenter({ metrics, processes, live, refreshing, onRefresh }
         </div>
         <div className="memory-consumers">
           <div className="memory-consumers-head"><span>Process</span><span>Working set</span><span>Private</span></div>
-          {topConsumers.map((process) => <div key={process.id}><span><i style={{ background: process.color }}>{process.icon}</i><strong>{process.name}</strong><small>PID {process.id}</small></span><strong>{formatBytes(process.workingSetBytes || process.memory * 1024 ** 3)}</strong><em>{formatBytes(process.privateBytes)}</em></div>)}
+          {topConsumers.map((process) => <div key={process.id}><span><i style={{ background: process.color }}>{process.icon}</i><strong>{process.name}</strong><small>PID {process.id}</small></span><strong>{formatBytes(process.workingSetBytes || process.memory * 1024 ** 3)}</strong><em>{formatBytes(process.privateBytes ?? null)}</em></div>)}
         </div>
       </div>
       <p className="memory-command-note"><Info size={14} /> Refresh requests a new Windows memory and process sample. It does not force working-set purges, which usually reduce performance and make free-RAM numbers misleading.</p>

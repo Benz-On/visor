@@ -1675,6 +1675,10 @@ pub fn apply_gguf_metadata(models: &mut Value, metadata: &HashMap<String, gguf::
         }
         model["kvHeads"] = json!(meta.head_count_kv);
         model["kvHeadCountExact"] = json!(meta.head_count_kv.is_some());
+        // Hybrid-attention models carry KV in only some of their layers; the
+        // advisor must multiply by this, not by block_count, or the cache
+        // estimate lands several times too high.
+        model["kvLayerCount"] = json!(meta.kv_layer_count.or(meta.block_count));
         // Head dimensions complete the KV-cache equation; without them the
         // advisor has to assume 128, which is wrong for Gemma (256) and Phi (96).
         model["kvKeyLength"] = json!(meta.key_length);
@@ -2006,6 +2010,7 @@ mod tests {
         let meta = gguf::GgufMeta {
             head_count_kv: Some(4.0),
             block_count: Some(62),
+            kv_layer_count: Some(16),
             key_length: Some(256),
             value_length: Some(256),
             ..Default::default()
@@ -2019,6 +2024,9 @@ mod tests {
         assert_eq!(model["kvKeyLength"], 256);
         assert_eq!(model["kvValueLength"], 256);
         assert_eq!(model["layers"], 62);
+        // A dropped key here silently halves or doubles every KV-cache
+        // estimate downstream, and no test after this one would notice.
+        assert_eq!(model["kvLayerCount"], 16);
 
         let mut sparse = json!({ "models": [{ "model": "unknown:1b", "sizeBytes": 0 }] });
         apply_gguf_metadata(&mut sparse, &HashMap::new());

@@ -7,6 +7,42 @@ Versioning while the product remains in beta.
 
 ### Added
 
+- Linux per-process GPU attribution: `nvidia-smi --query-compute-apps` maps the
+  processes holding CUDA contexts and their dedicated memory. Utilization per
+  process stays honestly absent on Linux (0, no Windows-style engine counters)
+  while the VRAM figures finally attribute. A genuine driver error keeps the
+  previous per-process map instead of blinking every share to zero, and
+  graphics-only (Vulkan/GL) clients do not appear in the compute-apps list.
+
+### Fixed
+
+- **Hybrid-attention KV cache overestimate.** The advisor multiplied average
+  KV heads by the total layer count, but Qwen3.5-class models carry KV state in
+  only some layers (the rest are linear attention with zero KV), so the cache
+  estimate could land several times too high — flipping fit verdicts and
+  skewing the offload plan. The GGUF reader now reports how many layers
+  actually carry KV and the advisor uses that.
+- **iGPU power inflation.** Without vendor telemetry the GPU rail fell back to
+  a 220 W ceiling; on a laptop with Intel Iris Xe / AMD Radeon 780M / Apple
+  silicon that overstated the GPU by an order of magnitude and flowed into the
+  price projection. Integrated adapters are now detected — by the nvidia-smi
+  name when present, otherwise the SMBIOS inventory name — and get a 28 W
+  ceiling. Apple M Pro/Max parts can draw more than that; the ceiling stays a
+  deliberate lower bound rather than a repeat of the inflation it fixes.
+- GGUF header probes read through a buffered reader. Tokenizer arrays mean
+  hundreds of thousands of tiny reads per model; unbuffered, each was a
+  syscall and the 10-minute re-probe of ~20 installed models cost real CPU.
+- Per-process detail fields (handles, threads, private bytes, priority) render
+  as an explicit em dash while the detail probe has not produced them, instead
+  of presenting absence as a measured zero.
+- Per-process memory energy attribution is renormalized when working-set
+  shares overlap (shared pages double-count), so the memory pool is never
+  attributed more than once.
+- The manual Refresh button no longer re-reads every installed model's GGUF
+  header; those describe files on disk and keep their own 10-minute gate.
+
+### Added
+
 - Session continuity: the monitored energy total and the measured-throughput
   history survive a restart. They are written to `session.json` in the
   application data directory at most every 30 seconds (temporary file, fsync,

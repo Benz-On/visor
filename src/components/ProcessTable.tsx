@@ -23,7 +23,8 @@ const powerClass: Record<ProcessInfo['power'], string> = {
   High: 'power-high',
 };
 
-const formatBytes = (bytes = 0) => {
+const formatBytes = (bytes: number | null | undefined) => {
+  if (bytes === null || bytes === undefined) return '—';
   if (!bytes) return '0 MB';
   if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
   return `${Math.max(0.1, bytes / 1024 ** 2).toFixed(bytes >= 100 * 1024 ** 2 ? 0 : 1)} MB`;
@@ -188,7 +189,7 @@ export function ProcessTable({
           <div className="process-control-bar">
             <div className="process-control-identity">
               <span className="app-icon" style={{ background: selectedProcess.color }}>{selectedProcess.icon}</span>
-              <div><strong>{selectedProcess.name}</strong><span>PID {selectedProcess.id} · {selectedProcess.threads || 0} threads · {selectedProcess.handles || 0} handles</span></div>
+              <div><strong>{selectedProcess.name}</strong><span>PID {selectedProcess.id} · {selectedProcess.threads ?? '—'} threads · {selectedProcess.handles ?? '—'} handles</span></div>
             </div>
             <div className="process-control-energy"><Zap size={15} /><span>Attributed now</span><strong>~{(selectedProcess.energyWatts || 0).toFixed(1)} W</strong></div>
             <div className="process-control-actions">
@@ -205,7 +206,7 @@ export function ProcessTable({
           </div>
           <div className="process-detail-grid">
             <div><span>Working set</span><strong>{formatBytes(selectedProcess.workingSetBytes || selectedProcess.memory * 1024 ** 3)}</strong><small>Physical RAM in use</small></div>
-            <div><span>Private memory</span><strong>{formatBytes(selectedProcess.privateBytes)}</strong><small>Exclusive allocation</small></div>
+            <div><span>Private memory</span><strong>{formatBytes(selectedProcess.privateBytes ?? null)}</strong><small>{selectedProcess.privateBytes === null || selectedProcess.privateBytes === undefined ? 'Detail probe pending' : 'Exclusive allocation'}</small></div>
             <div><span>Virtual memory</span><strong>{formatBytes(selectedProcess.virtualBytes)}</strong><small>Address space</small></div>
             <div><span>Disk now</span><strong>{(selectedProcess.disk || 0).toFixed(2)} MB/s</strong><small>{(selectedProcess.diskRead || 0).toFixed(2)} read · {(selectedProcess.diskWrite || 0).toFixed(2)} write</small></div>
             <div><span>State</span><strong>{selectedProcess.responding === false ? 'Not responding' : selectedProcess.state || 'Unknown'}</strong><small>Parent PID {selectedProcess.parentId || '—'}</small></div>

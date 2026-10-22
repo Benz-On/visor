@@ -179,7 +179,10 @@ impl Collector {
         self.last_memory_details = None;
         self.last_hardware_details = None;
         self.last_local_ai = None;
-        self.last_gguf = None;
+        // GGUF headers are deliberately NOT invalidated here: they describe
+        // files on disk that a manual refresh cannot have changed, and
+        // re-reading every installed model's blob would add seconds to the
+        // button. The 10-minute gate still turns them over on its own.
     }
 
     /// Reads GGUF headers for installed Ollama models and caches exact
@@ -397,7 +400,25 @@ impl Collector {
             .and_then(Value::as_f64)
             .filter(|value| (0.0..1000.0).contains(value))
             .unwrap_or_default();
+        // nvidia-smi only names NVIDIA adapters, so an iGPU-only host reports
+        // an empty model and the power classifier would never see an Intel
+        // Iris or AMD APU name. Fall back to the SMBIOS inventory adapter,
+        // which Win32_VideoController fills on Windows; elsewhere the string
+        // stays empty and the discrete default keeps applying.
+        let gpu_model = if self.gpu.model.is_empty() {
+            self.hardware_details
+                .get("gpus")
+                .and_then(Value::as_array)
+                .and_then(|gpus| gpus.first())
+                .and_then(|gpu| gpu.get("model"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        } else {
+            self.gpu.model.clone()
+        };
         let energy_estimate = energy::estimate(energy::EnergyInputs {
+            gpu_model,
             cpu_load: cpu,
             gpu_load: self.gpu.utilization,
             memory_total_gb: memory_total / GIB,
@@ -809,9 +830,14 @@ impl Collector {
                 .map(|item| number(item, "workingSetBytes"))
                 .filter(|value| *value > 0.0)
                 .unwrap_or(process.memory() as f64);
+            // When the PowerShell detail snapshot has not run (or failed), a
+            // zero would present absence as a real measurement. Missing
+            // details stay null so the interface can render them as such.
             let private_bytes = details
                 .map(|item| number(item, "privateBytes"))
-                .unwrap_or_default();
+                .filter(|value| *value > 0.0)
+                .map(Value::from)
+                .unwrap_or(Value::Null);
             let virtual_bytes = process.virtual_memory() as f64;
             let memory = working_set_bytes / GIB;
             let usage = process.disk_usage();
@@ -844,12 +870,24 @@ impl Collector {
                 "kind": kind,
                 "energyWatts": 0,
                 "protected": protected,
-                "priority": details.map(|item| number(item, "priority") as i64).unwrap_or_default(),
+                "priority": details
+                    .map(|item| number(item, "priority") as i64)
+                    .filter(|value| *value > 0)
+                    .map(Value::from)
+                    .unwrap_or(Value::Null),
                 "state": format!("{:?}", process.status()),
                 "path": path,
                 "command": command,
-                "handles": details.map(|item| number(item, "handles") as u64).unwrap_or_default(),
-                "threads": details.map(|item| number(item, "threads") as u64).unwrap_or_default(),
+                "handles": details
+                    .map(|item| number(item, "handles") as u64)
+                    .filter(|value| *value > 0)
+                    .map(Value::from)
+                    .unwrap_or(Value::Null),
+                "threads": details
+                    .map(|item| number(item, "threads") as u64)
+                    .filter(|value| *value > 0)
+                    .map(Value::from)
+                    .unwrap_or(Value::Null),
                 "startedAt": details.and_then(|item| item.get("started")).cloned().unwrap_or(Value::Null),
                 "uptimeSeconds": process.run_time(),
                 "responding": details.and_then(|item| item.get("responding")).and_then(Value::as_bool),
@@ -1196,10 +1234,23 @@ fn attribute_energy(
         .sum::<f64>();
     let total_cpu = observed_cpu.max(system_cpu).max(0.1);
     let total_gpu = observed_gpu.max(system_gpu).max(0.1);
+    // Memory shares are working-set ratios and can sum above 1 when processes
+    // share pages; without the proportional renormalization the memory pool
+    // would be attributed several times over.
+    let observed_memory_share: f64 = processes
+        .iter()
+        .map(|process| (number(process, "memory") / used_memory_gb.max(0.25)).clamp(0.0, 1.0))
+        .sum();
+    let memory_scale = if observed_memory_share > 1.0 {
+        1.0 / observed_memory_share
+    } else {
+        1.0
+    };
     for process in processes {
         let watts = estimate.cpu * number(process, "cpu") / total_cpu
             + estimate.gpu * number(process, "gpu") / total_gpu
             + estimate.memory
+                * memory_scale
                 * (number(process, "memory") / used_memory_gb.max(0.25)).clamp(0.0, 1.0);
         process["energyWatts"] = json!(energy::round(watts, 1));
         process["power"] = Value::String(
@@ -1290,7 +1341,59 @@ fn read_gpu_processes() -> Result<HashMap<u32, Value>, String> {
 
 #[cfg(not(windows))]
 fn read_gpu_processes() -> Result<HashMap<u32, Value>, String> {
-    Ok(HashMap::new())
+    // Linux has no engine-utilization counters like Windows, but nvidia-smi
+    // reports the processes holding contexts and their dedicated memory.
+    // Utilization per process stays honestly absent (0) rather than guessed;
+    // the memory figure is what per-process VRAM attribution needs.
+    let output = timed_command::output(
+        hidden_command("nvidia-smi").args([
+            "--query-compute-apps=pid,used_memory".to_string(),
+            "--format=csv,noheader,nounits".to_string(),
+        ]),
+        None,
+        Duration::from_secs(3),
+    );
+    let output = match output {
+        Ok(output) if output.status.success() => output,
+        Ok(output) => {
+            let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            // "No running processes" is the healthy empty case; some driver
+            // versions print it on stderr with a failing status. A genuine
+            // driver error is different: returning Err keeps the previous
+            // process map instead of blinking every VRAM share to zero.
+            let lower = message.to_ascii_lowercase();
+            if message.is_empty() || lower.contains("no running process") {
+                return Ok(HashMap::new());
+            }
+            return Err(format!("nvidia-smi compute-apps query failed: {message}"));
+        }
+        // No nvidia-smi on this host: absence, not failure.
+        Err(_) => return Ok(HashMap::new()),
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut map = HashMap::new();
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let mut fields = line.split(',');
+        let (Some(pid), Some(memory)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        let Ok(pid) = pid.trim().parse::<u32>() else {
+            continue;
+        };
+        let Ok(memory_mib) = memory.trim().parse::<f64>() else {
+            continue;
+        };
+        map.insert(
+            pid,
+            json!({
+                "pid": pid,
+                "gpu": 0.0,
+                "dedicatedBytes": memory_mib * MIB,
+                "engines": {}
+            }),
+        );
+    }
+    Ok(map)
 }
 
 /// Runs one of the embedded Windows collectors and decodes its JSON.

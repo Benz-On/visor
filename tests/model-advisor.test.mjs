@@ -118,6 +118,40 @@ test('offload plan answers how many layers fit on the GPU', () => {
   assert.ok(tight.estimatedTpsCenter === null || partial.estimatedTpsCenter >= tight.estimatedTpsCenter);
 });
 
+test('hybrid models size the KV cache from KV-carrying layers only', () => {
+  const dense = analyzeLocalModel({
+    ...model(),
+    parameterCountExact: 8_000_000_000,
+    weightBytesExact: 4.6 * GIB,
+    layers: 32,
+    kvHeads: 4,
+    kvKeyLength: 128,
+    kvValueLength: 128,
+    kvLayerCount: 32,
+  }, hardware({ vram: 12 }));
+  // Same geometry, but only 8 of 32 layers carry KV state.
+  const hybrid = analyzeLocalModel({
+    ...model(),
+    parameterCountExact: 8_000_000_000,
+    weightBytesExact: 4.6 * GIB,
+    layers: 32,
+    kvHeads: 4,
+    kvKeyLength: 128,
+    kvValueLength: 128,
+    kvLayerCount: 8,
+  }, hardware({ vram: 12 }));
+  // 8 of 32 layers: the hybrid cache is a quarter of the dense one.
+  // The advisor rounds the cache to two decimals; the tolerance matches that
+  // rounding rather than being tighter than the value it checks.
+  assert.ok(Math.abs(hybrid.kvCacheGb * 4 - dense.kvCacheGb) <= 0.04,
+    `hybrid ${hybrid.kvCacheGb} vs dense ${dense.kvCacheGb}`);
+  // The 100% offload step still accounts for the full cache exactly.
+  const full = hybrid.offloadPlan[0];
+  assert.equal(full.layersOnGpu, 32);
+  assert.ok(Math.abs(full.vramNeededGb - (4.6 + hybrid.kvCacheGb + hybrid.runtimeOverheadGb * 0.5)) < 0.05,
+    `full step ${full.vramNeededGb} vs weights+kv+overhead ${4.6 + hybrid.kvCacheGb + hybrid.runtimeOverheadGb * 0.5}`);
+});
+
 test('offload plan is absent without exact layer metadata', () => {
   const heuristic = analyzeLocalModel(model(), hardware());
   assert.equal(heuristic.offloadPlan, undefined);
