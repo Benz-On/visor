@@ -148,11 +148,36 @@ function App() {
     void applyPriceFactors(settings.tariffPerKwh, settings.carbonGramsPerKwh);
   }, [settings.carbonGramsPerKwh, settings.tariffPerKwh, settingsLoaded]);
 
+  // Alert-rule overrides are part of settings: replay them to the collector
+  // once at start-up so a restart does not re-enable a rule the user muted.
+  const appliedAlertRules = useRef<string | null>(null);
+  useEffect(() => {
+    if (!settingsLoaded || appliedAlertRules.current !== null) return;
+    appliedAlertRules.current = JSON.stringify(settings.alertRules);
+    void visor.applyAlertRules(settings.alertRules);
+    // visor.applyAlertRules is stable; only the first load matters here.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settingsLoaded]);
+
   const updateSettings = useCallback((patch: Partial<VisorSettings>) => {
     setSettings((current) => {
       const next = { ...current, ...patch };
       void saveSettings(next);
       if (patch.autostart !== undefined) void applyAutostart(patch.autostart);
+      return next;
+    });
+  }, []);
+
+  /**
+   * Alert toggles arrive one at a time but must compose: two toggles inside
+   * one render frame would each build `alertRules` from the same stale
+   * snapshot and the second would silently drop the first. Computing the
+   * patch inside the state updater guarantees every toggle lands.
+   */
+  const updateAlertRule = useCallback((id: string, enabled: boolean) => {
+    setSettings((current) => {
+      const next = { ...current, alertRules: { ...current.alertRules, [id]: enabled } };
+      void saveSettings(next);
       return next;
     });
   }, []);
@@ -329,7 +354,7 @@ function App() {
           {activeView === 'ai' && <AIWorkloads metrics={metrics} localAI={visor.snapshot?.localAI} hardware={visor.snapshot?.hardware} throughputHistory={visor.throughputHistory} refreshing={visor.refreshing} onRefresh={visor.refresh} />}
           {activeView === 'energy' && <EnergyView energy={visor.snapshot?.energy} processes={visor.processes} agent={visor.snapshot?.agent} />}
           {activeView === 'history' && <HistoryView metrics={metrics} energy={visor.snapshot?.energy} agent={visor.snapshot?.agent} pollMs={visor.snapshot?.pollMs} />}
-          {activeView === 'alerts' && <AlertsView alerts={visor.snapshot?.alerts} live={visor.connection === 'live'} onToggle={visor.setAlertRule} />}
+          {activeView === 'alerts' && <AlertsView alerts={visor.snapshot?.alerts} live={visor.connection === 'live'} onToggle={(id, enabled) => { updateAlertRule(id, enabled); return visor.setAlertRule(id, enabled); }} />}
           {activeView === 'settings' && <SettingsView settings={settings} onUpdate={updateSettings} metrics={metrics} energy={visor.snapshot?.energy} hardware={visor.snapshot?.hardware} agent={visor.snapshot?.agent} source={visor.snapshot?.source} alerts={visor.snapshot?.alerts} />}
           </>)}
         </div>
@@ -559,7 +584,7 @@ function EfficiencyCard({ metrics, energy }: MetricsProps & { energy?: EnergyEst
       </div>
       <div className="score-row"><strong>{score}</strong><span>/ 100</span><em>{rating}</em></div>
       <div className="score-track"><span style={{ width: `${score}%` }} /></div>
-      <p>{energy ? `${energy.confidenceScore}% confidence · ${energy.sessionWh.toFixed(2)} Wh this session` : 'Start the native collector or development agent for a real-time power estimate.'}</p>
+      <p>{energy ? `${energy.confidenceScore}% confidence · ${energy.sessionWh.toFixed(2)} Wh monitored${energy.sessionStartedAt ? ' since ' + new Date(energy.sessionStartedAt).toLocaleDateString() : ' this session'}` : 'Start the native collector or development agent for a real-time power estimate.'}</p>
     </article>
   );
 }
@@ -1018,7 +1043,7 @@ function EnergyView({ energy, processes, agent }: { energy?: EnergyEstimate; pro
       <section className="panel energy-live-card">
         <div className="energy-live-head"><div className="insight-icon mint-bg"><Leaf size={20} /></div><div><p className="eyebrow">LIVE WALL-POWER ESTIMATE</p><h2>Energy Lens</h2></div><span className={`confidence-badge confidence-${energy.confidence}`}>{energy.confidenceScore}% confidence</span></div>
         <div className="energy-live-value"><strong>{energy.watts.toFixed(0)}</strong><span>W</span><em>right now</em></div>
-        <div className="energy-session-line"><span>Session consumption</span><strong>{energy.sessionWh.toFixed(2)} Wh</strong><i /><span>At the current load</span><strong>{energy.dailyKwh.toFixed(2)} kWh/day</strong></div>
+        <div className="energy-session-line"><span>{energy.sessionStartedAt ? `Monitored since ${new Date(energy.sessionStartedAt).toLocaleDateString()}` : 'Session consumption'}</span><strong>{energy.sessionWh.toFixed(2)} Wh</strong><i /><span>At the current load</span><strong>{energy.dailyKwh.toFixed(2)} kWh/day</strong></div>
         <p>{energy.methodology}</p>
       </section>
 
@@ -1072,7 +1097,7 @@ function HistoryView({ metrics, energy, agent, pollMs }: MetricsProps & { energy
         <PeakCard label="Peak CPU" value={`${peak(metrics.history.cpu).toFixed(1)}%`} time="Rolling buffer" icon={<Cpu />} />
         <PeakCard label="Peak GPU" value={`${peak(metrics.history.gpu).toFixed(1)}%`} time="Rolling buffer" icon={<Gauge />} />
         <PeakCard label="Peak memory" value={`${peak(metrics.history.ram).toFixed(1)}%`} time="Rolling buffer" icon={<MemoryStick />} />
-        <PeakCard label="Energy used" value={energy ? `${energy.sessionWh.toFixed(2)} Wh` : '—'} time="Agent session" icon={<Zap />} />
+        <PeakCard label="Energy used" value={energy ? `${energy.sessionWh.toFixed(2)} Wh` : '—'} time={energy?.sessionStartedAt ? `since ${new Date(energy.sessionStartedAt).toLocaleDateString()}` : 'Collector session'} icon={<Zap />} />
       </section>
       <section className="panel session-card"><div><div className="session-icon"><Clock3 /></div><div><p className="eyebrow">CURRENT COLLECTOR SESSION</p><h3>{agent ? `${Math.floor(uptimeMinutes / 60)}h ${uptimeMinutes % 60}m monitored` : 'Local collector unavailable'}</h3><span>{history.length} live samples in the interface buffer · no fabricated history</span></div></div><span className="source-chip">LOCAL ONLY</span></section>
     </div>
@@ -1086,6 +1111,9 @@ function PeakCard({ label, value, time, icon }: { label: string; value: string; 
 function AlertsView({ alerts, live, onToggle }: { alerts?: AlertsSnapshot; live: boolean; onToggle: (id: string, enabled: boolean) => Promise<unknown> }) {
   const active = alerts?.active || [];
   const watch = alerts?.watch || [];
+  // An older collector build (or the frozen dev agent) may omit `recent`; the
+  // panel degrades to its empty state instead of throwing on .length.
+  const recent = alerts?.recent ?? [];
   const gaming = alerts?.gaming;
   const formatDuration = (durationMs: number) => {
     const seconds = Math.round(durationMs / 1000);
@@ -1115,7 +1143,28 @@ function AlertsView({ alerts, live, onToggle }: { alerts?: AlertsSnapshot; live:
         return <div className="rule-row" key={rule.id}><span className={`rule-icon rule-${presentation.tone}`}>{presentation.icon}</span><div><strong>{rule.title}</strong><span>Above {rule.threshold}{rule.unit} for {formatDuration(rule.durationMs)}{rule.suppressDuringGaming ? ' · ignored during active gaming' : ' · always protected'}</span>{state && !state.suppressed && <i className="rule-progress"><b style={{ width: `${state.progress}%` }} /></i>}</div><button aria-label={`${rule.enabled ? 'Disable' : 'Enable'} ${rule.title}`} disabled={!live} className={`switch ${rule.enabled ? 'switch-on' : ''}`} onClick={() => void onToggle(rule.id, !rule.enabled)}><span /></button></div>;
       })}</div></section>
 
-      <section className="panel recent-alert"><div className="recent-alert-head"><span><Info size={16} /></span><div><strong>{alerts?.recent[0]?.title || 'No resolved alert in this agent session'}</strong><small>{alerts?.recent[0] ? `Peak ${alerts.recent[0].peak}${alerts.recent[0].unit} · ${new Date(alerts.recent[0].resolvedAt).toLocaleTimeString()}` : 'Evidence appears here after a sustained alert resolves.'}</small></div>{alerts?.recent[0] && <em>Resolved</em>}</div><p>{alerts?.recent[0] ? 'The condition returned below its threshold. VISOR retained the peak and timing for diagnosis.' : 'Short spikes are intentionally ignored so notifications stay useful and quiet.'}</p></section>
+      <section className="panel recent-alert">
+        <div className="recent-alert-head">
+          <span><Info size={16} /></span>
+          <div>
+            <strong>{recent[0]?.title || 'No resolved alert in this collector session'}</strong>
+            <small>{recent[0] ? `Peak ${recent[0].peak}${recent[0].unit} · resolved ${new Date(recent[0].resolvedAt).toLocaleTimeString()}` : 'Evidence appears here after a sustained alert resolves.'}</small>
+          </div>
+          {recent.length > 0 && <em>Resolved · {recent.length}</em>}
+        </div>
+        {recent.length > 1 && (
+          <div className="alert-watch-list recent-alert-list">
+            {recent.slice(1, 6).map((item) => (
+              <div key={item.id}>
+                <span className={`watch-dot ${item.gamingSuppressed ? 'watch-suppressed' : ''}`} />
+                <div><strong>{item.title}</strong><small>peak {item.peak}{item.unit}{item.gamingSuppressed ? ' · muted by gaming' : ''}</small></div>
+                <em>{new Date(item.resolvedAt).toLocaleTimeString()}</em>
+              </div>
+            ))}
+          </div>
+        )}
+        <p>{recent.length > 0 ? 'The condition returned below its threshold. VISOR retained the peak and timing for diagnosis.' : 'Short spikes are intentionally ignored so notifications stay useful and quiet.'}</p>
+      </section>
     </div>
   );
 }

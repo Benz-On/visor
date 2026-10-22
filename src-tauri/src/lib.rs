@@ -3,6 +3,7 @@ mod collector;
 mod energy;
 mod gguf;
 mod local_ai;
+mod session;
 mod shell;
 mod throughput;
 mod timed_command;
@@ -481,10 +482,17 @@ fn set_price_factors(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // A previous session's energy total and measured history continue rather
+    // than reset: the file lives in the application-data directory next to
+    // the settings store, and a missing file is simply a first launch.
+    let mut collector = Collector::new();
+    if let Some(record) = session::load() {
+        collector.restore_session(record);
+    }
     let state = RuntimeState {
         latest: Arc::new(RwLock::new(None)),
         alert_settings: Arc::new(Mutex::new(HashMap::new())),
-        collector: Arc::new(Mutex::new(Collector::new())),
+        collector: Arc::new(Mutex::new(collector)),
         shell: Arc::new(ShellFlags {
             // Restarts must not silently begin sending system notifications.
             notifications: AtomicBool::new(false),

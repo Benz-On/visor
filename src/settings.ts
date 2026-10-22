@@ -18,6 +18,8 @@ export interface VisorSettings {
   notifications: boolean;
   closeToTray: boolean;
   autostart: boolean;
+  /** Sustained-rule overrides that survive a restart, keyed by rule id. */
+  alertRules: Record<string, boolean>;
 }
 
 export const defaultSettings: VisorSettings = {
@@ -28,6 +30,7 @@ export const defaultSettings: VisorSettings = {
   notifications: false,
   closeToTray: false,
   autostart: false,
+  alertRules: {},
 };
 
 const themes: ThemeId[] = ['studio', 'porcelain', 'cyber', 'retro'];
@@ -38,6 +41,26 @@ const clamp = (value: unknown, fallback: number, minimum: number, maximum: numbe
   return Math.min(maximum, Math.max(minimum, number));
 };
 
+const KNOWN_ALERT_RULES = [
+  'cpu-sustained',
+  'gpu-sustained',
+  'cpu-thermal',
+  'gpu-thermal',
+  'ssd-thermal',
+  'vram-pressure',
+];
+
+function sanitizeAlertRules(saved: unknown): Record<string, boolean> {
+  if (typeof saved !== 'object' || saved === null) return {};
+  const rules: Record<string, boolean> = {};
+  for (const [id, value] of Object.entries(saved as Record<string, unknown>)) {
+    if (KNOWN_ALERT_RULES.includes(id) && typeof value === 'boolean') {
+      rules[id] = value;
+    }
+  }
+  return rules;
+}
+
 function sanitize(saved: Partial<VisorSettings> | null | undefined): VisorSettings {
   const stored = saved ?? {};
   return {
@@ -47,6 +70,7 @@ function sanitize(saved: Partial<VisorSettings> | null | undefined): VisorSettin
     notifications: typeof stored.notifications === 'boolean' ? stored.notifications : defaultSettings.notifications,
     closeToTray: typeof stored.closeToTray === 'boolean' ? stored.closeToTray : defaultSettings.closeToTray,
     autostart: typeof stored.autostart === 'boolean' ? stored.autostart : defaultSettings.autostart,
+    alertRules: sanitizeAlertRules(stored.alertRules),
   };
 }
 

@@ -2,6 +2,7 @@ use crate::alerts::AlertEngine;
 use crate::energy::{self, EnergyEstimate};
 use crate::gguf;
 use crate::local_ai;
+use crate::session;
 use crate::throughput::{self, InferenceThroughput};
 use crate::timed_command;
 use serde_json::{json, Value};
@@ -11,6 +12,9 @@ use std::time::{Duration, Instant};
 use sysinfo::{Disks, Networks, ProcessesToUpdate, System};
 
 const GIB: f64 = 1_073_741_824.0;
+/// Session file cadence: often enough to lose little on a crash, rare enough
+/// that the write never lands on the same collector tick as a heavy probe.
+const SESSION_FLUSH_INTERVAL: Duration = Duration::from_secs(30);
 const MIB: f64 = 1_048_576.0;
 const SENSOR_SCRIPT: &str = include_str!("../collectors/sensors.ps1");
 // Only the Windows reader consumes this script, so an ungated constant is dead
@@ -47,6 +51,12 @@ pub struct Collector {
     started: Instant,
     last_sample: Instant,
     session_wh: f64,
+    /// Wall-clock marker for the first energy sample of this session. When a
+    /// previous session is restored this is the recorded start, so the UI can
+    /// label the total "since <date>" instead of "this launch".
+    session_started_at: String,
+    /// Last time the session file was written; flushes stay off the hot path.
+    last_session_flush: Option<Instant>,
     gpu: GpuInfo,
     gpu_processes: HashMap<u32, Value>,
     process_details: HashMap<u32, Value>,
@@ -86,6 +96,8 @@ impl Collector {
             started: Instant::now(),
             last_sample: Instant::now(),
             session_wh: 0.0,
+            session_started_at: chrono::Utc::now().to_rfc3339(),
+            last_session_flush: None,
             gpu: GpuInfo::default(),
             gpu_processes: HashMap::new(),
             process_details: HashMap::new(),
@@ -114,6 +126,35 @@ impl Collector {
     pub fn set_price_factors(&mut self, tariff: f64, carbon: f64) {
         self.tariff_per_kwh = tariff;
         self.carbon_grams_per_kwh = carbon;
+    }
+
+    /// Restores a previous session's energy total and measured-throughput
+    /// history. The earliest start marker wins, so a chain of restarts keeps
+    /// pointing at the moment monitoring actually began.
+    pub fn restore_session(&mut self, record: session::SessionRecord) -> usize {
+        self.session_wh = record.session_wh;
+        if !record.started_at.is_empty() {
+            self.session_started_at = record.started_at;
+        }
+        throughput::import_samples(&record.samples)
+    }
+
+    /// Writes the session file at most every 30 seconds. A failed write is
+    /// invisible to telemetry: the next flush simply tries again.
+    pub fn maybe_flush_session(&mut self) {
+        let now = Instant::now();
+        if self
+            .last_session_flush
+            .is_some_and(|flushed| now.duration_since(flushed) < SESSION_FLUSH_INTERVAL)
+        {
+            return;
+        }
+        self.last_session_flush = Some(now);
+        session::save(
+            self.session_wh,
+            &throughput::export_samples(),
+            &self.session_started_at,
+        );
     }
 
     pub fn set_alert_rule(&mut self, id: &str, enabled: bool) -> bool {
@@ -690,6 +731,9 @@ impl Collector {
         } else {
             Some(collector_errors.join(" "))
         };
+        // The flush reads session_wh, which the attribution above just updated,
+        // so it deliberately runs after the whole snapshot is assembled.
+        self.maybe_flush_session();
 
         // The display budget is applied last. Truncating before attribution let a
         // runtime with a small working set drop out of the process list the AI
@@ -722,6 +766,7 @@ impl Collector {
             "energy": energy::as_json(
                 &energy_estimate,
                 self.session_wh,
+                &self.session_started_at,
                 self.tariff_per_kwh,
                 self.carbon_grams_per_kwh,
             ),

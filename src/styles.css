@@ -560,6 +560,13 @@ kbd { padding: 3px 6px; border: 1px solid var(--border); border-radius: 5px; col
 .offload-plan-note { display: block; margin-top: 8px; color: var(--muted); font-size: 9px; line-height: 1.5; }
 .offload-plan-note code { padding: 2px 5px; border: 1px solid var(--border); border-radius: 4px; color: var(--violet); background: color-mix(in srgb, var(--violet) 7%, transparent); font-family: var(--font-mono); font-size: 9px; }
 
+/* Resolved-alert history list inside the recent-alert panel */
+.recent-alert-list { border-top: 1px solid var(--border); margin-top: 12px; }
+.recent-alert-list > div { min-height: 46px; padding: 9px 0; }
+.recent-alert-list > div > div strong { font-size: 11px; }
+.recent-alert-list > div > em { color: var(--muted); font-family: var(--font-mono); font-size: 9px; font-style: normal; font-variant-numeric: tabular-nums; }
+.recent-alert > p { margin: 12px 0 0; }
+
 /* Theme gallery */
 .settings-grid { max-width: 980px; }.theme-choices { grid-template-columns: repeat(4, minmax(130px, 1fr)); gap: 12px; }
 .theme-choices > button { display: flex; min-width: 0; flex-direction: column; padding: 9px; text-align: left; }

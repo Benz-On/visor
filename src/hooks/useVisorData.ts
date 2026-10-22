@@ -165,6 +165,26 @@ export function useVisorData(paused: boolean) {
   const setAlertRule = useCallback((id: string, enabled: boolean) =>
     performAction(`/api/alerts/${id}`, { enabled }), [performAction]);
 
+  /**
+   * Replays persisted rule overrides once at start-up. Deliberately skips the
+   * forced resample that `performAction` does after every action: the rules
+   * apply on the collector's next natural pass, and N forced refreshes would
+   * each re-run every heavy probe before the dashboard even paints.
+   */
+  const applyAlertRules = useCallback(async (rules: Record<string, boolean>) => {
+    for (const [id, enabled] of Object.entries(rules)) {
+      if (nativeRuntime) {
+        await invoke('set_alert_rule', { id, enabled });
+      } else {
+        await fetch(`${AGENT_URL}/api/alerts/${id}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Visor-Action': 'confirmed' },
+          body: JSON.stringify({ enabled }),
+        });
+      }
+    }
+  }, [nativeRuntime]);
+
   const refresh = useCallback(async () => {
     setRefreshing(true);
     try {
@@ -192,6 +212,7 @@ export function useVisorData(paused: boolean) {
     killProcess,
     setProcessPriority,
     setAlertRule,
+    applyAlertRules,
     refresh,
   };
 }
