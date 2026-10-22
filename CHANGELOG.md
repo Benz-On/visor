@@ -5,6 +5,30 @@ Versioning while the product remains in beta.
 
 ## [Unreleased]
 
+### Changed
+
+- Dependency majors, applied as one verified pass rather than six blind
+  bumps: React and ReactDOM 18 -> 19 (types included), Vite 6 -> 8 with
+  @vitejs/plugin-react 4 -> 6 (the plugin requires Vite 8, so the pair moved
+  together), lucide-react 0.468 -> 1.58, ESLint 10.8 -> 10.12 with
+  @eslint/js 10, eslint-plugin-react-refresh 0.5.7, globals 17.13,
+  typescript-eslint 8.71, systeminformation 5.33, and ureq 2.12 -> 3.4 in
+  Rust. ureq 3 moved timeouts to the agent, so all loopback runtime probes
+  now share one keep-alive agent with a single 800 ms deadline.
+  `npm audit` reports zero vulnerabilities at every level after the pass
+  (the previous high advisory sat in the old Vite chain).
+
+### Fixed
+
+- The release content-security-policy no longer allows `http://127.0.0.1:*`:
+  a packaged VISOR never fetches the development agent, so an injected script
+  in the webview could have used that hole to probe every local service.
+  Development keeps the loopback permission through the separate `devCsp`.
+- The release workflow now issues build-provenance attestations for every
+  asset it produces, so a binary published from CI carries a verifiable
+  link to the workflow that built it (manually published local builds are
+  unaffected and remain unsigned).
+
 ### Added
 
 - Linux per-process GPU attribution: `nvidia-smi --query-compute-apps` maps the

@@ -173,6 +173,9 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: write
+      # Artifact attestations need the workflow's own OIDC identity.
+      id-token: write
+      attestations: write
     steps:
       - name: Check out release metadata
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -191,6 +194,14 @@ jobs:
           pattern: visor-*
           path: release-assets
           merge-multiple: true
+
+      - name: Attest build provenance for every asset
+        # Local manual publishing bypasses this step entirely; an attestation
+        # can only be issued for artifacts this workflow built itself.
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: |
+            release-assets/*
 
       - name: Create checksums and release manifest
         run: node scripts/create-release-manifest.mjs release-assets

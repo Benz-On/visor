@@ -2,6 +2,7 @@ mod alerts;
 mod collector;
 mod energy;
 mod gguf;
+mod http;
 mod local_ai;
 mod session;
 mod shell;

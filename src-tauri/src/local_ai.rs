@@ -574,12 +574,7 @@ fn detect(process: &Value) -> Option<Identity> {
 }
 
 fn probe_json(url: &str) -> Option<Value> {
-    ureq::get(url)
-        .timeout(Duration::from_millis(500))
-        .call()
-        .ok()?
-        .into_json::<Value>()
-        .ok()
+    crate::http::get_json(url)
 }
 
 fn string(value: Option<&Value>) -> String {
