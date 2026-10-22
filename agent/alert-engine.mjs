@@ -39,7 +39,12 @@ export function createAlertEngine(initialRules = DEFAULT_ALERT_RULES) {
         state.active = now - state.since >= rule.durationMs;
         states.set(rule.id, state);
       } else {
-        if (state?.active) {
+        // Only a genuine return below threshold writes history. Suppression
+        // starting (a game launched) or a sensor going away ends the episode
+        // without inventing a resolution; the native engine applies the same
+        // rule so both implementations report identical records.
+        const naturallyCleared = sensorAvailable && value < rule.threshold && !suppressed;
+        if (state?.active && naturallyCleared) {
           recent.unshift({
             id: `${rule.id}:${now}`,
             ruleId: rule.id,
@@ -48,7 +53,7 @@ export function createAlertEngine(initialRules = DEFAULT_ALERT_RULES) {
             unit: rule.unit,
             startedAt: new Date(state.since).toISOString(),
             resolvedAt: new Date(now).toISOString(),
-            gamingSuppressed: suppressed,
+            gamingSuppressed: false,
           });
           recent.splice(6);
         }

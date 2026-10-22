@@ -129,7 +129,13 @@ pub fn estimate(inputs: EnergyInputs) -> EnergyEstimate {
 pub const DEFAULT_TARIFF: f64 = 0.25;
 pub const DEFAULT_CARBON: f64 = 56.0;
 
-pub fn as_json(energy: &EnergyEstimate, session_wh: f64, tariff: f64, carbon: f64) -> Value {
+pub fn as_json(
+    energy: &EnergyEstimate,
+    session_wh: f64,
+    session_started_at: &str,
+    tariff: f64,
+    carbon: f64,
+) -> Value {
     let daily_kwh = energy.watts * 24.0 / 1000.0;
     // Confidence follows what is actually instrumented: a modeled CPU with a
     // measured GPU is a different claim from both rails measured on-die.
@@ -163,6 +169,7 @@ pub fn as_json(energy: &EnergyEstimate, session_wh: f64, tariff: f64, carbon: f6
         "cpuMeasured": energy.measured_cpu,
         "gpuMeasured": energy.measured_gpu,
         "sessionWh": round(session_wh, 2),
+        "sessionStartedAt": if session_started_at.is_empty() { Value::Null } else { json!(session_started_at) },
         "hourlyKwh": round(energy.watts / 1000.0, 3),
         "dailyKwh": round(daily_kwh, 3),
         "dailyCost": round(daily_kwh * tariff, 2),
@@ -262,7 +269,7 @@ mod tests {
         assert_eq!(measured.cpu, 58.2);
         assert!(measured.measured_cpu);
         assert_eq!(
-            as_json(&measured, 0.0, DEFAULT_TARIFF, DEFAULT_CARBON)["confidence"],
+            as_json(&measured, 0.0, "", DEFAULT_TARIFF, DEFAULT_CARBON)["confidence"],
             json!("hybrid")
         );
         // A package sensor and a package power limit are different instruments, so
@@ -273,14 +280,14 @@ mod tests {
             ..base()
         });
         assert_eq!(
-            as_json(&both, 0.0, DEFAULT_TARIFF, DEFAULT_CARBON)["confidence"],
+            as_json(&both, 0.0, "", DEFAULT_TARIFF, DEFAULT_CARBON)["confidence"],
             json!("measured")
         );
         assert!(
-            as_json(&both, 0.0, DEFAULT_TARIFF, DEFAULT_CARBON)["confidenceScore"]
+            as_json(&both, 0.0, "", DEFAULT_TARIFF, DEFAULT_CARBON)["confidenceScore"]
                 .as_i64()
                 .unwrap()
-                > as_json(&measured, 0.0, DEFAULT_TARIFF, DEFAULT_CARBON)["confidenceScore"]
+                > as_json(&measured, 0.0, "", DEFAULT_TARIFF, DEFAULT_CARBON)["confidenceScore"]
                     .as_i64()
                     .unwrap()
         );
@@ -300,8 +307,8 @@ mod tests {
             measured_gpu_power: 142.0,
             gpu_power_limit: 220.0,
         });
-        let cheap = as_json(&estimate, 0.0, 0.10, 100.0);
-        let dear = as_json(&estimate, 0.0, 0.40, 800.0);
+        let cheap = as_json(&estimate, 0.0, "", 0.10, 100.0);
+        let dear = as_json(&estimate, 0.0, "", 0.40, 800.0);
         assert_eq!(cheap["tariffPerKwh"], json!(0.1));
         assert!(
             dear["dailyCost"].as_f64().unwrap() > cheap["dailyCost"].as_f64().unwrap() * 3.9,
@@ -315,7 +322,7 @@ mod tests {
         // field would be decoration.
         assert_ne!(
             cheap["dailyCarbonGrams"],
-            as_json(&estimate, 0.0, 0.10, DEFAULT_CARBON)["dailyCarbonGrams"]
+            as_json(&estimate, 0.0, "", 0.10, DEFAULT_CARBON)["dailyCarbonGrams"]
         );
     }
 }

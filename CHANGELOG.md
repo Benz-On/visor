@@ -7,6 +7,26 @@ Versioning while the product remains in beta.
 
 ### Added
 
+- Session continuity: the monitored energy total and the measured-throughput
+  history survive a restart. They are written to `session.json` in the
+  application data directory at most every 30 seconds (temporary file, fsync,
+  rename), restored on the next launch, and the energy panels now say
+  **since <date>** rather than "this session" when a session was carried over.
+  A record older than 30 days starts a fresh session instead of growing an
+  all-time counter nobody reset.
+- Sustained alerts keep a resolution history. When a condition that was active
+  returns below its threshold, VISOR records the peak it reached, when it
+  first exceeded and when it resolved — the six most recent, shown in the
+  Alerts view. Suppression starting or a sensor going away ends an episode
+  **without** inventing a resolution, and a short excursion that never
+  sustains leaves no peak behind for a later episode to inherit. The native
+  engine previously returned an always-empty list; it now produces the same
+  records as the development agent, which applies the same rules.
+- Alert-rule overrides persist. Disabling `CPU sustained load` or any other rule
+  survives a restart: the toggles are part of the settings store and are replayed
+  to the collector once at start-up. A rule switched off by hand never writes a
+  fake "resolution" into the history.
+
 - VISOR now behaves like a desktop application rather than a windowed web page.
   A native menu bar (File, View, Window) switches views with `Ctrl+1` to `Ctrl+9`,
   opens the command palette with `Ctrl+K` and Settings with `Ctrl+,`. A tray icon

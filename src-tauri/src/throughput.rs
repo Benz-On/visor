@@ -71,6 +71,74 @@ fn dedupe_recent(decode_tps: f64, tokens: u64) -> bool {
 }
 
 /// Session history as JSON for the inference monitor charts.
+/// The session file stores samples in the same shape `history_json` renders,
+/// so a restart restores exactly what the charts expect.
+pub fn export_samples() -> Vec<Value> {
+    let empty = VecDeque::new();
+    let history = history_store()
+        .lock()
+        .map(|guard| guard.clone())
+        .unwrap_or(empty);
+    history
+        .iter()
+        .map(|sample| {
+            json!({
+                "decodeTps": (sample.decode_tps * 100.0).round() / 100.0,
+                "prefillTps": (sample.prefill_tps * 100.0).round() / 100.0,
+                "tokens": sample.tokens,
+                "at": sample.epoch_ms,
+                "evidence": sample.evidence
+            })
+        })
+        .collect()
+}
+
+/// Restores samples written by a previous session. Unknown or malformed
+/// entries are skipped rather than imported, and the ring keeps its capacity.
+pub fn import_samples(samples: &[Value]) -> usize {
+    let mut restored = 0;
+    if let Ok(mut history) = history_store().lock() {
+        history.clear();
+        for sample in samples.iter().take(crate::session::MAX_SAMPLES) {
+            let decode = sample.get("decodeTps").and_then(Value::as_f64);
+            // Negative, non-finite rates or a missing timestamp cannot come
+            // from a sample this module recorded; a hand-edited file must not
+            // import them as measurements.
+            let Some(decode_tps) = decode else {
+                continue;
+            };
+            if !decode_tps.is_finite() || decode_tps < 0.0 {
+                continue;
+            }
+            let Some(epoch_ms) = sample.get("at").and_then(Value::as_u64) else {
+                continue;
+            };
+            let evidence = match sample.get("evidence").and_then(Value::as_str) {
+                Some("metrics-endpoint") => "metrics-endpoint",
+                _ => "runtime-log",
+            };
+            history.push_back(ThroughputSample {
+                decode_tps,
+                prefill_tps: sample
+                    .get("prefillTps")
+                    .and_then(Value::as_f64)
+                    .unwrap_or_default(),
+                tokens: sample
+                    .get("tokens")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default(),
+                epoch_ms,
+                evidence,
+            });
+            restored += 1;
+        }
+        while history.len() > HISTORY_CAPACITY {
+            history.pop_front();
+        }
+    }
+    restored
+}
+
 pub fn history_json() -> Value {
     let empty = VecDeque::new();
     let history = history_store()
@@ -889,6 +957,45 @@ slot print_timing: id  0 | task 1 | prompt eval time =   500.00 ms /   500 token
         let delta = metrics_delta(Some(&previous), &bursty).expect("burst delta");
         assert!((delta.decode_tokens_per_second.unwrap() - 400.0).abs() < 0.01);
         assert!(delta.prefill_tokens_per_second.is_none());
+    }
+
+    #[test]
+    fn export_import_round_trip_restores_the_same_samples() {
+        reset_measurement_state();
+        record_sample(ThroughputSample {
+            decode_tps: 41.25,
+            prefill_tps: 900.5,
+            tokens: 64,
+            epoch_ms: 1_700_000_000_000,
+            evidence: "runtime-log",
+        });
+        let exported = export_samples();
+        assert!(import_samples(&exported) >= 1);
+        let rendered = history_json();
+        let samples = rendered["samples"].as_array().expect("samples");
+        let last = samples
+            .iter()
+            .rev()
+            .find(|sample| sample["decodeTps"] == 41.25)
+            .expect("restored");
+        assert_eq!(last["at"], 1_700_000_000_000_u64);
+        reset_measurement_state();
+    }
+
+    #[test]
+    fn import_rejects_corrupt_entries() {
+        reset_measurement_state();
+        let poisoned = vec![
+            json!({ "decodeTps": -5.0, "at": 1 }),
+            json!({ "decodeTps": 3.0 }),
+            json!({ "at": 2 }),
+            json!({ "decodeTps": 7.5, "at": 3, "evidence": "runtime-log" }),
+        ];
+        assert_eq!(import_samples(&poisoned), 1);
+        let rendered = history_json();
+        assert_eq!(rendered["samples"].as_array().unwrap().len(), 1);
+        assert_eq!(rendered["samples"][0]["decodeTps"], 7.5);
+        reset_measurement_state();
     }
 
     #[test]

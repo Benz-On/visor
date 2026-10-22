@@ -316,6 +316,8 @@ export interface EnergyEstimate {
   cpuMeasured?: boolean;
   gpuMeasured?: boolean;
   sessionWh: number;
+  /** When the restored energy session began; null on a fresh session. */
+  sessionStartedAt?: string | null;
   hourlyKwh: number;
   dailyKwh: number;
   dailyCost: number;
