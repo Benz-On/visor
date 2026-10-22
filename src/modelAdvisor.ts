@@ -203,8 +203,14 @@ export function analyzeLocalModel(model: LocalModelInfo, hardware?: HardwareInfo
   const keyDim = model.kvKeyLength && model.kvKeyLength > 0 ? model.kvKeyLength : 128;
   const valueDim = model.kvValueLength && model.kvValueLength > 0 ? model.kvValueLength : keyDim;
   const headDimExact = Boolean(model.kvKeyLength && model.kvKeyLength > 0);
-  const kvBytesPerTokenExact = model.layers && model.kvHeads
-    ? model.layers * model.kvHeads * (keyDim + valueDim) * 2
+  // Layers that carry KV state. Hybrid-attention models (Qwen3.5-class, hybrid
+  // SSM/attention) hold KV only in their full-attention layers, so multiplying
+  // by the total block count would overstate the cache several times over.
+  const kvLayers = model.kvLayerCount && model.kvLayerCount > 0
+    ? model.kvLayerCount
+    : model.layers;
+  const kvBytesPerTokenExact = kvLayers && model.kvHeads
+    ? kvLayers * model.kvHeads * (keyDim + valueDim) * 2
     : null;
   const kvBytesPerToken = workload === 'embedding'
     ? 0
@@ -269,10 +275,11 @@ export function analyzeLocalModel(model: LocalModelInfo, hardware?: HardwareInfo
     const perLayerGb = exactWeightGb
       ? exactWeightGb / layersTotal
       : (perLayerWeightGb ?? 0);
-    // kvBytesPerTokenExact already spans every layer, so a per-layer figure must
-    // divide by the layer count. Dividing by two here inflated per-layer KV by
-    // layers/2 (16x at 32 layers, 32x at 64), which made every placement step
-    // report OVER on a model that actually fits.
+    // The per-layer KV figure spreads the total cache uniformly. For hybrid
+    // models that is an approximation — their KV lives in a subset of layers —
+    // but the architectures interleave attention layers, so a contiguous
+    // offload prefix captures a proportional share, and the 100% step stays
+    // exact. Per-layer placement data does not exist in the header.
     const kvPerLayerGb = kvCacheGb / layersTotal;
     offloadPlan = [1, .75, .5, .25].map((share) => {
       const layersOnGpu = Math.max(0, Math.round(layersTotal * share));

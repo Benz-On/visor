@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::Read;
+use std::io::{BufReader, Read};
 use std::path::Path;
 
 /// Minimal, fuzz-safe GGUF header reader.
@@ -18,6 +18,10 @@ pub struct GgufMeta {
     /// arrays (hybrid attention, where 0 marks linear-attention layers) both
     /// reduce to one defensible number; zero entries are excluded.
     pub head_count_kv: Option<f64>,
+    /// How many layers actually carry KV state. Hybrid-attention models keep
+    /// their KV only in full-attention layers, so multiplying by `block_count`
+    /// instead of this overstates the cache several times over.
+    pub kv_layer_count: Option<u64>,
     pub key_length: Option<u64>,
     pub value_length: Option<u64>,
     pub embedding_length: Option<u64>,
@@ -206,11 +210,14 @@ fn ggml_row_size(type_id: u32, elements: u64) -> Option<u64> {
 }
 
 pub fn probe(path: &Path) -> Option<GgufMeta> {
-    let mut file = File::open(path).ok()?;
+    let file = File::open(path).ok()?;
     let size = file.metadata().ok()?.len();
     if size < 32 {
         return None;
     }
+    // Tokenizer arrays mean hundreds of thousands of tiny reads per header;
+    // an unbuffered File would turn each one into a syscall.
+    let mut file = BufReader::new(file);
     let mut reader = Reader::new(&mut file, size.min(64 * 1024 * 1024));
     if reader.take(4)?.as_slice() != b"GGUF" {
         return None;
@@ -242,6 +249,12 @@ pub fn probe(path: &Path) -> Option<GgufMeta> {
     }
     if kv_seen == 0 {
         return None;
+    }
+    // GGUF key order is writer-dependent: a scalar head_count_kv that appeared
+    // before block_count left kv_layer_count unset above. Normalize once here
+    // so consumers of GgufMeta never depend on key order.
+    if meta.head_count_kv.is_some() && meta.kv_layer_count.is_none() {
+        meta.kv_layer_count = meta.block_count;
     }
 
     // Tensor table: name, dims, type, offset — sum exact byte sizes.
@@ -325,6 +338,7 @@ fn apply_kv(meta: &mut GgufMeta, key: &str, value: Value) {
                 .iter()
                 .fold(0_u64, |acc, value| acc.saturating_add(*value));
             meta.head_count_kv = Some(sum as f64 / active.len() as f64);
+            meta.kv_layer_count = Some(active.len() as u64);
         }
     }
 }
@@ -339,7 +353,12 @@ fn apply_unsigned(meta: &mut GgufMeta, key: &str, number: u64) {
                 meta.head_count = Some(number);
             }
         }
-        "head_count_kv" => meta.head_count_kv = Some(number as f64),
+        "head_count_kv" => {
+            meta.head_count_kv = Some(number as f64);
+            if meta.kv_layer_count.is_none() {
+                meta.kv_layer_count = meta.block_count;
+            }
+        }
         "key_length" => meta.key_length = Some(number),
         "value_length" => {
             if key.ends_with("attention.value_length") {
@@ -431,6 +450,9 @@ mod tests {
         assert_eq!(meta.block_count, Some(32));
         assert_eq!(meta.head_count, Some(16));
         assert_eq!(meta.head_count_kv, Some(6.0));
+        // Two nonzero entries in the per-layer array: exactly two layers
+        // carry KV state, which is what the advisor must multiply by.
+        assert_eq!(meta.kv_layer_count, Some(2));
         assert_eq!(meta.context_length, Some(262_144));
         assert_eq!(meta.expert_count, Some(128));
         assert_eq!(meta.expert_used_count, Some(8));
@@ -536,6 +558,22 @@ mod tests {
         // 1024 weights = 4 blocks of 256 x 144 bytes. The previous table
         // assumed ~1 byte per weight and reported 1024.
         assert_eq!(meta.tensor_bytes, Some(576));
+    }
+
+    #[test]
+    fn scalar_kv_heads_before_block_count_still_count_every_layer() {
+        // GGUF key order is writer-dependent; this header deliberately places
+        // head_count_kv before block_count to pin the post-parse fix.
+        let mut body: Vec<u8> = Vec::new();
+        body.extend_from_slice(&0_u64.to_le_bytes()); // tensors
+        body.extend_from_slice(&2_u64.to_le_bytes()); // kv count
+        kv_u32(&mut body, "qwen3.attention.head_count_kv", 8);
+        kv_u32(&mut body, "qwen3.block_count", 32);
+        let path = temp_gguf("order", &body);
+        let meta = probe(&path).expect("parses");
+        std::fs::remove_file(&path).ok();
+        assert_eq!(meta.head_count_kv, Some(8.0));
+        assert_eq!(meta.kv_layer_count, Some(32));
     }
 
     #[test]

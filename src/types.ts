@@ -78,9 +78,13 @@ export interface ProcessInfo {
   memory: number;
   memoryPercent?: number;
   workingSetBytes?: number;
-  privateBytes?: number;
+  /** Null when the detail probe has not produced a value; never a fake zero. */
+  privateBytes?: number | null;
   virtualBytes?: number;
   vram: number;
+  handles?: number | null;
+  threads?: number | null;
+  priority?: number | null;
   disk: number;
   diskRead?: number;
   diskWrite?: number;
@@ -91,11 +95,8 @@ export interface ProcessInfo {
   kind?: 'AI' | 'Game' | 'Creative';
   energyWatts?: number;
   protected?: boolean;
-  priority?: number;
   state?: string;
   path?: string;
-  handles?: number;
-  threads?: number;
   parentId?: number;
   command?: string;
   startedAt?: string | null;
@@ -179,6 +180,8 @@ export interface LocalModelInfo {
   parameterCountExact?: number;
   weightBytesExact?: number;
   kvHeads?: number | null;
+  /** Layers that actually carry KV state (hybrid attention carries it in only some). */
+  kvLayerCount?: number | null;
   /** Exact K head dimension from the GGUF header, when the blob was read. */
   kvKeyLength?: number | null;
   /** Exact V head dimension from the GGUF header, when the blob was read. */
