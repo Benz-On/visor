@@ -289,14 +289,7 @@ const DECODE_SECONDS: &[&str] = &[
 
 /// Fetches one runtime's `/metrics` and sums the counters this module needs.
 fn read_metrics_endpoint(url: &str, source: &'static str) -> Option<MetricsSnapshot> {
-    let mut text = String::new();
-    ureq::get(url)
-        .timeout(Duration::from_millis(800))
-        .call()
-        .ok()?
-        .into_reader()
-        .read_to_string(&mut text)
-        .ok()?;
+    let text = crate::http::get_text(url)?;
     let samples = parse_prometheus(&text);
     let prompt_tokens = counter_total(&samples, PROMPT_TOKENS)?;
     let predicted_tokens = counter_total(&samples, DECODE_TOKENS)?;

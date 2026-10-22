@@ -1,6 +1,6 @@
 [package]
 name = "visor"
-version = "0.9.4-beta.1"
+version = "0.9.5-beta.1"
 description = "VISOR premium local system monitor"
 authors = ["Benz Engineering"]
 edition = "2021"
@@ -30,7 +30,7 @@ tauri-plugin-notification = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-store = "2"
 tauri-plugin-window-state = "2"
-ureq = { version = "2.12", default-features = false, features = ["json"] }
+ureq = { version = "3.4", default-features = false, features = ["json"] }
 wait-timeout = "0.2"
 
 [profile.release]
